@@ -1,0 +1,7 @@
+[package]
+name = "checksum_helper_cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+checksum_helper = { path = "../checksum_helper" }
