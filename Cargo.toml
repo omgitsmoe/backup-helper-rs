@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "checksum_helper",
+    "checksum_helper_cli",
+]
