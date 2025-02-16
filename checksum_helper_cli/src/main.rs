@@ -1,9 +1,7 @@
 use checksum_helper;
 
-use std::process::Command;
 use std::path::Path;
 
-use std::io;
 use std::io::prelude::*;
 
 fn pause() {
@@ -23,10 +21,18 @@ fn main() {
     let now = Instant::now();
 
     let _gathered =
-        checksum_helper::gather::gather(&Path::new("L:\\"), |_| true);
+        checksum_helper::gather::gather(&Path::new("L:\\"), |_| true)
+        .unwrap();
 
     let elapsed = now.elapsed();
     println!("Elapsed: {:.2?}", elapsed);
-    // println!("{:?}", gathered.files);
-    pause();
+    println!("Items {}", _gathered.file_tree.len());
+    let mem_overhead =
+        std::mem::size_of::<checksum_helper::file_tree::Entry>()
+        * (_gathered.file_tree.cap() - _gathered.file_tree.len());
+    println!("MemOverhead {}", mem_overhead);
+    println!("{}", _gathered.file_tree);
+    // pause();
+    // vec 61 mb = 64126K - 1468192
+    // FT add 22 mb = 25664K - 2757744
 }

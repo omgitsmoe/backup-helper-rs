@@ -35,13 +35,12 @@ pub fn gather(start: &path::Path, include_fn: fn(&fs::DirEntry) -> bool) -> Resu
                     if include_fn(&e) {
                         if let Ok(file_type) = e.file_type() {
                             if file_type.is_dir() {
-                                let dirpath = e.path();
                                 let new_handle =
-                                    file_tree.add_child(&handle, dirpath.as_ref());
-                                directories.push((dirpath, new_handle));
+                                    file_tree.add_child(&handle, &e.file_name());
+                                directories.push((e.path(), new_handle));
                             } else {
                                 file_tree.add_child(
-                                    &handle, e.path().as_ref());
+                                    &handle, &e.file_name());
                             }
                         } else {
                             errors.push(format!("Failed to get file type for: {:?}", e.path()));

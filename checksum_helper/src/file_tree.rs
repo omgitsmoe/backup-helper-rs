@@ -121,6 +121,8 @@ impl FileTree {
     }
 
     pub fn add_child(&mut self, parent: &EntryHandle, child_name: &OsStr) -> EntryHandle {
+        // TODO child_name validation, must not contain path separators etc.
+        //      or use OsString as name
         self.nodes.push(Entry{
             name: child_name.into(),
             parent: Some(parent.clone()),
@@ -136,6 +138,10 @@ impl FileTree {
     pub fn root(&self) -> EntryHandle {
         EntryHandle{0: 0}
     }
+
+    pub fn len(&self) -> usize { self.nodes.len() }
+    // TODO remove
+    pub fn cap(&self) -> usize { self.nodes.capacity() }
 
     pub fn iter<'a>(&'a self) -> FileTreeIter<'a> {
         FileTreeIter{
