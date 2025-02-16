@@ -3,6 +3,7 @@ pub fn add(left: u64, right: u64) -> u64 {
 }
 
 pub mod gather;
+pub mod file_tree;
 
 #[cfg(test)]
 mod tests {
