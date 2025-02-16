@@ -1,21 +1,14 @@
 use std::path;
 use std::fs;
-use crate::file_tree::FileTree;
 
 #[derive(Debug)]
 pub struct GatherRes {
-    pub file_tree: FileTree,
+    pub files: Vec<path::PathBuf>,
     pub errors: Vec<String>,
 }
 
-#[derive(Debug)]
-pub enum Error {
-    FileTree(String),
-}
-
-pub fn gather(start: &path::Path, include_fn: fn(&fs::DirEntry) -> bool) -> Result<GatherRes, Error> {
-    let mut file_tree = FileTree::new(&start)
-        .map_err(|_| Error::FileTree("Failed to create file tree!".to_owned()))?;
+pub fn gather(start: &path::Path, include_fn: fn(&fs::DirEntry) -> bool) -> GatherRes {
+    let mut files = vec!();
     let mut errors = vec!();
     let mut directories = vec!(start.to_path_buf());
     while !directories.is_empty() {
@@ -36,8 +29,7 @@ pub fn gather(start: &path::Path, include_fn: fn(&fs::DirEntry) -> bool) -> Resu
                             if file_type.is_dir() {
                                 directories.push(e.path());
                             } else {
-                                file_tree.add(e.path().as_ref())
-                                    .expect("BUG: entry must be a subpath of start");
+                                files.push(e.path());
                             }
                         } else {
                             errors.push(format!("Failed to get file type for: {:?}", e.path()));
@@ -49,10 +41,10 @@ pub fn gather(start: &path::Path, include_fn: fn(&fs::DirEntry) -> bool) -> Resu
         }
     }
 
-    Ok(GatherRes {
-        file_tree,
+    GatherRes {
+        files,
         errors,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -60,8 +52,8 @@ mod test {
     use super::*;
     #[test]
     fn foo() {
-        assert!(gather(path::Path::new("."), |entry| {
+        println!("{:?}", gather(std::path::PathBuf::from(".").as_path(), |entry| {
             if entry.path().to_string_lossy().contains("src") { true } else { false }
-        }).is_ok());
+        }));
     }
 }
