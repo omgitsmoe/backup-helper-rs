@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::fmt::Display;
+use std::ffi::OsStr;
 
 #[derive(Clone, Debug)]
 pub struct FileTree {
@@ -119,6 +120,23 @@ impl FileTree {
         }
     }
 
+    pub fn add_child(&mut self, parent: &EntryHandle, child_name: &OsStr) -> EntryHandle {
+        self.nodes.push(Entry{
+            name: child_name.into(),
+            parent: Some(parent.clone()),
+            children: vec!(),
+        });
+        let index = self.nodes.len() - 1;
+
+        self.nodes[parent.0].children.push(EntryHandle{0: index});
+
+        EntryHandle{0: index}
+    }
+
+    pub fn root(&self) -> EntryHandle {
+        EntryHandle{0: 0}
+    }
+
     pub fn iter<'a>(&'a self) -> FileTreeIter<'a> {
         FileTreeIter{
             file_tree: self,
@@ -171,6 +189,7 @@ impl <'a>Iterator for FileTreeIter<'a> {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct EntryHandle(usize);
 
+// TODO is_dir
 #[derive(Debug, Clone)]
 pub struct Entry {
     name: PathBuf,
