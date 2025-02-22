@@ -41,6 +41,7 @@ impl FileTree {
         Ok(FileTree {
             nodes: vec!(Entry{
                 name: root.as_ref().into(),
+                is_directory: true,
                 parent: None,
                 children: vec!(),
             }),
@@ -95,7 +96,7 @@ impl FileTree {
         Some(EntryHandle{0: current})
     }
 
-    pub fn add(&mut self, path: &Path) -> Result<EntryHandle, ErrorKind> {
+    pub fn add(&mut self, path: &Path, is_directory: bool) -> Result<EntryHandle, ErrorKind> {
         if let Some(last_existing) = self.find_last_existing(path) {
             let prefix = self.path(&last_existing);
             let remaining = path.strip_prefix(prefix)
@@ -104,6 +105,7 @@ impl FileTree {
             for component_name in remaining {
                 self.nodes.push(Entry{
                     name: component_name.into(),
+                    is_directory: true,
                     parent: Some(current_parent.clone()),
                     children: vec!(),
                 });
@@ -114,17 +116,18 @@ impl FileTree {
                 current_parent = EntryHandle{0: index};
             }
 
+            self.nodes[current_parent.0].is_directory = is_directory;
             Ok(current_parent)
         } else {
             Err(ErrorKind::NotASubpathOfFileTreeRoot)
         }
     }
 
-    pub fn add_child(&mut self, parent: &EntryHandle, child_name: &OsStr) -> EntryHandle {
+    pub fn add_child(&mut self, parent: &EntryHandle, child_name: &OsStr, is_directory: bool) -> EntryHandle {
         // TODO child_name validation, must not contain path separators etc.
-        //      or use OsString as name
         self.nodes.push(Entry{
             name: child_name.into(),
+            is_directory,
             parent: Some(parent.clone()),
             children: vec!(),
         });
@@ -155,7 +158,11 @@ impl Display for FileTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "FileTree{{\n")?;
         for entry_handle in self.iter() {
-            write!(f, "  {:?}\n", self.path(&entry_handle))?;
+            // NOTE: debug formatting {:?} will use escaping if chars would
+            //       need it in a string literal,
+            //       use .display directly, which is lossy if the path
+            //       is not valid unicode
+            write!(f, "  {}\n", self.path(&entry_handle).display())?;
         }
         write!(f, "}}")
     }
@@ -182,10 +189,15 @@ impl <'a>Iterator for FileTreeIter<'a> {
 
             self.stack.push((curr.0, curr.1 + 1));
             if !child_entry.children.is_empty() {
+                assert!(child_entry.is_directory, "Has children, but is_directory is false");
                 self.stack.push((child.clone(), 0));
             }
 
-            return Some(child)
+            if child_entry.is_directory {
+                continue;
+            } else {
+                return Some(child)
+            }
         }
 
         None
@@ -199,6 +211,7 @@ pub struct EntryHandle(usize);
 #[derive(Debug, Clone)]
 pub struct Entry {
     name: PathBuf,
+    is_directory: bool,
     parent: Option<EntryHandle>,
     children: Vec<EntryHandle>,
 }
@@ -249,7 +262,7 @@ mod test {
     fn test_add() {
         let mut ft = FileTree::new(&Path::new("/tmp/foo/")).unwrap();
         let txt_path = Path::new("/tmp/foo/bar/baz/file.txt");
-        let txt = ft.add(txt_path).unwrap();
+        let txt = ft.add(txt_path, false).unwrap();
         assert_eq!(ft.path(&txt), txt_path);
         let txt_entry = ft.entry(&txt);
         assert_eq!(txt_entry.name, Path::new("file.txt"));
@@ -262,9 +275,10 @@ mod test {
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 1);
         assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("/tmp/foo/bar")).unwrap());
+        assert!(baz_entry.is_directory);
 
         let mov_path = Path::new("/tmp/foo/bar/baz/mov.mp4");
-        let mov = ft.add(mov_path).unwrap();
+        let mov = ft.add(mov_path, false).unwrap();
         assert_eq!(ft.path(&mov), mov_path);
         let mov_entry = ft.entry(&mov);
         assert_eq!(mov_entry.name, Path::new("mov.mp4"));
@@ -274,9 +288,10 @@ mod test {
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 2);
         assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("/tmp/foo/bar")).unwrap());
+        assert!(baz_entry.is_directory);
 
         let bin_path = Path::new("/tmp/foo/bar/file.bin");
-        let bin = ft.add(bin_path).unwrap();
+        let bin = ft.add(bin_path, false).unwrap();
         assert_eq!(ft.path(&bin), bin_path);
         let bin_entry = ft.entry(&bin);
         assert_eq!(bin_entry.name, Path::new("file.bin"));
