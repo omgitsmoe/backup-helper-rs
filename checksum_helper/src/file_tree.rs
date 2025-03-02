@@ -152,6 +152,10 @@ impl FileTree {
             stack: vec!((EntryHandle{0: 0}, 0)),
         }
     }
+
+    pub fn to_hashed_file(&self, file: &EntryHandle) -> crate::hashed_file::File {
+        crate::hashed_file::File::new(self, file)
+    }
 }
 
 impl Display for FileTree {

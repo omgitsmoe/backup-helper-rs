@@ -4,6 +4,7 @@ pub fn add(left: u64, right: u64) -> u64 {
 
 pub mod gather;
 pub mod file_tree;
+pub mod hashed_file;
 
 #[cfg(test)]
 mod tests {

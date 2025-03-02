@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+filetime = "0.2.25"
+hashes = "0.1.9"
 
 [dev-dependencies]
 testdir = "0.9.3"
