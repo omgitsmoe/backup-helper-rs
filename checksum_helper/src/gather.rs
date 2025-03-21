@@ -4,6 +4,7 @@ use crate::file_tree::FileTree;
 
 #[derive(Debug)]
 pub struct GatherRes {
+    pub root: path::PathBuf,
     pub file_tree: FileTree,
     pub errors: Vec<String>,
 }
@@ -14,8 +15,7 @@ pub enum Error {
 }
 
 pub fn gather(start: &path::Path, include_fn: fn(&fs::DirEntry) -> bool) -> Result<GatherRes, Error> {
-    let mut file_tree = FileTree::new(&start)
-        .map_err(|_| Error::FileTree("Failed to create file tree!".to_owned()))?;
+    let mut file_tree = FileTree::new();
     let mut errors = vec!();
     let mut directories =
         vec!((start.to_path_buf(), file_tree.root()));
@@ -54,6 +54,7 @@ pub fn gather(start: &path::Path, include_fn: fn(&fs::DirEntry) -> bool) -> Resu
     }
 
     Ok(GatherRes {
+        root: start.to_path_buf(),
         file_tree,
         errors,
     })
@@ -140,10 +141,9 @@ mod test {
     }
 
     fn to_file_list(ft: FileTree) -> String {
-        let root_path = ft.path(&ft.root());
         format!("{}", ft)
-             // remove test_path prefix + additional separator
-            .replace(&format!("{}", &root_path.join("").display()), "")
+            // remove test_path prefix + additional separator
+            // .replace(&format!("{}", &root_path.join("").display()), "")
             // always use / as separator
             .replace('\\', "/")
     }

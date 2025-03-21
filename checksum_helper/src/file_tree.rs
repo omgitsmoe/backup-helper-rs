@@ -33,27 +33,24 @@ impl FileTree {
     /// `root` is not canonicalized by this method, since otherwise
     /// we could not represent roots that do not currently exist on the
     /// system
-    pub fn new(root: &impl AsRef<Path>) -> Result<FileTree, ErrorKind> {
-        if !is_valid(root) {
-            return Err(ErrorKind::PathNotValid);
-        }
-
-        Ok(FileTree {
+    pub fn new() -> FileTree {
+        FileTree {
             nodes: vec!(Entry{
-                name: root.as_ref().into(),
+                name: PathBuf::new(),
                 is_directory: true,
                 parent: None,
                 children: vec!(),
             }),
-        })
+        }
     }
 
     pub fn entry(&self, entry: &EntryHandle) -> Entry {
         self.nodes[entry.0].clone()
     }
 
-    pub fn path(&self, entry: &EntryHandle) -> PathBuf {
+    pub fn relative_path(&self, entry: &EntryHandle) -> PathBuf {
         let mut p = &self.nodes[entry.0];
+        // TODO store handles not pathbufs
         let mut entries = vec!(&p.name);
         while let Some(ph) = &p.parent {
             let parent = &self.nodes[ph.0];
@@ -69,14 +66,15 @@ impl FileTree {
     /// Find the last existing node that is involved in `path`.
     /// Returns None if `path` is not a subpath of the file tree's root
     fn find_last_existing(&self, path: &Path) -> Option<EntryHandle> {
-        let root = &self.nodes[0].name;
-        if !path.starts_with(root) {
-            return None;
-        }
+        assert!(path.is_relative(), "Only relative paths are allowed!");
 
         let mut current = 0 as usize;
-        for component_name in path.strip_prefix(root)
-                .expect("BUG: `path` must have root as prefix").iter() {
+        for component_name in path.iter() {
+            if component_name == "." {
+                continue
+            }
+            assert!(component_name != "..", "Path must not contain pardir elements!");
+
             let entry = &self.nodes[current];
             let mut found = false;
             for child_handle in &entry.children {
@@ -97,8 +95,10 @@ impl FileTree {
     }
 
     pub fn add(&mut self, path: &Path, is_directory: bool) -> Result<EntryHandle, ErrorKind> {
+        assert!(path.is_relative(), "Only relative paths are allowed!");
+
         if let Some(last_existing) = self.find_last_existing(path) {
-            let prefix = self.path(&last_existing);
+            let prefix = self.relative_path(&last_existing);
             let remaining = path.strip_prefix(prefix)
                 .expect("BUG: path must be prefixed by the path of the last existing node");
             let mut current_parent = last_existing;
@@ -166,7 +166,7 @@ impl Display for FileTree {
             //       need it in a string literal,
             //       use .display directly, which is lossy if the path
             //       is not valid unicode
-            write!(f, "  {}\n", self.path(&entry_handle).display())?;
+            write!(f, "  {}\n", self.relative_path(&entry_handle).display())?;
         }
         write!(f, "}}")
     }
@@ -246,44 +246,43 @@ mod test {
     }
 
     #[test]
-    fn test_new_uncanonical_path() {
-        assert_eq!(FileTree::new(&Path::new("/tmp/../other")).err().unwrap(), ErrorKind::PathNotValid);
-        assert_eq!(FileTree::new(&Path::new("/tmp/./other")).err().unwrap(), ErrorKind::PathNotValid);
-        assert_eq!(FileTree::new(&Path::new("/tmp/other/../foo")).err().unwrap(), ErrorKind::PathNotValid);
-        unsafe {
-            assert_eq!(FileTree::new(&Path::new(&OsStr::from_encoded_bytes_unchecked(b"\x80\xb8\xff"))).err().unwrap(), ErrorKind::PathNotValid);
-        }
+    fn test_foo() {
+        std::ffi::OsString::from("./;hello:");
     }
 
     #[test]
-    fn test_new_canonical_path() {
-        assert!(FileTree::new(&Path::new("/tmp/foo/bar/baz/file.txt")).is_ok());
-        assert!(FileTree::new(&Path::new("/tmp/.hidden/other")).is_ok());
-        assert!(FileTree::new(&Path::new("/tmp/..other/foo")).is_ok());
+    #[should_panic]
+    fn test_add_panic_on_absoulte_path() {
+        let mut ft = FileTree::new();
+        // NOTE: `is_absolute` is platform dependent, so e.g. `/tmp` is
+        //       not absolute on Windows
+        let txt_path = std::env::current_dir().unwrap().join("foo/bar/baz/file.txt");
+        let _ = ft.add(&txt_path, false);
     }
 
     #[test]
     fn test_add() {
-        let mut ft = FileTree::new(&Path::new("/tmp/foo/")).unwrap();
-        let txt_path = Path::new("/tmp/foo/bar/baz/file.txt");
+        let mut ft = FileTree::new();
+        let txt_path = Path::new("bar/baz/file.txt");
         let txt = ft.add(txt_path, false).unwrap();
-        assert_eq!(ft.path(&txt), txt_path);
+        assert_eq!(ft.relative_path(&txt), txt_path);
         let txt_entry = ft.entry(&txt);
         assert_eq!(txt_entry.name, Path::new("file.txt"));
         assert!(txt_entry.children.is_empty());
         assert_eq!(ft.find_last_existing(&txt_path).unwrap(), txt);
 
-        let baz = ft.find_last_existing(Path::new("/tmp/foo/bar/baz")).unwrap();
+        dbg!("now");
+        let baz = ft.find_last_existing(Path::new("./bar/baz")).unwrap();
         assert_eq!(txt_entry.parent.unwrap(), baz);
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 1);
-        assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("/tmp/foo/bar")).unwrap());
+        assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("bar")).unwrap());
         assert!(baz_entry.is_directory);
 
-        let mov_path = Path::new("/tmp/foo/bar/baz/mov.mp4");
+        let mov_path = Path::new("bar/baz/mov.mp4");
         let mov = ft.add(mov_path, false).unwrap();
-        assert_eq!(ft.path(&mov), mov_path);
+        assert_eq!(ft.relative_path(&mov), mov_path);
         let mov_entry = ft.entry(&mov);
         assert_eq!(mov_entry.name, Path::new("mov.mp4"));
         assert_eq!(ft.find_last_existing(&mov_path).unwrap(), mov);
@@ -291,12 +290,12 @@ mod test {
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 2);
-        assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("/tmp/foo/bar")).unwrap());
+        assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("bar")).unwrap());
         assert!(baz_entry.is_directory);
 
-        let bin_path = Path::new("/tmp/foo/bar/file.bin");
+        let bin_path = Path::new("bar/file.bin");
         let bin = ft.add(bin_path, false).unwrap();
-        assert_eq!(ft.path(&bin), bin_path);
+        assert_eq!(ft.relative_path(&bin), bin_path);
         let bin_entry = ft.entry(&bin);
         assert_eq!(bin_entry.name, Path::new("file.bin"));
         assert_eq!(ft.find_last_existing(&bin_path).unwrap(), bin);

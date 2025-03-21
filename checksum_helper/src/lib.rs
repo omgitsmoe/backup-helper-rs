@@ -1,13 +1,15 @@
 use std::path;
 use crate::collection::HashCollection;
+use crate::file_tree::FileTree;
 
 pub mod gather;
-pub mod file_tree;
+mod file_tree;
 pub mod hashed_file;
 pub mod collection;
 
 pub struct ChecksumHelper<'a> {
     root: path::PathBuf,
+    file_tree: FileTree,
     gathered_hash_files: bool,
     most_current: HashCollection<'a>,
 }
@@ -25,11 +27,14 @@ impl<'a> ChecksumHelper<'a> {
             gathered_hash_files: false,
             most_current: HashCollection::new(&root.join("most_current"))
                 .expect("the path <root>/most_current should be a valid file path"),
+            file_tree: FileTree::new(),
         }
     }
 
     // TODO should this modify most_current?
-    pub fn incremental<'b>(&mut self) -> HashCollection<'b> {}
+    pub fn incremental<'b>(&mut self) -> HashCollection<'b> {
+        todo!();
+    }
     pub fn update_most_current(&mut self) {}
 }
 

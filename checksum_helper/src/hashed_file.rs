@@ -77,12 +77,12 @@ impl<'a> File<'a> {
         }
     }
 
-    fn path(&self) -> path::PathBuf {
-        self.context.path(&self.file.path)
+    fn relative_path(&self) -> path::PathBuf {
+        self.context.relative_path(&self.file.path)
     }
 
-    fn fetch_mtime(&mut self) -> Result<FileTime> {
-        let path = self.path();
+    fn fetch_mtime(&mut self, root: &path::Path) -> Result<FileTime> {
+        let path = root.join(self.relative_path());
         let metadata = std::fs::metadata(path)
             .map_err(|e| HashedFileError::IOError(e))?;
         Ok(FileTime::from_last_modification_time(&metadata))
@@ -98,9 +98,9 @@ impl<'a> File<'a> {
 
     fn mtime_to_disk(
         &mut self,
-        file_tree: &FileTree,
+        root: &path::Path,
     ) -> Result<()> {
-        let path = self.path();
+        let path = root.join(self.relative_path());
         filetime::set_file_mtime(path, self.file.mtime.ok_or(HashedFileError::MissingMTime)?)
             .map_err(|e| HashedFileError::IOError(e))
     }
