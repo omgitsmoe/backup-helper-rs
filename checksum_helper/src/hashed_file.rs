@@ -53,7 +53,7 @@ struct FileRaw {
 }
 
 impl FileRaw {
-    fn new(filename: EntryHandle) -> Self {
+    pub(crate) fn new(filename: EntryHandle) -> Self {
         Self {
             path: filename,
             mtime: None,
@@ -62,37 +62,8 @@ impl FileRaw {
             hash_bytes: vec![],
         }
     }
-
-    fn path(&self, file_tree: &FileTree) -> path::PathBuf {
-        file_tree.path(&self.path)
-    }
-
-    fn fetch_mtime(&mut self, file_tree: &FileTree) -> Result<FileTime> {
-        let path = self.path(file_tree);
-        let metadata = std::fs::metadata(path)
-            .map_err(|e| HashedFileError::IOError(e))?;
-        Ok(FileTime::from_last_modification_time(&metadata))
-    }
-
-    fn mtime(&self) -> Option<FileTime> {
-        self.mtime
-    }
-
-    fn update_mtime(&mut self, mtime: Option<FileTime>) {
-        self.mtime = mtime
-    }
-
-    fn mtime_to_disk(
-        &mut self,
-        file_tree: &FileTree,
-    ) -> Result<()> {
-        let path = self.path(file_tree);
-        filetime::set_file_mtime(path, self.mtime.ok_or(HashedFileError::MissingMTime)?)
-            .map_err(|e| HashedFileError::IOError(e))
-    }
 }
 
-// TODO only give out this and rename above to FileRaw or sth.?
 pub struct File<'a> {
     file: FileRaw,
     context: &'a FileTree,
@@ -105,4 +76,38 @@ impl<'a> File<'a> {
             context,
         }
     }
+
+    fn path(&self) -> path::PathBuf {
+        self.context.path(&self.file.path)
+    }
+
+    fn fetch_mtime(&mut self) -> Result<FileTime> {
+        let path = self.path();
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| HashedFileError::IOError(e))?;
+        Ok(FileTime::from_last_modification_time(&metadata))
+    }
+
+    fn mtime(&self) -> Option<FileTime> {
+        self.file.mtime
+    }
+
+    fn update_mtime(&mut self, mtime: Option<FileTime>) {
+        self.file.mtime = mtime
+    }
+
+    fn mtime_to_disk(
+        &mut self,
+        file_tree: &FileTree,
+    ) -> Result<()> {
+        let path = self.path();
+        filetime::set_file_mtime(path, self.file.mtime.ok_or(HashedFileError::MissingMTime)?)
+            .map_err(|e| HashedFileError::IOError(e))
+    }
+
+    fn size(self) -> Option<usize> { self.file.size }
+
+    fn hash_type(self) -> &'static str { self.file.hash_type }
+
+    fn hash_bytes(self) -> Vec<u8> { self.file.hash_bytes }
 }

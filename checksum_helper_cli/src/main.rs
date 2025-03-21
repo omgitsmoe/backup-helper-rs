@@ -17,22 +17,27 @@ fn pause() {
 }
 
 fn main() {
-    use std::time::Instant;
-    let now = Instant::now();
+    // use std::time::Instant;
+    // let now = Instant::now();
 
-    let _gathered =
-        checksum_helper::gather::gather(&Path::new("L:\\"), |_| true)
-        .unwrap();
+    // let _gathered =
+    //     checksum_helper::gather::gather(&Path::new("L:\\"), |_| true)
+    //     .unwrap();
 
-    let elapsed = now.elapsed();
-    println!("Elapsed: {:.2?}", elapsed);
-    println!("Items {}", _gathered.file_tree.len());
-    let mem_overhead =
-        std::mem::size_of::<checksum_helper::file_tree::Entry>()
-        * (_gathered.file_tree.cap() - _gathered.file_tree.len());
-    println!("MemOverhead {}", mem_overhead);
-    println!("{}", _gathered.file_tree);
-    // pause();
-    // vec 61 mb = 64126K - 1468192
-    // FT add 22 mb = 25664K - 2757744
+    // let elapsed = now.elapsed();
+    // println!("Elapsed: {:.2?}", elapsed);
+    // println!("Items {}", _gathered.file_tree.len());
+    // let mem_overhead =
+    //     std::mem::size_of::<checksum_helper::file_tree::Entry>()
+    //     * (_gathered.file_tree.cap() - _gathered.file_tree.len());
+    // println!("MemOverhead {}", mem_overhead);
+    // println!("{}", _gathered.file_tree);
+    // // pause();
+    // // vec 61 mb = 64126K - 1468192
+    // // FT add 22 mb = 25664K - 2757744
+
+    let mut ch = checksum_helper::ChecksumHelper::new(
+        &Path::new("L:\\"));
+    let inc = ch.incremental();
+    inc.write(&Path::new("hash.cshd"));
 }
