@@ -25,7 +25,7 @@ impl<'a> ChecksumHelper<'a> {
         ChecksumHelper {
             root: root.to_path_buf(),
             gathered_hash_files: false,
-            most_current: HashCollection::new(&root.join("most_current"))
+            most_current: HashCollection::new(None::<&&str>)
                 .expect("the path <root>/most_current should be a valid file path"),
             file_tree: FileTree::new(),
         }
@@ -35,7 +35,9 @@ impl<'a> ChecksumHelper<'a> {
     pub fn incremental<'b>(&mut self) -> HashCollection<'b> {
         todo!();
     }
-    pub fn update_most_current(&mut self) {}
+    pub fn update_most_current(&mut self) {
+        todo!();
+    }
 }
 
 #[cfg(test)]

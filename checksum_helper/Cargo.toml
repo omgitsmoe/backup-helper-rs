@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 filetime = "0.2.25"
 hashes = "0.1.9"
+hex = "0.4.3"
+log = "0.4.26"
 
 [dev-dependencies]
 testdir = "0.9.3"
