@@ -16,17 +16,14 @@ use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, HashCollectionError>;
 
-pub struct HashCollection<'a> {
+pub struct HashCollection {
     root_dir: Option<PathBuf>,
     name: Option<OsString>,
     map: HashMap<EntryHandle, FileRaw>,
-    // NOTE: we need to mark that we are only valid as long as 'a,
-    //       since our EntryHandles depend on the FileTree
-    phantom: PhantomData<&'a Self>,
 }
 
-impl<'a> HashCollection<'a> {
-    pub fn new(path: Option<&impl AsRef<Path>>) -> Result<HashCollection<'a>> {
+impl HashCollection {
+    pub fn new(path: Option<&impl AsRef<Path>>) -> Result<HashCollection> {
         Ok(HashCollection {
             map: HashMap::new(),
             name: match path {
@@ -47,11 +44,10 @@ impl<'a> HashCollection<'a> {
                 ),
                 None => None,
             },
-            phantom: PhantomData,
         })
     }
 
-    pub fn from_str(str: &str, file_tree: &mut FileTree) -> Result<HashCollection<'a>> {
+    pub fn from_str(str: &str, file_tree: &mut FileTree) -> Result<HashCollection> {
         let trimmed = str.trim();
         let version = Self::parse_version_header(trimmed)?;
 

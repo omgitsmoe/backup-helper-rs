@@ -9,7 +9,7 @@ use std::error::Error;
 type Result<T> = std::result::Result<T, HashedFileError>;
 
 #[derive(Debug)]
-enum HashedFileError {
+pub enum HashedFileError {
     MissingMTime,
     // wrap io::Error
     IOError(std::io::Error),

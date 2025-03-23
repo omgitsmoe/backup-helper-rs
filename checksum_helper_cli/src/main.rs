@@ -37,7 +37,14 @@ fn main() {
     // // FT add 22 mb = 25664K - 2757744
 
     let mut ch = checksum_helper::ChecksumHelper::new(
-        &Path::new("L:\\"));
-    let inc = ch.incremental();
-    inc.write(&Path::new("hash.cshd"));
+        std::env::current_dir().as_ref().unwrap());
+    let discover = ch.discover_hash_files(None).unwrap();
+    for p in discover.hash_file_paths {
+        println!("Found {:?}", p);
+    }
+    for e in discover.errors {
+        println!("ERR: {:?}", e);
+    }
+    // let inc = ch.incremental();
+    // inc.write(&Path::new("hash.cshd"));
 }

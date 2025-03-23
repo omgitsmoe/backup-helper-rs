@@ -11,3 +11,4 @@ log = "0.4.26"
 
 [dev-dependencies]
 testdir = "0.9.3"
+pretty_assertions = "1.4"
