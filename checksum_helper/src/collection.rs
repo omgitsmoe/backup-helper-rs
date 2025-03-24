@@ -6,12 +6,10 @@ use log::{debug, error, info, warn};
 
 use std::cmp::{Eq, PartialEq};
 use std::collections::HashMap;
-use std::convert::Into;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
-use std::hash::Hash;
-use std::marker::PhantomData;
+use std::io::{self, BufRead, Cursor};
 use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, HashCollectionError>;
@@ -48,75 +46,117 @@ impl HashCollection {
     }
 
     pub fn from_str(str: &str, file_tree: &mut FileTree) -> Result<HashCollection> {
-        let trimmed = str.trim();
-        let version = Self::parse_version_header(trimmed)?;
+        Self::parse(Cursor::new(str), file_tree)
+    }
 
+    pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashCollection> {
+        let mut lines = reader.lines();
         let mut result =
             HashCollection::new(None::<&&str>).expect("should always succeed without root");
         let mut warned_above_hash_file = false;
-        for line in trimmed.lines() {
-            if line.starts_with('#') {
-                continue;
+
+        let version = match &lines.next() {
+            Some(Ok(line)) => {
+                let (found, version) = Self::parse_version_header(&line)?;
+                if !found {
+                    // no header line found, parse the line
+                    Self::parse_line(
+                        &line,
+                        file_tree,
+                        version,
+                        &mut warned_above_hash_file,
+                        &mut result,
+                    )?;
+                }
+                version
             }
+            Some(Err(e)) => return Err(HashCollectionError::IOError(e.kind())),
+            None => return Err(HashCollectionError::InvalidVersionHeader(String::new())),
+        };
 
-            let (mtime, rest) = Self::parse_mtime(line)?;
-            let (size, rest) = if version > 0 {
-                Self::parse_size(rest)?
-            } else {
-                (None, rest)
-            };
-
-            let (hash_type, hash_bytes, file_path) = Self::parse_hash(rest)?;
-
-            if !warned_above_hash_file && is_path_above_hash_file(file_path) {
-                warn!(
-                    "Found a file path going beyond the hash file's directory. \
-                     This is strongly discouraged, as it makes the hash file \
-                     not portable! Path: {}",
-                    file_path
-                );
-                warned_above_hash_file = true;
-            }
-
-            let path_handle = match file_tree.add(Path::new(file_path), false) {
-                Ok(path_handle) => path_handle,
-                Err(e) => return Err(HashCollectionError::FileTreeError(e)),
-            };
-
-            if let Some(old) = result.map.insert(
-                path_handle.clone(),
-                FileRaw::new(path_handle, Some(mtime), size, hash_type, hash_bytes),
-            ) {
-                error!(
-                    "Duplicate file path: {}",
-                    old.relative_path(file_tree).display()
-                );
+        for line in lines {
+            match line {
+                Ok(line) => Self::parse_line(
+                    &line,
+                    file_tree,
+                    version,
+                    &mut warned_above_hash_file,
+                    &mut result,
+                )?,
+                Err(e) => return Err(HashCollectionError::IOError(e.kind())),
             };
         }
 
         Ok(result)
     }
 
-    fn parse_version_header(str: &str) -> Result<u64> {
-        if str.starts_with("# version ") {
-            let version_start = str
+    fn parse_line(
+        line: &str,
+        file_tree: &mut FileTree,
+        version: u32,
+        warned_above_hash_file: &mut bool,
+        result: &mut HashCollection,
+    ) -> Result<()> {
+        if line.starts_with('#') {
+            return Ok(());
+        }
+
+        let (mtime, rest) = Self::parse_mtime(line)?;
+        let (size, rest) = if version > 0 {
+            Self::parse_size(rest)?
+        } else {
+            (None, rest)
+        };
+
+        let (hash_type, hash_bytes, file_path) = Self::parse_hash(rest)?;
+
+        if !*warned_above_hash_file && is_path_above_hash_file(file_path) {
+            warn!(
+                "Found a file path going beyond the hash file's directory. \
+                This is strongly discouraged, as it makes the hash file \
+                not portable! Path: {}",
+                file_path
+            );
+            *warned_above_hash_file = true;
+        }
+
+        let path_handle = match file_tree.add(Path::new(file_path), false) {
+            Ok(path_handle) => path_handle,
+            Err(e) => return Err(HashCollectionError::FileTreeError(e)),
+        };
+
+        if let Some(old) = result.map.insert(
+            path_handle.clone(),
+            FileRaw::new(path_handle, Some(mtime), size, hash_type, hash_bytes),
+        ) {
+            error!(
+                "Duplicate file path: {}",
+                old.relative_path(file_tree).display()
+            );
+        };
+
+        Ok(())
+    }
+
+    fn parse_version_header(line: &str) -> Result<(bool, u32)> {
+        if line.starts_with("# version ") {
+            let version_start = line
                 .strip_prefix("# version ")
                 .expect("must not fail, was checked above");
-            let Some(line_end) = version_start.find('\n') else {
-                error!("Missing new line after version header: {}", version_start);
-                return Err(HashCollectionError::InvalidVersionHeader);
-            };
-            let version_str = version_start.split_at(line_end).0.trim();
+            let version_str = version_start.trim();
 
-            Ok(version_str.parse::<u64>().map_err(|_| {
-                error!(
-                    "Malformed version number, expected an usigned integer, got {}",
-                    version_str
-                );
-                HashCollectionError::InvalidHashLine((version_str.to_owned(), String::new()))
-            })?)
+            Ok((
+                true,
+                version_str.parse::<u32>().map_err(|_| {
+                    error!(
+                        "Malformed version number, expected an usigned integer, got {}",
+                        version_str
+                    );
+                    HashCollectionError::InvalidVersionHeader(version_str.to_owned())
+                })?,
+            ))
         } else {
-            Ok(0)
+            Ok((false, 0))
         }
     }
 
@@ -236,11 +276,12 @@ fn is_path_above_hash_file(path: &str) -> bool {
 #[derive(Debug, Eq, PartialEq)]
 pub enum HashCollectionError {
     InvalidPath(PathBuf),
-    InvalidVersionHeader,
+    InvalidVersionHeader(String),
     InvalidHashLine((String, String)),
     AbsolutePath(String),
     FileTreeError(ErrorKind),
     UnsupportedHashType(String),
+    IOError(std::io::ErrorKind),
 }
 
 impl fmt::Display for HashCollectionError {
@@ -250,11 +291,14 @@ impl fmt::Display for HashCollectionError {
             HashCollectionError::InvalidHashLine((ref current, ref rest)) => {
                 write!(f, "invalid hash line: current {} rest {}", current, rest)
             }
-            HashCollectionError::InvalidVersionHeader => write!(f, "invalid version header"),
+            HashCollectionError::InvalidVersionHeader(ref l) => write!(f, "invalid version header: {}", l),
             HashCollectionError::AbsolutePath(ref p) => write!(f, "absolute path found: {}", p),
             HashCollectionError::FileTreeError(ref p) => write!(f, "file tree error: {:?}", p),
             HashCollectionError::UnsupportedHashType(ref t) => {
                 write!(f, "unsupported hash type: {}", t)
+            }
+            HashCollectionError::IOError(ref e) => {
+                write!(f, "io error: {}", e)
             }
         }
     }
@@ -386,46 +430,46 @@ mod test {
 
     #[test]
     fn test_parse_version_header_no_version() {
-        assert_eq!(HashCollection::parse_version_header("").unwrap(), 0);
+        assert_eq!(
+            HashCollection::parse_version_header("").unwrap(),
+            (false, 0)
+        );
         assert_eq!(
             HashCollection::parse_version_header("# ver foo").unwrap(),
-            0
+            (false, 0)
         );
-        assert_eq!(HashCollection::parse_version_header("# foo").unwrap(), 0);
+        assert_eq!(
+            HashCollection::parse_version_header("# foo").unwrap(),
+            (false, 0)
+        );
     }
 
     #[test]
     fn test_parse_version_header_with_version() {
         assert_eq!(
             HashCollection::parse_version_header("# version 1\n").unwrap(),
-            1
+            (true, 1)
         );
         assert_eq!(
             HashCollection::parse_version_header("# version 1337\n").unwrap(),
-            1337
+            (true, 1337)
         );
         assert_eq!(
             HashCollection::parse_version_header("# version    1337    \n").unwrap(),
-            1337
+            (true, 1337)
         );
     }
 
     #[test]
     fn test_parse_version_header_error_cases() {
-        // missing new line
-        assert_eq!(
-            HashCollection::parse_version_header("# version 1"),
-            Err(HashCollectionError::InvalidVersionHeader)
-        );
-
         // malformed version number
         assert_eq!(
             HashCollection::parse_version_header("# version foo"),
-            Err(HashCollectionError::InvalidVersionHeader)
+            Err(HashCollectionError::InvalidVersionHeader("foo".to_string()))
         );
         assert_eq!(
             HashCollection::parse_version_header("# version 13.37"),
-            Err(HashCollectionError::InvalidVersionHeader)
+            Err(HashCollectionError::InvalidVersionHeader("13.37".to_string()))
         );
     }
 }
