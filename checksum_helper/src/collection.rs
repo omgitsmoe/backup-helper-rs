@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, BufRead, Cursor};
+use std::io::{self, BufRead, Cursor, Write};
 use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, HashCollectionError>;
@@ -45,10 +45,24 @@ impl HashCollection {
         })
     }
 
+    pub fn update(&mut self, path_handle: EntryHandle, hashed_file: FileRaw) {
+        self.map.insert(path_handle, hashed_file);
+    }
+
+    pub fn get(&mut self, path_handle: &EntryHandle) -> Option<&FileRaw> {
+        self.map.get(path_handle)
+    }
+
+    pub fn get_mut(&mut self, path_handle: &EntryHandle) -> Option<&mut FileRaw> {
+        self.map.get_mut(path_handle)
+    }
+
     pub fn from_str(str: &str, file_tree: &mut FileTree) -> Result<HashCollection> {
         Self::parse(Cursor::new(str), file_tree)
     }
 
+    // TODO from single hash file with hash_type as parameter
+    // TODO separate parser that just has a feed/feed_line method -> more flexible?
     pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashCollection> {
         let mut lines = reader.lines();
         let mut result =
@@ -71,7 +85,8 @@ impl HashCollection {
                 version
             }
             Some(Err(e)) => return Err(HashCollectionError::IOError(e.kind())),
-            None => return Err(HashCollectionError::InvalidVersionHeader(String::new())),
+            // no error, but there was no line -> empty string
+            None => return Ok(result),
         };
 
         for line in lines {
@@ -98,6 +113,10 @@ impl HashCollection {
         result: &mut HashCollection,
     ) -> Result<()> {
         if line.starts_with('#') {
+            return Ok(());
+        }
+
+        if line.trim().is_empty() {
             return Ok(());
         }
 
@@ -160,6 +179,7 @@ impl HashCollection {
         }
     }
 
+    // TODO accept empty string and return None
     fn parse_mtime(str: &str) -> Result<(filetime::FileTime, &str)> {
         let Some((mtime, rest)) = str.split_once(',') else {
             error!(
@@ -187,6 +207,7 @@ impl HashCollection {
         Ok((mtime, rest))
     }
 
+    // TODO accept empty string and return None
     fn parse_size(str: &str) -> Result<(Option<u64>, &str)> {
         let (size_str, after_size) =
             str.split_once(',')
@@ -249,8 +270,78 @@ impl HashCollection {
         Ok((hash_type, hash_bytes, file_path))
     }
 
+    const VERSION_HEADER: &str = "# version 1\n";
+    // TODO: flush-able hash collection
+    pub fn serialize<W: Write>(&self, writer: &mut W, file_tree: &FileTree) -> Result<()> {
+        writer.write_all(Self::VERSION_HEADER.as_bytes())?;
+        for (path_handle, hashed_file) in &self.map {
+            Self::serialize_entry(writer, path_handle, &hashed_file, file_tree)?;
+        }
+        Ok(())
+    }
+
+    fn serialize_entry<W: Write>(
+        writer: &mut W,
+        path_handle: &EntryHandle,
+        hashed_file: &FileRaw,
+        file_tree: &FileTree,
+    ) -> Result<()> {
+        let path = file_tree.relative_path(&path_handle);
+        let Some(path) = path.to_str() else {
+            return Err(HashCollectionError::NonUnicodePath(path));
+        };
+        let path = path.replace("\\", "/");
+        let mtime = hashed_file.mtime_str().unwrap_or("".to_string());
+        let size = match hashed_file.size() {
+            Some(size) => size.to_string(),
+            None => String::from(""),
+        };
+        let hash_type = hashed_file.hash_type().to_string();
+        let hash_hex = hex::encode(hashed_file.hash_bytes());
+
+        write!(writer, "{mtime},{size},{hash_type},{hash_hex} {path}\n")?;
+
+        Ok(())
+    }
+
     pub fn write(&self, path: &Path) -> Result<()> {
         todo!();
+    }
+
+    pub fn sort_serialized(serialized: &str) -> Option<String> {
+        let mut header = Vec::new();
+        let mut iter = serialized.lines();
+        let mut lines = Vec::new();
+
+        // Collect header lines manually, ensuring the first non-header line is not consumed
+        let mut in_header = true;
+        while let Some(line) = iter.next() {
+            if in_header && !line.starts_with('#') {
+                // Push the first non-header line back by prepending it to the iterator
+                in_header = false;
+            }
+
+            if in_header {
+                header.push(line);
+            } else {
+                lines.push(line.split_once(' ').map(|parts| (line, parts))?)
+            }
+        }
+        lines.sort_by(|a, b| a.1 .1.cmp(b.1 .1));
+        let mut result = header
+            .iter()
+            .chain(lines.iter().map(|(line, _)| line))
+            // NOTE: @Perf avoid extra intermediate vec and add directly to a string
+            .fold(String::new(), |mut acc, &line| {
+                if !acc.is_empty() {
+                    acc.push('\n'); // Manually add newline instead of join()
+                }
+                acc.push_str(line);
+                acc
+            });
+        // enforce trailing newline
+        result.push('\n');
+        Some(result)
     }
 }
 
@@ -282,6 +373,7 @@ pub enum HashCollectionError {
     FileTreeError(ErrorKind),
     UnsupportedHashType(String),
     IOError(std::io::ErrorKind),
+    NonUnicodePath(PathBuf),
 }
 
 impl fmt::Display for HashCollectionError {
@@ -291,7 +383,9 @@ impl fmt::Display for HashCollectionError {
             HashCollectionError::InvalidHashLine((ref current, ref rest)) => {
                 write!(f, "invalid hash line: current {} rest {}", current, rest)
             }
-            HashCollectionError::InvalidVersionHeader(ref l) => write!(f, "invalid version header: {}", l),
+            HashCollectionError::InvalidVersionHeader(ref l) => {
+                write!(f, "invalid version header: {}", l)
+            }
             HashCollectionError::AbsolutePath(ref p) => write!(f, "absolute path found: {}", p),
             HashCollectionError::FileTreeError(ref p) => write!(f, "file tree error: {:?}", p),
             HashCollectionError::UnsupportedHashType(ref t) => {
@@ -299,6 +393,9 @@ impl fmt::Display for HashCollectionError {
             }
             HashCollectionError::IOError(ref e) => {
                 write!(f, "io error: {}", e)
+            }
+            HashCollectionError::NonUnicodePath(ref e) => {
+                write!(f, "non-unicode path error: {:?}", e)
             }
         }
     }
@@ -310,6 +407,12 @@ impl Error for HashCollectionError {
         match *self {
             _ => None,
         }
+    }
+}
+
+impl From<std::io::Error> for HashCollectionError {
+    fn from(value: std::io::Error) -> Self {
+        HashCollectionError::IOError(value.kind())
     }
 }
 
@@ -341,6 +444,26 @@ mod test {
         format!("{}", ft)
             // always use / as separator
             .replace('\\', "/")
+    }
+
+    #[test]
+    fn test_from_str_line_handles_empty_string() {
+        let mut ft = FileTree::new();
+        assert!(HashCollection::from_str(
+            "",
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .is_ok()
+        );
+
+        assert!(HashCollection::from_str(
+            "\n",
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .is_ok()
+        );
     }
 
     #[test]
@@ -469,7 +592,105 @@ mod test {
         );
         assert_eq!(
             HashCollection::parse_version_header("# version 13.37"),
-            Err(HashCollectionError::InvalidVersionHeader("13.37".to_string()))
+            Err(HashCollectionError::InvalidVersionHeader(
+                "13.37".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_serialize_entry() {
+        let mut ft = FileTree::new();
+        let mut buf = vec![];
+        let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
+        let file = FileRaw::new(
+            path_handle.clone(),
+            Some(filetime::FileTime::from_unix_time(1337, 1_337_000)),
+            Some(1337),
+            HashType::Sha512,
+            vec![0xde, 0xad, 0xbe, 0xef],
+        );
+
+        HashCollection::serialize_entry(&mut buf, &path_handle, &file, &ft).unwrap();
+
+        let result = std::str::from_utf8(&buf).unwrap();
+
+        assert_eq!(result, "1337.001337,1337,sha512,deadbeef foo/bar/baz.txt\n",);
+    }
+
+    #[test]
+    fn test_serialize_entry_missing_mtime_and_size() {
+        let mut ft = FileTree::new();
+        let mut buf = vec![];
+        let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
+        let file = FileRaw::new(
+            path_handle.clone(),
+            None,
+            None,
+            HashType::Blake2s,
+            vec![0xab, 0xcd, 0xef, 0x09],
+        );
+
+        HashCollection::serialize_entry(&mut buf, &path_handle, &file, &ft).unwrap();
+
+        let result = std::str::from_utf8(&buf).unwrap();
+
+        assert_eq!(result, ",,blake2s,abcdef09 foo/bar/baz.txt\n",);
+    }
+
+    #[test]
+    fn test_serialize() {
+        let mut ft = FileTree::new();
+        let mut buf = vec![];
+
+        let mut hc = HashCollection::new(None::<&&str>).unwrap();
+        let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1337, 1_337_000)),
+                Some(1337),
+                HashType::Sha512,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+
+        let path_handle = ft.add_file("bar/foo.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1212, 0)),
+                None,
+                HashType::Md5,
+                vec![0xaa, 0xbb, 0xcc, 0xdd],
+            ),
+        );
+
+        let path_handle = ft.add_file("./xer.mp4").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                None,
+                Some(4206969),
+                HashType::Sha3_512,
+                vec![0xee, 0xff, 0x00, 0x11],
+            ),
+        );
+
+        hc.serialize(&mut buf, &ft).unwrap();
+
+        let result = HashCollection::sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
+        assert_eq!(
+            result,
+            // NOTE: sorted by path
+            "\
+# version 1
+1212,,md5,aabbccdd bar/foo.txt
+1337.001337,1337,sha512,deadbeef foo/bar/baz.txt
+,4206969,sha3_512,eeff0011 xer.mp4\n",
         );
     }
 }

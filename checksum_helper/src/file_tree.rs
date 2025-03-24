@@ -129,6 +129,14 @@ impl FileTree {
         }
     }
 
+    pub fn add_file(&mut self, path: impl AsRef<Path>) -> Result<EntryHandle, ErrorKind> {
+        self.add(path, false)
+    }
+
+    pub fn add_directory(&mut self, path: impl AsRef<Path>) -> Result<EntryHandle, ErrorKind> {
+        self.add(path, true)
+    }
+
     pub fn add(&mut self, path: impl AsRef<Path>, is_directory: bool) -> Result<EntryHandle, ErrorKind> {
         let path = path.as_ref();
         assert!(path.is_relative(), "Only relative paths are allowed!");

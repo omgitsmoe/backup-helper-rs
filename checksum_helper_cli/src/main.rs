@@ -36,15 +36,19 @@ fn main() {
     // // vec 61 mb = 64126K - 1468192
     // // FT add 22 mb = 25664K - 2757744
 
-    let mut ch = checksum_helper::ChecksumHelper::new(
-        std::env::current_dir().as_ref().unwrap());
-    let discover = ch.discover_hash_files(None).unwrap();
-    for p in discover.hash_file_paths {
-        println!("Found {:?}", p);
-    }
-    for e in discover.errors {
-        println!("ERR: {:?}", e);
-    }
+    // let mut ch = checksum_helper::ChecksumHelper::new(
+    //     std::env::current_dir().as_ref().unwrap());
+    // let discover = ch.discover_hash_files(None).unwrap();
+    // for p in discover.hash_file_paths {
+    //     println!("Found {:?}", p);
+    // }
+    // for e in discover.errors {
+    //     println!("ERR: {:?}", e);
+    // }
     // let inc = ch.incremental();
     // inc.write(&Path::new("hash.cshd"));
+    let ser = std::fs::read_to_string("obsidian_2024-09-28.cshd").unwrap();
+    let sorted = checksum_helper::collection::HashCollection::sort_serialized(&ser).unwrap();
+    println!("{}", sorted);
+    std::hint::black_box(sorted);
 }
