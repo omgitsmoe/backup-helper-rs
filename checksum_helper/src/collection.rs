@@ -146,7 +146,7 @@ impl HashCollection {
 
         if let Some(old) = result.map.insert(
             path_handle.clone(),
-            FileRaw::new(path_handle, Some(mtime), size, hash_type, hash_bytes),
+            FileRaw::new(path_handle, mtime, size, hash_type, hash_bytes),
         ) {
             error!(
                 "Duplicate file path: {}",
@@ -179,8 +179,7 @@ impl HashCollection {
         }
     }
 
-    // TODO accept empty string and return None
-    fn parse_mtime(str: &str) -> Result<(filetime::FileTime, &str)> {
+    fn parse_mtime(str: &str) -> Result<(Option<filetime::FileTime>, &str)> {
         let Some((mtime, rest)) = str.split_once(',') else {
             error!(
                 "Expected ',' delimeter after modification time field, got '{}'",
@@ -191,6 +190,10 @@ impl HashCollection {
                 String::new(),
             )));
         };
+        let mtime = mtime.trim();
+        if mtime.is_empty() {
+            return Ok((None, rest));
+        }
         let Ok(mtime) = mtime.parse::<f64>() else {
             error!("Failed to parse modification time string: {}", mtime);
             return Err(HashCollectionError::InvalidHashLine((
@@ -204,10 +207,9 @@ impl HashCollection {
         let nanoseconds = (mtime.fract() * NS_PER_SEC) as u32;
         let mtime = filetime::FileTime::from_unix_time(seconds, nanoseconds);
 
-        Ok((mtime, rest))
+        Ok((Some(mtime), rest))
     }
 
-    // TODO accept empty string and return None
     fn parse_size(str: &str) -> Result<(Option<u64>, &str)> {
         let (size_str, after_size) =
             str.split_once(',')
@@ -215,6 +217,10 @@ impl HashCollection {
                     str.to_owned(),
                     String::new(),
                 )))?;
+        let size_str = size_str.trim();
+        if size_str.is_empty() {
+            return Ok((None, after_size));
+        }
 
         Ok((
             Some(size_str.parse::<u64>().map_err(|_| {
@@ -419,6 +425,7 @@ impl From<std::io::Error> for HashCollectionError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use filetime::FileTime;
 
     #[test]
     fn test_path_above_hash_file() {
@@ -480,6 +487,7 @@ mod test {
 # version 1
 {},{},{},{} {}
 0,1337,md5,abcdef foo/bar/baz
+,,sha3_256,abcdefff foo/xer.mp4
 \
         ",
                 mtime,
@@ -501,11 +509,20 @@ mod test {
         assert_eq!(hf.hash_type(), hash_type);
         assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
 
+        let key = ft.find("foo/xer.mp4").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), HashType::Sha3_256);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
         assert_eq!(
             to_file_list(ft),
             "FileTree{
   .gitignore
   foo/bar/baz
+  foo/xer.mp4
 }"
         );
     }
@@ -521,7 +538,8 @@ mod test {
             &format!(
                 "\
 {},{},{} {}
-0,md5,abcdef foo/bar/baz
+0,md5,abcdefff foo/bar/baz
+,sha3_256,abcdefff foo/xer.mp4
 \
         ",
                 mtime,
@@ -542,11 +560,20 @@ mod test {
         assert_eq!(hf.hash_type(), hash_type);
         assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
 
+        let key = ft.find("foo/xer.mp4").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), HashType::Sha3_256);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
         assert_eq!(
             to_file_list(ft),
             "FileTree{
   .gitignore
   foo/bar/baz
+  foo/xer.mp4
 }"
         );
     }
@@ -595,6 +622,56 @@ mod test {
             Err(HashCollectionError::InvalidVersionHeader(
                 "13.37".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn test_parse_mtime_empty() {
+        assert_eq!(
+            HashCollection::parse_mtime(",foo,bar"),
+            Ok((None, "foo,bar"))
+        );
+        assert_eq!(
+            HashCollection::parse_mtime("   ,foo,bar"),
+            Ok((None, "foo,bar"))
+        );
+    }
+
+    // TODO: error cases
+    #[test]
+    fn test_parse_mtime() {
+        assert_eq!(
+            HashCollection::parse_mtime("1337,foo,bar"),
+            Ok((Some(FileTime::from_unix_time(1337, 0)), "foo,bar"))
+        );
+        assert_eq!(
+            HashCollection::parse_mtime("   1337.00133     ,foo,bar"),
+            Ok((Some(FileTime::from_unix_time(1337, 1_330_000)), "foo,bar"))
+        );
+    }
+
+    #[test]
+    fn test_parse_size_empty() {
+        assert_eq!(
+            HashCollection::parse_size(",foo,bar"),
+            Ok((None, "foo,bar"))
+        );
+        assert_eq!(
+            HashCollection::parse_size("   ,foo,bar"),
+            Ok((None, "foo,bar"))
+        );
+    }
+
+    // TODO: error cases
+    #[test]
+    fn test_parse_size() {
+        assert_eq!(
+            HashCollection::parse_size("42069,foo,bar"),
+            Ok((Some(42069), "foo,bar"))
+        );
+        assert_eq!(
+            HashCollection::parse_size("   1337   ,foo,bar"),
+            Ok((Some(1337), "foo,bar"))
         );
     }
 
