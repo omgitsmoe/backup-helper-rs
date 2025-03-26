@@ -31,7 +31,7 @@ pub struct ChecksumHelper {
     root: path::PathBuf,
     file_tree: FileTree,
     gathered_hash_files: bool,
-    most_current: HashCollection,
+    most_current: Option<HashCollection>,
 }
 
 pub struct DiscoverResult {
@@ -39,13 +39,17 @@ pub struct DiscoverResult {
     pub errors: Vec<String>,
 }
 
+// TODO options
+// - include_unchanged_files_incremental
+// - discover_hash_files_depth
+// - incremental_skip_unchanged
+// - allow/block list
 impl ChecksumHelper {
     pub fn new(root: &path::Path) -> ChecksumHelper {
         ChecksumHelper {
             root: root.to_path_buf(),
             gathered_hash_files: false,
-            most_current: HashCollection::new(None::<&&str>)
-                .expect("the path <root>/most_current should be a valid file path"),
+            most_current: None,
             file_tree: FileTree::new(),
         }
     }
@@ -54,8 +58,26 @@ impl ChecksumHelper {
         todo!();
     }
 
+    pub fn fill_missing(&mut self) -> &HashCollection {
+        todo!("find files that don't have a checksum in most current yet and generat them")
+    }
+
+    pub fn check_missing(self) -> Result<path::PathBuf> {
+        // TODO optionally with filter?
+        todo!("find files that don't have a checksum in most current yet and list them")
+    }
+
     pub fn update_most_current(&mut self) {
         todo!();
+    }
+
+    // TODO copy as well?
+    fn move_collection() {
+        todo!("move a hash collection; relocating paths, but preserving mtime of the collection")
+    }
+
+    pub fn move_path() {
+        todo!("move files modifying their relative paths in disocovered collections, calling move_collection if it's a collection")
     }
 
     pub fn discover_hash_files(&self, max_depth: Option<u32>) -> Result<DiscoverResult> {

@@ -25,8 +25,12 @@ pub struct HashCollection {
     // TODO just change this to a String?
     name: Option<OsString>,
     map: HashMap<EntryHandle, FileRaw>,
+    // TODO needs mtime
+    // TODO provide restore_mtime method, so afer relocate + write
+    //      one can reset it when nothing else has changed
 }
 
+// TODO verify method
 impl HashCollection {
     pub fn new(path: Option<&impl AsRef<Path>>) -> Result<HashCollection> {
         Ok(HashCollection {
@@ -52,7 +56,7 @@ impl HashCollection {
         })
     }
 
-    pub fn relocate(&mut self, root_dir: &Path) -> Result<()> {
+    pub fn relocate(&mut self, root_dir: &Path, file_tree: &mut FileTree) -> Result<()> {
         match self.root_dir {
             None => self.root_dir = Some(root_dir.to_path_buf()),
             Some(ref old_root) => {
@@ -86,17 +90,34 @@ impl HashCollection {
 
     pub fn from_disk(path: &Path, file_tree: &mut FileTree) -> Result<HashCollection> {
         let file = fs::File::open(path)?;
+        let root = path
+            .parent()
+            .ok_or_else(|| HashCollectionError::InvalidPath(path.to_owned()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| HashCollectionError::InvalidPath(path.to_owned()))?;
         let reader = BufReader::new(file);
 
         let extension = path
             .extension()
             .ok_or_else(|| HashCollectionError::InvalidExtension(OsString::new()))?;
-        if extension == OsStr::new("cshd") {
+        let result = if extension == OsStr::new("cshd") {
             parser::parse(reader, file_tree)
         } else {
             let hash_type = HashType::try_from(extension)
                 .map_err(|_| HashCollectionError::InvalidExtension(extension.to_os_string()))?;
             parser::parse_single_hash(reader, hash_type, file_tree)
+        };
+
+        match result {
+            Ok(mut hc) => {
+                hc.relocate(root, file_tree)
+                    .expect("must succeed, since root_dir should be None");
+                hc.rename(file_name);
+
+                Ok(hc)
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -121,6 +142,34 @@ impl HashCollection {
         let file = fs::File::create_new(full_path)?;
         let mut buf_writer = std::io::BufWriter::new(file);
         self.serialize(&mut buf_writer, file_tree)
+    }
+
+    pub fn flush(&mut self, file_tree: &FileTree) -> Result<()> {
+        todo!("flushes the current entries to disk")
+    }
+
+    /// Merges all entries in `other` into `self`
+    pub fn merge(&mut self, mut other: Self, file_tree: &mut FileTree) -> Result<()> {
+        if self.root_dir.is_none() || other.root_dir.is_none() {
+            return Err(HashCollectionError::MissingPathInMerge((
+                self.root_dir.clone(),
+                other.root_dir,
+            )));
+        }
+
+        // make the paths relative to our root_dir
+        other.relocate(self.root_dir.as_ref().expect("checked above"), file_tree)?;
+
+        for (path_handle, theirs) in other.map {
+            match self.map.get_mut(&path_handle) {
+                Some(ours) => {}
+                None => {
+                    self.map.insert(path_handle, theirs);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -152,6 +201,7 @@ pub enum HashCollectionError {
     InvalidExtension(OsString),
     AbsolutePath(String),
     MissingPath((Option<PathBuf>, Option<OsString>)),
+    MissingPathInMerge((Option<PathBuf>, Option<PathBuf>)),
     FileTreeError(ErrorKind),
     UnsupportedHashType(String),
     IOError(std::io::ErrorKind),
@@ -172,7 +222,11 @@ impl fmt::Display for HashCollectionError {
                 write!(f, "invalid version header: {}", l)
             }
             HashCollectionError::InvalidExtension(ref l) => {
-                write!(f, "invalid extension '{:?}', expected 'cshd' or the name of a known hash type", l)
+                write!(
+                    f,
+                    "invalid extension '{:?}', expected 'cshd' or the name of a known hash type",
+                    l
+                )
             }
             HashCollectionError::AbsolutePath(ref p) => write!(f, "absolute path found: {}", p),
             HashCollectionError::FileTreeError(ref p) => write!(f, "file tree error: {:?}", p),
@@ -190,6 +244,13 @@ impl fmt::Display for HashCollectionError {
                     f,
                     "missing hash file collection path: root {:?} name {:?}",
                     root, name
+                )
+            }
+            HashCollectionError::MissingPathInMerge((ref ours, ref theirs)) => {
+                write!(
+                    f,
+                    "can't merge with a missing root path: ours {:?} theirs {:?}",
+                    ours, theirs
                 )
             }
         }
@@ -309,8 +370,8 @@ mod test {
     fn test_write() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
-        let (mut hc, ft, expected_serialization) = setup_minimal_hc();
-        hc.relocate(&testdir).unwrap();
+        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc();
+        hc.relocate(&testdir, &mut ft).unwrap();
         hc.rename(&OsString::from("foo.cshd"));
 
         hc.write(&ft).unwrap();
@@ -327,14 +388,15 @@ mod test {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
         let (mut hc, mut ft, _) = setup_minimal_hc();
-        hc.relocate(&testdir).unwrap();
+        hc.relocate(&testdir, &mut ft).unwrap();
         hc.rename(&OsString::from("foo.cshd"));
 
         hc.write(&ft).unwrap();
         let expected_len = ft.len();
 
-        let actual = HashCollection::from_disk(&path, &mut ft)
-            .unwrap();
+        let actual = HashCollection::from_disk(&path, &mut ft).unwrap();
+        assert_eq!(actual.root_dir, Some(testdir));
+        assert_eq!(actual.name.unwrap(), path.file_name().unwrap());
         assert_eq!(ft.len(), expected_len);
 
         for (ph, f) in actual.map {
@@ -358,18 +420,19 @@ mod test {
         let hash_type = HashType::Sha512;
         let path = testdir.join(format!("foo.{}", hash_type.to_str()));
         let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
-        let single_hash = format!("\
+        let single_hash = format!(
+            "\
 {} .gitignore
 abcdefff foo/bar/baz
 abcdefff foo/xer.mp4
 \
-        ", hash_hex);
+        ",
+            hash_hex
+        );
         fs::write(&path, single_hash).unwrap();
         let mut ft = FileTree::new();
 
-        let hc = HashCollection::from_disk(
-            &path, &mut ft)
-            .unwrap();
+        let hc = HashCollection::from_disk(&path, &mut ft).unwrap();
 
         let key = ft.find(".gitignore").unwrap();
         let hf = &hc.map[&key];

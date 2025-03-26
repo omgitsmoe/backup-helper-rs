@@ -7,6 +7,9 @@ use hex;
 
 use std::io::Write;
 
+// TODO serialze as single hash file, otherwise we can't move them without
+//      converting to .cshd
+
 const VERSION_HEADER: &str = "# version 1\n";
 pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tree: &FileTree) -> Result<()> {
     writer.write_all(VERSION_HEADER.as_bytes())?;
