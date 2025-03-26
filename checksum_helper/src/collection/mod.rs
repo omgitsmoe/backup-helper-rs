@@ -1,15 +1,16 @@
 use crate::file_tree::{EntryHandle, ErrorKind, FileTree};
-use crate::hashed_file::FileRaw;
+use crate::hashed_file::{FileRaw, HashType};
 
 use log::{debug, error, info, warn};
 
 use std::cmp::{Eq, PartialEq};
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::{BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 
 mod parser;
@@ -63,6 +64,7 @@ impl HashCollection {
     }
 
     pub fn rename(&mut self, name: &OsStr) {
+        // TODO check extension?
         self.name = Some(name.to_owned());
     }
 
@@ -80,6 +82,22 @@ impl HashCollection {
 
     pub fn from_str(str: &str, file_tree: &mut FileTree) -> Result<HashCollection> {
         parser::parse(Cursor::new(str), file_tree)
+    }
+
+    pub fn from_disk(path: &Path, file_tree: &mut FileTree) -> Result<HashCollection> {
+        let file = fs::File::open(path)?;
+        let reader = BufReader::new(file);
+
+        let extension = path
+            .extension()
+            .ok_or_else(|| HashCollectionError::InvalidExtension(OsString::new()))?;
+        if extension == OsStr::new("cshd") {
+            parser::parse(reader, file_tree)
+        } else {
+            let hash_type = HashType::try_from(extension)
+                .map_err(|_| HashCollectionError::InvalidExtension(extension.to_os_string()))?;
+            parser::parse_single_hash(reader, hash_type, file_tree)
+        }
     }
 
     // TODO: flush-able hash collection
@@ -130,6 +148,8 @@ pub enum HashCollectionError {
     InvalidPath(PathBuf),
     InvalidVersionHeader(String),
     InvalidHashLine((String, String)),
+    InvalidSingleHashLine((String, String)),
+    InvalidExtension(OsString),
     AbsolutePath(String),
     MissingPath((Option<PathBuf>, Option<OsString>)),
     FileTreeError(ErrorKind),
@@ -145,8 +165,14 @@ impl fmt::Display for HashCollectionError {
             HashCollectionError::InvalidHashLine((ref current, ref rest)) => {
                 write!(f, "invalid hash line: current {} rest {}", current, rest)
             }
+            HashCollectionError::InvalidSingleHashLine((ref current, ref rest)) => {
+                write!(f, "invalid single hash line! expected '<hash_hex> <path>', got: current {} rest {}", current, rest)
+            }
             HashCollectionError::InvalidVersionHeader(ref l) => {
                 write!(f, "invalid version header: {}", l)
+            }
+            HashCollectionError::InvalidExtension(ref l) => {
+                write!(f, "invalid extension '{:?}', expected 'cshd' or the name of a known hash type", l)
             }
             HashCollectionError::AbsolutePath(ref p) => write!(f, "absolute path found: {}", p),
             HashCollectionError::FileTreeError(ref p) => write!(f, "file tree error: {:?}", p),
@@ -187,8 +213,8 @@ impl From<std::io::Error> for HashCollectionError {
 
 #[cfg(test)]
 mod test {
-    use crate::hashed_file::HashType;
     use super::*;
+    use crate::hashed_file::HashType;
     use crate::test_utils::*;
     use pretty_assertions::assert_eq;
 
@@ -212,123 +238,6 @@ mod test {
         assert!(!is_path_above_hash_file("./foo/././baz/.."));
     }
 
-    #[test]
-    fn test_from_str_line_handles_empty_string() {
-        let mut ft = FileTree::new();
-        assert!(HashCollection::from_str("", &mut ft,)
-            .inspect_err(|e| println!("{}", e))
-            .is_ok());
-
-        assert!(HashCollection::from_str("\n", &mut ft,)
-            .inspect_err(|e| println!("{}", e))
-            .is_ok());
-    }
-
-    #[test]
-    fn test_from_str_line_version_1() {
-        let mut ft = FileTree::new();
-        let mtime = "1673815645.7979772";
-        let size = 1337;
-        let hash_type = HashType::Sha512;
-        let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
-        let file_path = ".gitignore";
-        let hc = HashCollection::from_str(
-            &format!(
-                "\
-# version 1
-{},{},{},{} {}
-0,1337,md5,abcdef foo/bar/baz
-,,sha3_256,abcdefff foo/xer.mp4
-\
-        ",
-                mtime,
-                size,
-                hash_type.to_str(),
-                hash_hex,
-                file_path
-            ),
-            &mut ft,
-        )
-        .inspect_err(|e| println!("{}", e))
-        .unwrap();
-
-        let key = ft.find(".gitignore").unwrap();
-        let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new(file_path));
-        assert_eq!(hf.mtime_str(), Some(mtime.to_owned()));
-        assert_eq!(hf.size(), Some(size));
-        assert_eq!(hf.hash_type(), hash_type);
-        assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
-
-        let key = ft.find("foo/xer.mp4").unwrap();
-        let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
-        assert_eq!(hf.mtime_str(), None);
-        assert_eq!(hf.size(), None);
-        assert_eq!(hf.hash_type(), HashType::Sha3_256);
-        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
-
-        assert_eq!(
-            to_file_list(ft),
-            "FileTree{
-  .gitignore
-  foo/bar/baz
-  foo/xer.mp4
-}"
-        );
-    }
-
-    #[test]
-    fn test_from_str_line_version_0() {
-        let mut ft = FileTree::new();
-        let mtime = "1673815645.7979772";
-        let hash_type = HashType::Sha512;
-        let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
-        let file_path = ".gitignore";
-        let hc = HashCollection::from_str(
-            &format!(
-                "\
-{},{},{} {}
-0,md5,abcdefff foo/bar/baz
-,sha3_256,abcdefff foo/xer.mp4
-\
-        ",
-                mtime,
-                hash_type.to_str(),
-                hash_hex,
-                file_path
-            ),
-            &mut ft,
-        )
-        .inspect_err(|e| println!("{}", e))
-        .unwrap();
-
-        let key = ft.find(".gitignore").unwrap();
-        let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new(file_path));
-        assert_eq!(hf.mtime_str(), Some(mtime.to_owned()));
-        assert_eq!(hf.size(), None);
-        assert_eq!(hf.hash_type(), hash_type);
-        assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
-
-        let key = ft.find("foo/xer.mp4").unwrap();
-        let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
-        assert_eq!(hf.mtime_str(), None);
-        assert_eq!(hf.size(), None);
-        assert_eq!(hf.hash_type(), HashType::Sha3_256);
-        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
-
-        assert_eq!(
-            to_file_list(ft),
-            "FileTree{
-  .gitignore
-  foo/bar/baz
-  foo/xer.mp4
-}"
-        );
-    }
-
     pub fn setup_minimal_hc() -> (HashCollection, FileTree, &'static str) {
         let mut ft = FileTree::new();
 
@@ -338,7 +247,7 @@ mod test {
             path_handle.clone(),
             FileRaw::new(
                 path_handle.clone(),
-                Some(filetime::FileTime::from_unix_time(1337, 1_337_000)),
+                Some(filetime::FileTime::from_unix_time(1337, 1_330_000)),
                 Some(1337),
                 HashType::Sha512,
                 vec![0xde, 0xad, 0xbe, 0xef],
@@ -372,7 +281,7 @@ mod test {
         let expected_serialization_sorted = "\
 # version 1
 1212,,md5,aabbccdd bar/foo.txt
-1337.001337,1337,sha512,deadbeef foo/bar/baz.txt
+1337.00133,1337,sha512,deadbeef foo/bar/baz.txt
 ,4206969,sha3_512,eeff0011 xer.mp4\n";
 
         (hc, ft, expected_serialization_sorted)
@@ -404,13 +313,95 @@ mod test {
         hc.relocate(&testdir).unwrap();
         hc.rename(&OsString::from("foo.cshd"));
 
-        hc.write(&ft)
-            .unwrap();
+        hc.write(&ft).unwrap();
 
         let read_back = fs::read_to_string(path).unwrap();
         assert_eq!(
             serialize::sort_serialized(&read_back).unwrap(),
             expected_serialization,
+        );
+    }
+
+    #[test]
+    fn test_from_disk() {
+        let testdir = testdir!();
+        let path = testdir.join("foo.cshd");
+        let (mut hc, mut ft, _) = setup_minimal_hc();
+        hc.relocate(&testdir).unwrap();
+        hc.rename(&OsString::from("foo.cshd"));
+
+        hc.write(&ft).unwrap();
+        let expected_len = ft.len();
+
+        let actual = HashCollection::from_disk(&path, &mut ft)
+            .unwrap();
+        assert_eq!(ft.len(), expected_len);
+
+        for (ph, f) in actual.map {
+            let expected = hc.get(&ph).unwrap();
+            assert_eq!(expected, &f);
+        }
+
+        assert_eq!(
+            to_file_list(ft),
+            "FileTree{
+  foo/bar/baz.txt
+  bar/foo.txt
+  xer.mp4
+}"
+        );
+    }
+
+    #[test]
+    fn test_from_disk_single_hash() {
+        let testdir = testdir!();
+        let hash_type = HashType::Sha512;
+        let path = testdir.join(format!("foo.{}", hash_type.to_str()));
+        let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
+        let single_hash = format!("\
+{} .gitignore
+abcdefff foo/bar/baz
+abcdefff foo/xer.mp4
+\
+        ", hash_hex);
+        fs::write(&path, single_hash).unwrap();
+        let mut ft = FileTree::new();
+
+        let hc = HashCollection::from_disk(
+            &path, &mut ft)
+            .unwrap();
+
+        let key = ft.find(".gitignore").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new(".gitignore"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
+
+        let key = ft.find("foo/bar/baz").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("foo/bar/baz"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
+        let key = ft.find("foo/xer.mp4").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
+        assert_eq!(
+            to_file_list(ft),
+            "FileTree{
+  .gitignore
+  foo/bar/baz
+  foo/xer.mp4
+}"
         );
     }
 }

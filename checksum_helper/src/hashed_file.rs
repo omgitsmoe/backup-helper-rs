@@ -2,9 +2,9 @@ use crate::file_tree::{EntryHandle, FileTree};
 
 use filetime::FileTime;
 
-use std::path;
-use std::fmt;
 use std::error::Error;
+use std::fmt;
+use std::path;
 
 type Result<T> = std::result::Result<T, HashedFileError>;
 
@@ -18,12 +18,10 @@ pub enum HashedFileError {
 impl fmt::Display for HashedFileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            HashedFileError::MissingMTime =>
-                write!(f, "missing modification time"),
+            HashedFileError::MissingMTime => write!(f, "missing modification time"),
             // The wrapped error contains additional information and is available
             // via the source() method.
-            HashedFileError::IOError(..) =>
-                write!(f, "disk i/o error"),
+            HashedFileError::IOError(..) => write!(f, "disk i/o error"),
         }
     }
 }
@@ -41,6 +39,7 @@ impl Error for HashedFileError {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct FileRaw {
     path: EntryHandle,
     mtime: Option<FileTime>,
@@ -112,6 +111,17 @@ impl TryFrom<&str> for HashType {
     }
 }
 
+impl TryFrom<&std::ffi::OsStr> for HashType {
+    type Error = String;
+
+    fn try_from(value: &std::ffi::OsStr) -> std::result::Result<Self, Self::Error> {
+        let Some(str) = value.to_str() else {
+            return Err(format!("Unsupported hash type: {:?}", value));
+        };
+        Self::try_from(str)
+    }
+}
+
 impl Into<&'static str> for HashType {
     fn into(self) -> &'static str {
         self.to_str()
@@ -135,7 +145,13 @@ impl FileRaw {
         }
     }
 
-    pub(crate) fn new(filename: EntryHandle, mtime: Option<FileTime>, size: Option<u64>, hash_type: HashType, hash_bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        filename: EntryHandle,
+        mtime: Option<FileTime>,
+        size: Option<u64>,
+        hash_type: HashType,
+        hash_bytes: Vec<u8>,
+    ) -> Self {
         Self {
             path: filename,
             mtime,
@@ -149,28 +165,39 @@ impl FileRaw {
         file_tree.relative_path(&self.path)
     }
 
-    pub fn mtime(&self) -> Option<FileTime> { self.mtime }
+    pub fn mtime(&self) -> Option<FileTime> {
+        self.mtime
+    }
 
     pub fn mtime_str(&self) -> Option<String> {
-        self.mtime
-            .and_then(|m| {
-                // NOTE: to_string returns the string with the OS' epoch
-                //       so we need to do our own conversion that is portable
-                let usecs = m.unix_seconds() as f64;
-                let nanosecs = m.nanoseconds();
-                const SECS_PER_NS: f64 =  1.0 / 1_000_000_000.0;
-                let fract = (nanosecs as f64) * SECS_PER_NS;
-                let combined = (usecs as f64) + fract;
-                Some(format!("{}", combined))
-            })
+        self.mtime.and_then(|m| {
+            // NOTE: to_string returns the string with the OS' epoch
+            //       so we need to do our own conversion that is portable
+            let usecs = m.unix_seconds() as f64;
+            let nanosecs = m.nanoseconds();
+            const SECS_PER_NS: f64 = 1.0 / 1_000_000_000.0;
+            let fract = (nanosecs as f64) * SECS_PER_NS;
+            let combined = (usecs as f64) + fract;
+            Some(format!("{}", combined))
+        })
     }
-    pub fn size(&self) -> Option<u64> { self.size }
+    pub fn size(&self) -> Option<u64> {
+        self.size
+    }
 
-    pub fn hash_type(&self) -> HashType { self.hash_type }
+    pub fn hash_type(&self) -> HashType {
+        self.hash_type
+    }
 
-    pub fn hash_bytes(&self) -> &[u8] { self.hash_bytes.as_slice() }
+    pub fn hash_bytes(&self) -> &[u8] {
+        self.hash_bytes.as_slice()
+    }
 
-    pub(crate) fn with_context<'a>(&'a mut self, root: &'a path::Path, file_tree: &'a FileTree) -> File<'a> {
+    pub(crate) fn with_context<'a>(
+        &'a mut self,
+        root: &'a path::Path,
+        file_tree: &'a FileTree,
+    ) -> File<'a> {
         File::from_raw(self, root, file_tree)
     }
 }
@@ -182,8 +209,12 @@ pub struct File<'a> {
 }
 
 impl<'a> File<'a> {
-    pub fn from_raw(raw: &'a mut FileRaw, root: &'a path::Path, file_tree: &'a FileTree) -> File<'a> {
-        File{
+    pub fn from_raw(
+        raw: &'a mut FileRaw,
+        root: &'a path::Path,
+        file_tree: &'a FileTree,
+    ) -> File<'a> {
+        File {
             file: raw,
             root,
             context: file_tree,
@@ -200,8 +231,7 @@ impl<'a> File<'a> {
 
     fn fetch_mtime(&mut self, root: &path::Path) -> Result<FileTime> {
         let path = root.join(self.relative_path());
-        let metadata = std::fs::metadata(path)
-            .map_err(|e| HashedFileError::IOError(e))?;
+        let metadata = std::fs::metadata(path).map_err(|e| HashedFileError::IOError(e))?;
         Ok(FileTime::from_last_modification_time(&metadata))
     }
 
@@ -213,18 +243,21 @@ impl<'a> File<'a> {
         self.file.mtime = mtime
     }
 
-    fn mtime_to_disk(
-        &mut self,
-        root: &path::Path,
-    ) -> Result<()> {
+    fn mtime_to_disk(&mut self, root: &path::Path) -> Result<()> {
         let path = root.join(self.relative_path());
         filetime::set_file_mtime(path, self.file.mtime.ok_or(HashedFileError::MissingMTime)?)
             .map_err(|e| HashedFileError::IOError(e))
     }
 
-    fn size(self) -> Option<u64> { self.file.size }
+    fn size(self) -> Option<u64> {
+        self.file.size
+    }
 
-    fn hash_type(self) -> HashType { self.file.hash_type.clone() }
+    fn hash_type(self) -> HashType {
+        self.file.hash_type.clone()
+    }
 
-    fn hash_bytes(self) -> &'a [u8] { self.file.hash_bytes.as_slice() }
+    fn hash_bytes(self) -> &'a [u8] {
+        self.file.hash_bytes.as_slice()
+    }
 }
