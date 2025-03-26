@@ -58,7 +58,7 @@ impl ChecksumHelper {
         todo!();
     }
 
-    pub fn discover_hash_files(&mut self, max_depth: Option<u32>) -> Result<DiscoverResult> {
+    pub fn discover_hash_files(&self, max_depth: Option<u32>) -> Result<DiscoverResult> {
         let mut files = vec![];
         let result = gather(&self.root, |visit_type| {
             match visit_type {

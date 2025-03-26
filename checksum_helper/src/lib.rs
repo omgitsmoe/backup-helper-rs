@@ -8,3 +8,6 @@ pub use checksum_helper::ChecksumHelperError;
 
 mod file_tree;
 mod utils;
+
+#[cfg(test)]
+pub mod test_utils;

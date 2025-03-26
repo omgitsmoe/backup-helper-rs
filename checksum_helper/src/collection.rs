@@ -7,8 +7,9 @@ use log::{debug, error, info, warn};
 use std::cmp::{Eq, PartialEq};
 use std::collections::HashMap;
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
 use std::io::{self, BufRead, Cursor, Write};
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,7 @@ type Result<T> = std::result::Result<T, HashCollectionError>;
 
 pub struct HashCollection {
     root_dir: Option<PathBuf>,
+    // TODO just change this to a String?
     name: Option<OsString>,
     map: HashMap<EntryHandle, FileRaw>,
 }
@@ -43,6 +45,21 @@ impl HashCollection {
                 None => None,
             },
         })
+    }
+
+    pub fn relocate(&mut self, root_dir: &Path) -> Result<()> {
+        match self.root_dir {
+            None => self.root_dir = Some(root_dir.to_path_buf()),
+            Some(ref old_root) => {
+                todo!("transform all paths to add new_root.relative_to(old_root)")
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn rename(&mut self, name: &OsStr) {
+        self.name = Some(name.to_owned());
     }
 
     pub fn update(&mut self, path_handle: EntryHandle, hashed_file: FileRaw) {
@@ -310,10 +327,26 @@ impl HashCollection {
         Ok(())
     }
 
-    pub fn write(&self, path: &Path) -> Result<()> {
-        todo!();
+    pub fn write(&self, file_tree: &FileTree) -> Result<()> {
+        if self.root_dir.is_none() || self.name.is_none() {
+            return Err(HashCollectionError::MissingPath((
+                self.root_dir.clone(),
+                self.name.clone(),
+            )));
+        }
+
+        let full_path = self
+            .root_dir
+            .as_ref()
+            .expect("was checked above")
+            .join(self.name.as_ref().expect("was checked above"));
+        let file = fs::File::create_new(full_path)?;
+        let mut buf_writer = std::io::BufWriter::new(file);
+        self.serialize(&mut buf_writer, file_tree)
     }
 
+    /// Warning: Does not preserve comments that do not directly follow the
+    ///          header!
     pub fn sort_serialized(serialized: &str) -> Option<String> {
         let mut header = Vec::new();
         let mut iter = serialized.lines();
@@ -322,15 +355,17 @@ impl HashCollection {
         // Collect header lines manually, ensuring the first non-header line is not consumed
         let mut in_header = true;
         while let Some(line) = iter.next() {
-            if in_header && !line.starts_with('#') {
-                // Push the first non-header line back by prepending it to the iterator
-                in_header = false;
+            let is_comment = line.starts_with('#');
+            if in_header {
+                if !is_comment {
+                    in_header = false;
+                } else {
+                    header.push(line);
+                }
             }
 
-            if in_header {
-                header.push(line);
-            } else {
-                lines.push(line.split_once(' ').map(|parts| (line, parts))?)
+            if !is_comment {
+                lines.push(line.split_once(' ').map(|parts| (line, parts))?);
             }
         }
         lines.sort_by(|a, b| a.1 .1.cmp(b.1 .1));
@@ -376,6 +411,7 @@ pub enum HashCollectionError {
     InvalidVersionHeader(String),
     InvalidHashLine((String, String)),
     AbsolutePath(String),
+    MissingPath((Option<PathBuf>, Option<OsString>)),
     FileTreeError(ErrorKind),
     UnsupportedHashType(String),
     IOError(std::io::ErrorKind),
@@ -403,6 +439,13 @@ impl fmt::Display for HashCollectionError {
             HashCollectionError::NonUnicodePath(ref e) => {
                 write!(f, "non-unicode path error: {:?}", e)
             }
+            HashCollectionError::MissingPath((ref root, ref name)) => {
+                write!(
+                    f,
+                    "missing hash file collection path: root {:?} name {:?}",
+                    root, name
+                )
+            }
         }
     }
 }
@@ -425,7 +468,9 @@ impl From<std::io::Error> for HashCollectionError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::test_utils::*;
     use filetime::FileTime;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_path_above_hash_file() {
@@ -447,30 +492,16 @@ mod test {
         assert!(!is_path_above_hash_file("./foo/././baz/.."));
     }
 
-    fn to_file_list(ft: FileTree) -> String {
-        format!("{}", ft)
-            // always use / as separator
-            .replace('\\', "/")
-    }
-
     #[test]
     fn test_from_str_line_handles_empty_string() {
         let mut ft = FileTree::new();
-        assert!(HashCollection::from_str(
-            "",
-            &mut ft,
-        )
-        .inspect_err(|e| println!("{}", e))
-        .is_ok()
-        );
+        assert!(HashCollection::from_str("", &mut ft,)
+            .inspect_err(|e| println!("{}", e))
+            .is_ok());
 
-        assert!(HashCollection::from_str(
-            "\n",
-            &mut ft,
-        )
-        .inspect_err(|e| println!("{}", e))
-        .is_ok()
-        );
+        assert!(HashCollection::from_str("\n", &mut ft,)
+            .inspect_err(|e| println!("{}", e))
+            .is_ok());
     }
 
     #[test]
@@ -715,10 +746,8 @@ mod test {
         assert_eq!(result, ",,blake2s,abcdef09 foo/bar/baz.txt\n",);
     }
 
-    #[test]
-    fn test_serialize() {
+    fn setup_minimal_hc() -> (HashCollection, FileTree, &'static str) {
         let mut ft = FileTree::new();
-        let mut buf = vec![];
 
         let mut hc = HashCollection::new(None::<&&str>).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
@@ -757,17 +786,84 @@ mod test {
             ),
         );
 
+        let expected_serialization_sorted = "\
+# version 1
+1212,,md5,aabbccdd bar/foo.txt
+1337.001337,1337,sha512,deadbeef foo/bar/baz.txt
+,4206969,sha3_512,eeff0011 xer.mp4\n";
+
+        (hc, ft, expected_serialization_sorted)
+    }
+
+    #[test]
+    fn test_serialize() {
+        let mut buf = vec![];
+        let (hc, ft, expected_serialization) = setup_minimal_hc();
+
         hc.serialize(&mut buf, &ft).unwrap();
 
         let result = HashCollection::sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
         assert_eq!(
             result,
-            // NOTE: sorted by path
+            expected_serialization,
+        );
+    }
+
+    #[test]
+    fn test_sort_serialized() {
+        let unsorted = "\
+# version 1
+# comment
+,4206969,sha3_512,eeff0011 xer.mp4
+# comment intra
+1212,,md5,aabbccdd bar/foo.txt
+# comment intra2
+1337.001337,1337,sha512,deadbeef foo/bar/baz.txt";
+
+        assert_eq!(
+            HashCollection::sort_serialized(unsorted).unwrap(),
             "\
 # version 1
+# comment
 1212,,md5,aabbccdd bar/foo.txt
 1337.001337,1337,sha512,deadbeef foo/bar/baz.txt
 ,4206969,sha3_512,eeff0011 xer.mp4\n",
+        );
+    }
+
+    #[test]
+    fn test_write_never_overwrites() {
+        let testdir = testdir!();
+        let path = testdir.join("foo.cshd");
+        let ft = FileTree::new();
+        let hc = HashCollection::new(Some(&path)).unwrap();
+        fs::write(path, "foo").unwrap();
+
+        let result = hc.write(&ft);
+
+        assert_eq!(
+            result,
+            Err(HashCollectionError::IOError(
+                std::io::ErrorKind::AlreadyExists
+            ))
+        );
+    }
+
+    #[test]
+    fn test_write() {
+        let testdir = testdir!();
+        let path = testdir.join("foo.cshd");
+        let (mut hc, ft, expected_serialization) = setup_minimal_hc();
+        hc.relocate(&testdir).unwrap();
+        hc.rename(&OsString::from("foo.cshd"));
+
+        hc.write(&ft)
+            .unwrap();
+
+        let read_back = fs::read_to_string(path).unwrap();
+        assert_eq!(
+            HashCollection::sort_serialized(&read_back).unwrap(),
+            expected_serialization,
         );
     }
 }

@@ -117,8 +117,7 @@ where
 mod test {
     use super::*;
     use pretty_assertions::assert_eq;
-    use std::io::prelude::*;
-    use testdir::testdir;
+    use crate::test_utils::*;
 
     #[test]
     fn gather_visit_no_filter() {
@@ -266,12 +265,6 @@ stop d1"#
         );
     }
 
-    fn to_file_list(ft: FileTree) -> String {
-        format!("{}", ft)
-            // always use / as separator
-            .replace('\\', "/")
-    }
-
     fn setup_ftree() -> path::PathBuf {
         let test_path = testdir!();
         create_ftree(
@@ -289,17 +282,6 @@ stop d1"#
         );
 
         test_path
-    }
-
-    fn create_ftree(root: &std::path::Path, file_list: &str) {
-        file_list.split('\n').for_each(|line| {
-            let full_path = root.join(line.trim());
-            std::fs::create_dir_all(full_path.parent().expect("Must have a parent!"))
-                .expect("Failed to create parent directories");
-            let mut file = std::fs::File::create(&full_path).expect("Failed to create file");
-            file.write_all(full_path.to_string_lossy().as_bytes())
-                .expect("Failed to write to file");
-        })
     }
 
     #[test]
