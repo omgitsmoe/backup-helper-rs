@@ -48,7 +48,7 @@ fn main() {
     // let inc = ch.incremental();
     // inc.write(&Path::new("hash.cshd"));
     let ser = std::fs::read_to_string("obsidian_2024-09-28.cshd").unwrap();
-    let sorted = checksum_helper::collection::HashCollection::sort_serialized(&ser).unwrap();
+    let sorted = checksum_helper::collection::sort_serialized(&ser).unwrap();
     println!("{}", sorted);
     std::hint::black_box(sorted);
 }
