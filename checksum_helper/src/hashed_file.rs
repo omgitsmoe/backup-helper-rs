@@ -1,10 +1,13 @@
 use crate::file_tree::{EntryHandle, FileTree};
 
 use filetime::FileTime;
+use sha2::Digest;
 
 use std::error::Error;
 use std::fmt;
 use std::path;
+use std::io::{BufRead, BufReader};
+use std::fs;
 
 type Result<T> = std::result::Result<T, HashedFileError>;
 
@@ -36,6 +39,12 @@ impl Error for HashedFileError {
             // underlying type already implements the `Error` trait.
             HashedFileError::IOError(ref e) => Some(e),
         }
+    }
+}
+
+impl From<std::io::Error> for HashedFileError {
+    fn from(value: std::io::Error) -> Self {
+        HashedFileError::IOError(value)
     }
 }
 
@@ -169,6 +178,10 @@ impl FileRaw {
         self.mtime
     }
 
+    pub fn update_mtime(&mut self, mtime: Option<FileTime>) {
+        self.mtime = mtime
+    }
+
     pub fn mtime_str(&self) -> Option<String> {
         self.mtime.and_then(|m| {
             // NOTE: to_string returns the string with the OS' epoch
@@ -226,38 +239,191 @@ impl<'a> File<'a> {
     }
 
     fn relative_path(&self) -> path::PathBuf {
-        self.context.relative_path(&self.file.path)
+        self.file.relative_path(self.context)
     }
 
-    fn fetch_mtime(&mut self, root: &path::Path) -> Result<FileTime> {
-        let path = root.join(self.relative_path());
-        let metadata = std::fs::metadata(path).map_err(|e| HashedFileError::IOError(e))?;
+    // TODO do we need to make sure this is absolute and only
+    //      absolute paths in general?
+    fn path_with_root(&self) -> path::PathBuf {
+        self.root.join(self.relative_path())
+    }
+
+    fn fetch_size(&self) -> Result<u64> {
+        let path = self.path_with_root();
+        let metadata = std::fs::metadata(path)?;
+        Ok(metadata.len())
+    }
+
+    fn fetch_mtime(&self) -> Result<FileTime> {
+        let path = self.path_with_root();
+        let metadata = std::fs::metadata(path)?;
         Ok(FileTime::from_last_modification_time(&metadata))
     }
 
-    fn mtime(&self) -> Option<FileTime> {
-        self.file.mtime
-    }
-
-    fn update_mtime(&mut self, mtime: Option<FileTime>) {
-        self.file.mtime = mtime
-    }
-
-    fn mtime_to_disk(&mut self, root: &path::Path) -> Result<()> {
-        let path = root.join(self.relative_path());
+    fn mtime_to_disk(&self) -> Result<()> {
+        let path = self.path_with_root();
         filetime::set_file_mtime(path, self.file.mtime.ok_or(HashedFileError::MissingMTime)?)
             .map_err(|e| HashedFileError::IOError(e))
     }
 
-    fn size(self) -> Option<u64> {
-        self.file.size
+    pub fn verify(&self) -> Result<VerifyResult> {
+        let path = self.path_with_root();
+        if !fs::exists(path)? {
+            return Ok(VerifyResult::FileMissing);
+        }
+
+        // TODO @Perf fetch metadata only once and get mtime/size manually from it?
+        match self.file.size() {
+            Some(ref expected) => {
+                let size_on_disk = self.fetch_size()?;
+                if size_on_disk != *expected {
+                    return Ok(VerifyResult::MismatchSize);
+                }
+            },
+            None => {},
+        };
+
+        let hash_on_disk = self.compute_hash()?;
+        if hash_on_disk == self.file.hash_bytes {
+            return Ok(VerifyResult::Ok);
+        }
+
+        if self.file.mtime().is_none() {
+            return Ok(VerifyResult::Mismatch);
+        }
+
+        let mtime_on_disk = self.fetch_mtime()?;
+        if self.file.mtime().expect("checked above") == mtime_on_disk {
+            Ok(VerifyResult::MismatchCorrupted)
+        } else {
+            Ok(VerifyResult::MismatchOutdatedHash)
+        }
     }
 
-    fn hash_type(self) -> HashType {
-        self.file.hash_type.clone()
+    pub fn compute_hash(&self) -> Result<Vec<u8>> {
+        self.compute_hash_with(self.file.hash_type)
     }
 
-    fn hash_bytes(self) -> &'a [u8] {
-        self.file.hash_bytes.as_slice()
+    pub fn compute_hash_with(&self, hash_type: HashType) -> Result<Vec<u8>> {
+        let path = self.path_with_root();
+        let file = fs::File::open(path)?;
+        let reader = BufReader::new(file);
+        compute_hash(reader, hash_type)
     }
 }
+
+#[derive(Debug, PartialEq)]
+pub enum VerifyResult {
+    /// The hashes matched.
+    Ok,
+
+    /// Could not compare hashes, since the file on disk was not found.
+    FileMissing,
+
+    /// The file on disk did not match the stored hash. There was no stored
+    /// modification time, so it is unknown whether the file is corrupted.
+    Mismatch,
+
+    /// The size of the file on disk did not match. No hashes were computed!
+    MismatchSize,
+
+    /// The file on disk did not match the stored hash. Since the modification
+    /// time matches with the file on disk, we can assume that the file has
+    /// very likely been corrupted.
+    MismatchCorrupted,
+
+    /// The file on disk did not match the stored hash, but the modification
+    /// time of the file on disk is newer or older compared to the stored
+    /// modification time. The stored hash might be outdated.
+    MismatchOutdatedHash,
+}
+
+fn compute_hash<R: BufRead>(reader: R, hash_type: HashType) -> Result<Vec<u8>> {
+    match hash_type {
+        HashType::Md5 => {
+            let mut hasher = md5::Md5::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha1 => {
+            let mut hasher = sha1::Sha1::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha224 => {
+            let mut hasher = sha2::Sha224::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha256 => {
+            let mut hasher = sha2::Sha256::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha384 => {
+            let mut hasher = sha2::Sha384::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha512 => {
+            let mut hasher = sha2::Sha512::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha3_224 => {
+            let mut hasher = sha3::Sha3_224::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha3_256 => {
+            let mut hasher = sha3::Sha3_256::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha3_384 => {
+            let mut hasher = sha3::Sha3_384::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Sha3_512 => {
+            let mut hasher = sha3::Sha3_512::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Shake128 => {
+            let mut hasher = sha1::Sha1::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Shake256 => {
+            let mut hasher = sha1::Sha1::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Blake2s => {
+            let mut hasher = sha1::Sha1::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+        HashType::Blake2b => {
+            let mut hasher = sha1::Sha1::new();
+            update_in_chunks(reader, &mut hasher)?;
+            Ok(hasher.finalize().to_vec())
+        },
+    }
+}
+
+fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Result<()> {
+    // reading 64k (65536 bytes) chunks turned out to be most performant
+    let mut buf = [0u8; 65536];
+    loop {
+        let bytes_read = reader.read(&mut buf)
+            .map_err(|e| HashedFileError::IOError(e))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buf[..bytes_read]);
+    }
+    Ok(())
+}
+
