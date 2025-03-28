@@ -5,15 +5,16 @@ use sha2::Digest;
 
 use std::error::Error;
 use std::fmt;
-use std::path;
-use std::io::{BufRead, BufReader};
 use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path;
 
 type Result<T> = std::result::Result<T, HashedFileError>;
 
 #[derive(Debug)]
 pub enum HashedFileError {
     MissingMTime,
+    MissingHash,
     // wrap io::Error
     IOError(std::io::Error),
 }
@@ -22,6 +23,7 @@ impl fmt::Display for HashedFileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             HashedFileError::MissingMTime => write!(f, "missing modification time"),
+            HashedFileError::MissingHash => write!(f, "missing hash"),
             // The wrapped error contains additional information and is available
             // via the source() method.
             HashedFileError::IOError(..) => write!(f, "disk i/o error"),
@@ -33,7 +35,7 @@ impl Error for HashedFileError {
     // return the source for this error, e.g. std::io::Eror if we wrapped it
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match *self {
-            HashedFileError::MissingMTime => None,
+            HashedFileError::MissingMTime | HashedFileError::MissingHash => None,
             // The cause is the underlying implementation error type. Is implicitly
             // cast to the trait object `&error::Error`. This works because the
             // underlying type already implements the `Error` trait.
@@ -227,6 +229,7 @@ impl<'a> File<'a> {
         root: &'a path::Path,
         file_tree: &'a FileTree,
     ) -> File<'a> {
+        assert!(root.is_absolute());
         File {
             file: raw,
             root,
@@ -234,16 +237,18 @@ impl<'a> File<'a> {
         }
     }
 
-    pub fn raw(&'a mut self) -> &'a mut FileRaw {
-        self.file
+    // NOTE: Use a closure here so we don't run into borrow/lifetime issues
+    pub fn raw<F, R>(&mut self, func: F) -> R
+    where
+        F: FnOnce(&mut FileRaw) -> R,
+    {
+        func(&mut self.file)
     }
 
     fn relative_path(&self) -> path::PathBuf {
         self.file.relative_path(self.context)
     }
 
-    // TODO do we need to make sure this is absolute and only
-    //      absolute paths in general?
     fn path_with_root(&self) -> path::PathBuf {
         self.root.join(self.relative_path())
     }
@@ -267,6 +272,10 @@ impl<'a> File<'a> {
     }
 
     pub fn verify(&self) -> Result<VerifyResult> {
+        if self.file.hash_bytes.is_empty() {
+            return Err(HashedFileError::MissingHash);
+        }
+
         let path = self.path_with_root();
         if !fs::exists(path)? {
             return Ok(VerifyResult::FileMissing);
@@ -279,8 +288,8 @@ impl<'a> File<'a> {
                 if size_on_disk != *expected {
                     return Ok(VerifyResult::MismatchSize);
                 }
-            },
-            None => {},
+            }
+            None => {}
         };
 
         let hash_on_disk = self.compute_hash()?;
@@ -344,72 +353,72 @@ fn compute_hash<R: BufRead>(reader: R, hash_type: HashType) -> Result<Vec<u8>> {
             let mut hasher = md5::Md5::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha1 => {
             let mut hasher = sha1::Sha1::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha224 => {
             let mut hasher = sha2::Sha224::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha256 => {
             let mut hasher = sha2::Sha256::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha384 => {
             let mut hasher = sha2::Sha384::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha512 => {
             let mut hasher = sha2::Sha512::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha3_224 => {
             let mut hasher = sha3::Sha3_224::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha3_256 => {
             let mut hasher = sha3::Sha3_256::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha3_384 => {
             let mut hasher = sha3::Sha3_384::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Sha3_512 => {
             let mut hasher = sha3::Sha3_512::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Shake128 => {
             let mut hasher = sha1::Sha1::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Shake256 => {
             let mut hasher = sha1::Sha1::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Blake2s => {
             let mut hasher = sha1::Sha1::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
         HashType::Blake2b => {
             let mut hasher = sha1::Sha1::new();
             update_in_chunks(reader, &mut hasher)?;
             Ok(hasher.finalize().to_vec())
-        },
+        }
     }
 }
 
@@ -417,7 +426,8 @@ fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Resu
     // reading 64k (65536 bytes) chunks turned out to be most performant
     let mut buf = [0u8; 65536];
     loop {
-        let bytes_read = reader.read(&mut buf)
+        let bytes_read = reader
+            .read(&mut buf)
             .map_err(|e| HashedFileError::IOError(e))?;
         if bytes_read == 0 {
             break;
@@ -427,3 +437,147 @@ fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test_utils::*;
+
+    #[should_panic]
+    #[test]
+    fn test_file_new_panics_on_relative_path() {
+        let ft = FileTree::new();
+        let mut raw = FileRaw::bare(ft.root(), HashType::Md5);
+        File::from_raw(&mut raw, path::Path::new("./test"), &ft);
+    }
+
+    fn setup_testfile<'a>() -> (
+        path::PathBuf,
+        path::PathBuf,
+        path::PathBuf,
+        &'a str,
+        FileTree,
+        FileRaw,
+        &'a str,
+    ) {
+        let testdir = testdir!();
+        let testfile_name = path::Path::new("foo.txt");
+        let testfile = testdir.join(testfile_name);
+        let testcontent = "foobar";
+        fs::write(&testfile, testcontent).unwrap();
+
+        let mut ft = FileTree::new();
+        let path_handle = ft.add_file(&testfile_name).unwrap();
+        let mut raw = FileRaw::bare(path_handle, HashType::Md5);
+        let expected_hex = "3858f62230ac3c915f300c664312c63f";
+        let expected = hex::decode(expected_hex).unwrap();
+        raw.hash_bytes = expected;
+        raw.size = Some(testcontent.len() as u64);
+
+        (
+            testdir,
+            testfile_name.to_path_buf(),
+            testfile,
+            testcontent,
+            ft,
+            raw,
+            expected_hex,
+        )
+    }
+
+    #[test]
+    fn test_fetch_size() {
+        let (testdir, _, _, testcontent, ft, mut raw, _) = setup_testfile();
+        let file = File::from_raw(&mut raw, &testdir, &ft);
+        assert_eq!(file.fetch_size().unwrap(), testcontent.len() as u64);
+    }
+
+    #[test]
+    fn test_fetch_mtime() {
+        let (testdir, _, testfile, _, ft, mut raw, _) = setup_testfile();
+
+        let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
+        filetime::set_file_mtime(&testfile, expected_mtime).unwrap();
+
+        let file = File::from_raw(&mut raw, &testdir, &ft);
+        assert_eq!(file.fetch_mtime().unwrap(), expected_mtime);
+    }
+
+    #[test]
+    fn test_mtime_to_disk() {
+        let (testdir, _, _, _, ft, mut raw, _) = setup_testfile();
+        let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
+        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+
+        file.raw(|raw| raw.update_mtime(Some(expected_mtime)));
+
+        file.mtime_to_disk().unwrap();
+
+        assert_eq!(file.fetch_mtime().unwrap(), expected_mtime);
+    }
+
+    #[test]
+    fn test_compute_hash() {
+        let (testdir, _testfile_name, _testfile_abs, testcontent, ft, mut raw, expected_hex) =
+            setup_testfile();
+        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+
+        let expected = hex::decode(expected_hex).unwrap();
+        assert_eq!(
+            compute_hash(
+                std::io::Cursor::new(testcontent),
+                file.raw(|r| r.hash_type())
+            )
+            .unwrap(),
+            expected
+        );
+
+        assert_eq!(file.compute_hash().unwrap(), expected);
+        assert_eq!(file.compute_hash_with(HashType::Md5).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_verify_ok() {
+        let (testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
+            setup_testfile();
+        let file = File::from_raw(&mut raw, &testdir, &ft);
+
+        assert_eq!(file.verify().unwrap(), VerifyResult::Ok);
+    }
+
+    #[test]
+    fn test_verify_missing_hash() {
+        let (testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
+            setup_testfile();
+        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+
+        file.raw(|raw| raw.hash_bytes = vec![]);
+
+        // NOTE: using this to circumvent io error not implementing PartialEq
+        // this could be used to check the contents as well:
+        // assert!(matches!(file.verify(), Err(HashedFileError::IOError(k))
+        //         if k.kind() == std::io::ErrorKind::NotFound));
+        assert!(matches!(file.verify(), Err(HashedFileError::MissingHash)));
+    }
+
+    #[test]
+    fn test_verify_missing_file() {
+        let (testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
+        let file = File::from_raw(&mut raw, &testdir, &ft);
+
+        std::fs::remove_file(testfile_abs).unwrap();
+
+        let result = file.verify();
+        assert!(matches!(result, Ok(VerifyResult::FileMissing)));
+    }
+
+    #[test]
+    fn test_verify_mismatch_size() {
+        let (testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
+        let file = File::from_raw(&mut raw, &testdir, &ft);
+
+        std::fs::write(testfile_abs, "newsize1234").unwrap();
+
+        let result = file.verify();
+        assert!(matches!(result, Ok(VerifyResult::MismatchSize)));
+    }
+}
