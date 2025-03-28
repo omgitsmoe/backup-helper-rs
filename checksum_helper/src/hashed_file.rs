@@ -580,4 +580,49 @@ mod test {
         let result = file.verify();
         assert!(matches!(result, Ok(VerifyResult::MismatchSize)));
     }
+
+    #[test]
+    fn test_verify_mismatch() {
+        let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let file = File::from_raw(&mut raw, &testdir, &ft);
+
+        let new_content = "foobaz";
+        assert_eq!(testcontent.len(), new_content.len());
+        std::fs::write(testfile_abs, new_content).unwrap();
+
+        let result = file.verify();
+        assert!(matches!(result, Ok(VerifyResult::Mismatch)));
+    }
+
+    #[test]
+    fn test_verify_mismatch_corrupted() {
+        let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+
+        let new_content = "foobaz";
+        assert_eq!(testcontent.len(), new_content.len());
+        std::fs::write(testfile_abs, new_content).unwrap();
+        let new_mtime = file.fetch_mtime().unwrap();
+        file.raw(|raw| raw.update_mtime(Some(new_mtime)));
+
+        let result = file.verify();
+        assert!(matches!(result, Ok(VerifyResult::MismatchCorrupted)));
+    }
+
+    #[test]
+    fn test_verify_mismatch_outdated() {
+        let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+        let current_mtime = file.fetch_mtime().unwrap();
+        let outdated_mtime = filetime::FileTime::from_unix_time(
+            current_mtime.seconds() - 5, current_mtime.nanoseconds());
+        file.raw(|raw| raw.update_mtime(Some(outdated_mtime)));
+
+        let new_content = "foobaz";
+        assert_eq!(testcontent.len(), new_content.len());
+        std::fs::write(testfile_abs, new_content).unwrap();
+
+        let result = file.verify();
+        assert!(matches!(result, Ok(VerifyResult::MismatchOutdatedHash)));
+    }
 }
