@@ -12,6 +12,7 @@ use std::fmt;
 use std::fs;
 use std::io::{BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::string::ToString;
 
 mod parser;
 mod serialize;
@@ -25,13 +26,13 @@ pub struct HashCollection {
     // TODO just change this to a String?
     name: Option<OsString>,
     map: HashMap<EntryHandle, FileRaw>,
-    // TODO needs mtime
+    mtime: Option<filetime::FileTime>,
     // TODO provide restore_mtime method, so afer relocate + write
     //      one can reset it when nothing else has changed
 }
 
 impl HashCollection {
-    pub fn new(path: Option<&impl AsRef<Path>>) -> Result<HashCollection> {
+    pub fn new(path: Option<&impl AsRef<Path>>, mtime: Option<filetime::FileTime>) -> Result<HashCollection> {
         Ok(HashCollection {
             map: HashMap::new(),
             name: match path {
@@ -52,27 +53,39 @@ impl HashCollection {
                 ),
                 None => None,
             },
+            mtime,
         })
     }
 
-    pub fn relocate(&mut self, root_dir: &Path, file_tree: &mut FileTree) -> Result<()> {
-        match self.root_dir {
-            None => self.root_dir = Some(root_dir.to_path_buf()),
-            Some(ref old_root) => {
-                // TODO: leftoff how to handle relocating to a directory above old_root
-                // could enforce self.root_dir to be absolute then
-                // compute the diff and then re-add the new relative path to file_tree
-                // and exchange it in the hash_map (and file)
-                todo!("transform all paths to add new_root.relative_to(old_root)")
-            }
-        }
-
-        Ok(())
+    /// Set the root_dir of the HashCollection.
+    /// Note that this will not move any files. Instead it will change the relative
+    /// paths, which are serialized.
+    pub fn relocate(&mut self, root_dir: impl AsRef<Path>) {
+        self.root_dir = Some(root_dir.as_ref().to_path_buf());
     }
 
     pub fn rename(&mut self, name: &OsStr) {
         // TODO check extension?
         self.name = Some(name.to_owned());
+    }
+
+    pub fn set_mtime(&mut self, mtime: Option<filetime::FileTime>) {
+        self.mtime = mtime;
+    }
+
+    pub fn restore_mtime(&self) -> Result<()> {
+        if let (Some(root_dir), Some(name)) = (&self.root_dir, &self.name) {
+            if self.mtime.is_none() {
+                return Err(HashCollectionError::MissingMTime);
+            }
+
+            filetime::set_file_mtime(
+                root_dir.join(name),
+                self.mtime.expect("should be some, checked above"))?;
+            Ok(())
+        } else {
+            Err(HashCollectionError::MissingPath((self.root_dir.clone(), self.name.clone())))
+        }
     }
 
     pub fn update(&mut self, path_handle: EntryHandle, hashed_file: FileRaw) {
@@ -114,8 +127,7 @@ impl HashCollection {
 
         match result {
             Ok(mut hc) => {
-                hc.relocate(root, file_tree)
-                    .expect("must succeed, since root_dir should be None");
+                hc.relocate(root);
                 hc.rename(file_name);
 
                 Ok(hc)
@@ -127,6 +139,13 @@ impl HashCollection {
     // TODO: flush-able hash collection
     pub fn serialize<W: Write>(&self, writer: &mut W, file_tree: &FileTree) -> Result<()> {
         serialize::serialize(self, writer, file_tree)
+    }
+
+    pub fn to_str(&self, file_tree: &FileTree) -> Result<String> {
+        let mut buf = vec!();
+        self.serialize(&mut buf, file_tree)?;
+        String::from_utf8(buf)
+            .map_err(|e| HashCollectionError::InvalidUtf8(e.into_bytes()))
     }
 
     pub fn write(&self, file_tree: &FileTree) -> Result<()> {
@@ -151,8 +170,11 @@ impl HashCollection {
         todo!("flushes the current entries to disk")
     }
 
-    /// Merges all entries in `other` into `self`
-    pub fn merge(&mut self, mut other: Self, file_tree: &mut FileTree) -> Result<()> {
+    /// Merges all entries in `other` into `self`. If there are conflicts:
+    /// Keep the data from the __collection__ with the more recent mtime.
+    /// An mtime of None is always considered older.
+    /// If both mtimes are None then our entries are preferred.
+    pub fn merge(&mut self, mut other: Self) -> Result<()> {
         if self.root_dir.is_none() || other.root_dir.is_none() {
             return Err(HashCollectionError::MissingPathInMerge((
                 self.root_dir.clone(),
@@ -161,11 +183,23 @@ impl HashCollection {
         }
 
         // make the paths relative to our root_dir
-        other.relocate(self.root_dir.as_ref().expect("checked above"), file_tree)?;
+        // NOTE: should be a nop
+        other.relocate(self.root_dir.as_ref().expect("checked above"));
 
+        let keep_ours = match (self.mtime, other.mtime) {
+            (Some(our_mtime), Some(their_mtime)) =>
+                our_mtime > their_mtime,
+            (None, Some(_)) => false,
+            (Some(_), None) => true,
+            (None, None) => true,
+        };
         for (path_handle, theirs) in other.map {
             match self.map.get_mut(&path_handle) {
-                Some(ours) => {}
+                Some(ours) => {
+                    if !keep_ours {
+                        self.map.insert(path_handle, theirs);
+                    }
+                },
                 None => {
                     self.map.insert(path_handle, theirs);
                 }
@@ -207,9 +241,12 @@ pub enum HashCollectionError {
     InvalidHashLine((String, String)),
     InvalidSingleHashLine((String, String)),
     InvalidExtension(OsString),
+    InvalidUtf8(Vec<u8>),
+    InvalidCollectionRoot(Option<PathBuf>),
     AbsolutePath(String),
     MissingPath((Option<PathBuf>, Option<OsString>)),
     MissingPathInMerge((Option<PathBuf>, Option<PathBuf>)),
+    MissingMTime,
     FileTreeError(ErrorKind),
     UnsupportedHashType(String),
     IOError(std::io::ErrorKind),
@@ -236,6 +273,12 @@ impl fmt::Display for HashCollectionError {
                     l
                 )
             }
+            HashCollectionError::InvalidUtf8(_) => {
+                write!(f, "invalid utf8")
+            }
+            HashCollectionError::InvalidCollectionRoot(ref root) => {
+                write!(f, "the root path of an collection must be a subpath of the FileTree/ChecksumHelper root, got: {:?}", root)
+            }
             HashCollectionError::AbsolutePath(ref p) => write!(f, "absolute path found: {}", p),
             HashCollectionError::FileTreeError(ref p) => write!(f, "file tree error: {:?}", p),
             HashCollectionError::UnsupportedHashType(ref t) => {
@@ -260,7 +303,10 @@ impl fmt::Display for HashCollectionError {
                     "can't merge with a missing root path: ours {:?} theirs {:?}",
                     ours, theirs
                 )
-            }
+            },
+            HashCollectionError::MissingMTime => {
+                write!(f, "missing modification time")
+            },
         }
     }
 }
@@ -310,7 +356,7 @@ mod test {
     pub fn setup_minimal_hc(root: &Path) -> (HashCollection, FileTree, &'static str) {
         let mut ft = FileTree::new(root).unwrap();
 
-        let mut hc = HashCollection::new(None::<&&str>).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
         hc.update(
             path_handle.clone(),
@@ -361,7 +407,7 @@ mod test {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
         let ft = FileTree::new(&testdir).unwrap();
-        let hc = HashCollection::new(Some(&path)).unwrap();
+        let hc = HashCollection::new(Some(&path), None).unwrap();
         fs::write(path, "foo").unwrap();
 
         let result = hc.write(&ft);
@@ -379,7 +425,7 @@ mod test {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
         let (mut hc, mut ft, expected_serialization) = setup_minimal_hc(&testdir);
-        hc.relocate(&testdir, &mut ft).unwrap();
+        hc.relocate(&testdir);
         hc.rename(&OsString::from("foo.cshd"));
 
         hc.write(&ft).unwrap();
@@ -396,7 +442,7 @@ mod test {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
         let (mut hc, mut ft, _) = setup_minimal_hc(&testdir);
-        hc.relocate(&testdir, &mut ft).unwrap();
+        hc.relocate(&testdir);
         hc.rename(&OsString::from("foo.cshd"));
 
         hc.write(&ft).unwrap();
@@ -477,16 +523,228 @@ abcdefff foo/xer.mp4
     }
 
     #[test]
-    fn relocate() {
-        todo!()
+    fn relocate_changes_serialized_paths() {
+        let root = Path::new("/foo");
+        let mut ft = FileTree::new(root).unwrap();
+
+        let mut hc = HashCollection::new(
+            Some(&root.join("foo.cshd")), None).unwrap();
+        let path_handle = ft.add_file("./foo/bar/baz/file.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1337, 1_330_000)),
+                Some(1337),
+                HashType::Sha512,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+
+        let path_handle = ft.add_file("foo/bar/foo.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1212, 0)),
+                None,
+                HashType::Md5,
+                vec![0xaa, 0xbb, 0xcc, 0xdd],
+            ),
+        );
+
+        let path_handle = ft.add_file("./foo/xer.mp4").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                None,
+                Some(4206969),
+                HashType::Sha3_512,
+                vec![0xee, 0xff, 0x00, 0x11],
+            ),
+        );
+
+        let expected_serialization_sorted = "\
+# version 1
+1337.00133,1337,sha512,deadbeef foo/bar/baz/file.txt
+1212,,md5,aabbccdd foo/bar/foo.txt
+,4206969,sha3_512,eeff0011 foo/xer.mp4\n";
+
+        let result = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        assert_eq!(
+            result,
+            expected_serialization_sorted,
+        );
+
+        hc.relocate(Path::new("/foo/foo"));
+
+        let expected_serialization_sorted_relocated = "\
+# version 1
+1337.00133,1337,sha512,deadbeef bar/baz/file.txt
+1212,,md5,aabbccdd bar/foo.txt
+,4206969,sha3_512,eeff0011 xer.mp4\n";
+        let result = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        assert_eq!(
+            result,
+            expected_serialization_sorted_relocated,
+        );
     }
 
     #[test]
-    fn merge_keeps_own_entry_if_newer() {
+    fn restore_mtime() {
+        let testdir = testdir!();
+        let path = testdir.join("foo.cshd");
+        std::fs::write(&path, "foo").unwrap();
+        let hc =
+            HashCollection::new(
+                Some(&path),
+                Some(filetime::FileTime::from_unix_time(1337, 0)))
+            .unwrap();
+        let mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::File::open(&path)
+                .unwrap()
+                .metadata()
+                .unwrap());
+
+        hc.restore_mtime().unwrap();
+
+
+        let new_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::File::open(&path)
+                .unwrap()
+                .metadata()
+                .unwrap());
+
+        assert_ne!(mtime, new_mtime);
+        assert_eq!(new_mtime, hc.mtime.unwrap());
+    }
+
+    fn setup_two_collections_for_merge() -> (FileTree, HashCollection, HashCollection) {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut hc = HashCollection::new(
+            Some(&"/foo/hc.cshd"),
+            Some(filetime::FileTime::from_unix_time(123, 0))).unwrap();
+        let path_handle = ft.add_file("foo/file1.txt").unwrap();
+        let path_handle2 = ft.add_file("bar/file2.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(222, 0)),
+                Some(1337),
+                HashType::Md5,
+                vec![0xaa, 0xbb, 0xcc, 0xdd],
+            ),
+        );
+        hc.update(
+            path_handle2.clone(),
+            FileRaw::new(
+                path_handle2.clone(),
+                Some(filetime::FileTime::from_unix_time(123, 0)),
+                Some(1337),
+                HashType::Md5,
+                vec![0xab, 0xbc, 0xcd, 0xde],
+            ),
+        );
+
+        let mut other = HashCollection::new(
+            Some(&"./foo/other.cshd"), 
+            Some(filetime::FileTime::from_unix_time(1337, 0))).unwrap();
+        other.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(111, 0)),
+                None,
+                HashType::Md5,
+                vec![0xee, 0xff, 0x00, 0x11],
+            ),
+        );
+        other.update(
+            path_handle2.clone(),
+            FileRaw::new(
+                path_handle2.clone(),
+                Some(filetime::FileTime::from_unix_time(337, 0)),
+                None,
+                HashType::Md5,
+                vec![0xef, 0xf0, 0x01, 0x12],
+            ),
+        );
+
+        (ft, hc, other)
+    }
+
+    #[test]
+    fn merge_keeps_entries_from_newer_collection() {
+
+        let (ft, mut hc, mut other) =
+            setup_two_collections_for_merge();
+        hc.set_mtime(Some(filetime::FileTime::from_unix_time(123, 0)));
+        other.set_mtime(Some(filetime::FileTime::from_unix_time(1337, 0)));
+
+        hc.merge(other).unwrap();
+
+        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        assert_eq!(
+            serialized,
+            "\
+# version 1
+337,,md5,eff00112 bar/file2.txt
+111,,md5,eeff0011 foo/file1.txt
+"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_entries_from_collection_with_some_mtime() {
+
+        let (ft, mut hc, mut other) =
+            setup_two_collections_for_merge();
+        hc.set_mtime(Some(filetime::FileTime::from_unix_time(123, 0)));
+        other.set_mtime(None);
+
+        hc.merge(other).unwrap();
+
+        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        assert_eq!(
+            serialized,
+            "\
+# version 1
+123,1337,md5,abbccdde bar/file2.txt
+222,1337,md5,aabbccdd foo/file1.txt
+"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_entries_from_self_if_no_mtime() {
+
+        let (ft, mut hc, mut other) =
+            setup_two_collections_for_merge();
+        hc.set_mtime(None);
+        other.set_mtime(None);
+
+        hc.merge(other).unwrap();
+
+        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        assert_eq!(
+            serialized,
+            "\
+# version 1
+123,1337,md5,abbccdde bar/file2.txt
+222,1337,md5,aabbccdd foo/file1.txt
+"
+        );
+    }
+
+    #[test]
+    fn merge_adds_entries_in_other() {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
 
-        let mut hc = HashCollection::new(Some(&"./hc.cshd")).unwrap();
+        let mut hc = HashCollection::new(Some(&"/foo/hc.cshd"), None).unwrap();
         let path_handle = ft.add_file("foo/file1.txt").unwrap();
+        let path_handle2 = ft.add_file("bar/file2.txt").unwrap();
         hc.update(
             path_handle.clone(),
             FileRaw::new(
@@ -498,27 +756,27 @@ abcdefff foo/xer.mp4
             ),
         );
 
-        let mut other = HashCollection::new(Some(&"./foo/other.cshd")).unwrap();
+        let mut other = HashCollection::new(Some(&"./foo/other.cshd"), None).unwrap();
         other.update(
-            path_handle.clone(),
+            path_handle2.clone(),
             FileRaw::new(
-                path_handle.clone(),
-                Some(filetime::FileTime::from_unix_time(111, 0)),
+                path_handle2.clone(),
+                Some(filetime::FileTime::from_unix_time(337, 0)),
                 None,
                 HashType::Md5,
                 vec![0xee, 0xff, 0x00, 0x11],
             ),
         );
 
-        hc.merge(other, &mut ft).unwrap();
+        hc.merge(other).unwrap();
 
-        let mut buf = vec![];
-        hc.serialize(&mut buf, &ft).unwrap();
+        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
         assert_eq!(
-            String::from_utf8(buf).unwrap(),
+            serialized,
             "\
 # version 1
-222.0,1337,md5,aabbccdd foo/file1.txt
+337,,md5,eeff0011 bar/file2.txt
+222,1337,md5,aabbccdd foo/file1.txt
 "
         );
     }

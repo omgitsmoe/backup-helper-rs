@@ -16,7 +16,7 @@ use std::path::Path;
 pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashCollection> {
     let mut lines = reader.lines();
     let mut result =
-        HashCollection::new(None::<&&str>).expect("should always succeed without root");
+        HashCollection::new(None::<&&str>, None).expect("should always succeed without root");
     let mut warned_above_hash_file = false;
 
     let version = match &lines.next() {
@@ -62,7 +62,7 @@ pub fn parse_single_hash<R: BufRead>(
     file_tree: &mut FileTree,
 ) -> Result<HashCollection> {
     let mut result =
-        HashCollection::new(None::<&&str>).expect("should always succeed without root");
+        HashCollection::new(None::<&&str>, None).expect("should always succeed without root");
     for line in reader.lines() {
         match line {
             Ok(line) => {

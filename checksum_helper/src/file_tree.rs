@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, Component, StripPrefixError};
 use std::fmt::Display;
 use std::ffi::OsStr;
 
@@ -155,10 +155,15 @@ impl FileTree {
     }
 
     pub fn add(&mut self, path: impl AsRef<Path>, is_directory: bool) -> Result<EntryHandle, ErrorKind> {
-        let path = path.as_ref();
+        // NOTE: Path::strip_prefix can't deal with CurDir components, so remove them here
+        let path = path
+            .as_ref()
+            .components()
+            .filter(|c| c != &Component::CurDir)
+            .collect::<PathBuf>();
         assert!(path.is_relative(), "Only relative paths are allowed!");
 
-        let (last_existing, _) = self.find_last_existing(path);
+        let (last_existing, _) = self.find_last_existing(&path);
         let prefix = self.relative_path(&last_existing);
         let remaining = path.strip_prefix(prefix)
             .expect("BUG: path must be prefixed by the path of the last existing node");
@@ -177,9 +182,9 @@ impl FileTree {
             });
             let index = self.nodes.len() - 1;
 
-            self.nodes[current_parent.0].children.push(EntryHandle{0: index});
+            self.nodes[current_parent.0].children.push(EntryHandle(index));
 
-            current_parent = EntryHandle{0: index};
+            current_parent = EntryHandle(index);
         }
 
         self.nodes[current_parent.0].is_directory = is_directory;
