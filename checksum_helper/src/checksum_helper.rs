@@ -28,7 +28,6 @@ const HASH_FILE_EXTENSIONS: &'static [&'static str] = &[
 ];
 
 pub struct ChecksumHelper {
-    root: path::PathBuf,
     file_tree: FileTree,
     gathered_hash_files: bool,
     most_current: Option<HashCollection>,
@@ -45,13 +44,21 @@ pub struct DiscoverResult {
 // - incremental_skip_unchanged
 // - allow/block list
 impl ChecksumHelper {
-    pub fn new(root: &path::Path) -> ChecksumHelper {
-        ChecksumHelper {
-            root: root.to_path_buf(),
-            gathered_hash_files: false,
-            most_current: None,
-            file_tree: FileTree::new(),
+    pub fn new(root: &path::Path) -> Result<ChecksumHelper> {
+        if root.is_relative() {
+            Err(ChecksumHelperError::RootIsRelative(root.to_path_buf()))
+        } else {
+            Ok(ChecksumHelper {
+                gathered_hash_files: false,
+                most_current: None,
+                file_tree: FileTree::new(root)
+                    .expect("must succeed, since path was checked to be absolute!"),
+            })
         }
+    }
+
+    pub fn root(&self) -> path::PathBuf {
+        self.file_tree.absolute_path(&self.file_tree.root())
     }
 
     pub fn incremental(&mut self) -> &HashCollection {
@@ -82,7 +89,7 @@ impl ChecksumHelper {
 
     pub fn discover_hash_files(&self, max_depth: Option<u32>) -> Result<DiscoverResult> {
         let mut files = vec![];
-        let result = gather(&self.root, |visit_type| {
+        let result = gather(&self.root(), |visit_type| {
             match visit_type {
                 VisitType::File((_, e)) => match e.path().extension() {
                     None => {}
@@ -117,6 +124,7 @@ impl ChecksumHelper {
 
 #[derive(Debug)]
 pub enum ChecksumHelperError {
+    RootIsRelative(path::PathBuf),
     HashCollectionError(crate::collection::HashCollectionError),
     HashedFileError(crate::hashed_file::HashedFileError),
     // TODO error Trait
@@ -128,6 +136,7 @@ pub enum ChecksumHelperError {
 impl fmt::Display for ChecksumHelperError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            ChecksumHelperError::RootIsRelative(ref p) => write!(f, "root must be absolute, got: {:?}", p),
             ChecksumHelperError::HashCollectionError(..) => write!(f, "hash collection error"),
             ChecksumHelperError::HashedFileError(..) => write!(f, "hashed file error"),
             ChecksumHelperError::GatherError(..) => write!(f, "gather files error"),

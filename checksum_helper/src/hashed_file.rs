@@ -441,11 +441,12 @@ fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Resu
 mod test {
     use super::*;
     use crate::test_utils::*;
+    use std::path::Path;
 
     #[should_panic]
     #[test]
     fn test_file_new_panics_on_relative_path() {
-        let ft = FileTree::new();
+        let ft = FileTree::new(Path::new("/foo")).unwrap();
         let mut raw = FileRaw::bare(ft.root(), HashType::Md5);
         File::from_raw(&mut raw, path::Path::new("./test"), &ft);
     }
@@ -465,7 +466,7 @@ mod test {
         let testcontent = "foobar";
         fs::write(&testfile, testcontent).unwrap();
 
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(&testdir).unwrap();
         let path_handle = ft.add_file(&testfile_name).unwrap();
         let mut raw = FileRaw::bare(path_handle, HashType::Md5);
         let expected_hex = "3858f62230ac3c915f300c664312c63f";

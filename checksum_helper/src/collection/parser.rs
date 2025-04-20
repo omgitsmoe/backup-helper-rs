@@ -10,6 +10,9 @@ use std::io::{BufRead, Cursor};
 use std::path::Path;
 
 // TODO separate parser that just has a feed/feed_line method -> more flexible?
+// TODO test that this is correctly read in when its location/root directory is different from
+//      the FT's root directory
+//      -> the root may be None, which means it's assumed that it is the same as the FT's
 pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashCollection> {
     let mut lines = reader.lines();
     let mut result =
@@ -52,6 +55,7 @@ pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashColl
     Ok(result)
 }
 
+// TODO same root dir difference test than above
 pub fn parse_single_hash<R: BufRead>(
     reader: R,
     hash_type: HashType,
@@ -341,7 +345,7 @@ mod test {
 
     #[test]
     fn test_parse_handles_empty_string() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         assert!(parse(Cursor::new(""), &mut ft,)
             .inspect_err(|e| println!("{}", e))
             .is_ok());
@@ -353,7 +357,7 @@ mod test {
 
     #[test]
     fn test_parse_version_1() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let mtime = "1673815645.7979772";
         let size = 1337;
         let hash_type = HashType::Sha512;
@@ -407,7 +411,7 @@ mod test {
 
     #[test]
     fn test_parse_version_0() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let mtime = "1673815645.7979772";
         let hash_type = HashType::Sha512;
         let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
@@ -466,7 +470,7 @@ mod test {
 
     #[test]
     fn test_parse_single_hash() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let hash_type = HashType::Sha512;
         let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
         let file_path = ".gitignore";

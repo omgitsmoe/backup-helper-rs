@@ -10,6 +10,7 @@ pub struct FileTree {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     PathNotValid,
+    PathNotAbsolute,
     NotASubpathOfFileTreeRoot,
     NonCanoncialPath,
 }
@@ -30,7 +31,7 @@ fn is_valid(path: impl AsRef<Path>) -> bool {
 
 /// Considers a path as "absolute" as soon as it's not considered relative to
 /// the "current" directory
-/// WARNING: Also considers `C:` as absoulte, even on Unixes
+/// WARNING: Also considers `C:` as absolute, even on Unixes
 pub fn is_absolute(path: impl AsRef<Path>) -> bool {
     // NOTE: not using path.starts_with for / or \\, since it works
     //       on logical paths and would not count the \\? etc. prefixes
@@ -41,7 +42,8 @@ pub fn is_absolute(path: impl AsRef<Path>) -> bool {
                 return true;
             }
         },
-        Some(b'\\') | Some(b'/') => return true,
+        Some(b'/') => return true,
+        Some(b'\\') => return os.next() == Some(&b'\\'),
         _ => {}
     }
 
@@ -54,14 +56,19 @@ impl FileTree {
     /// `root` is not canonicalized by this method, since otherwise
     /// we could not represent roots that do not currently exist on the
     /// system
-    pub fn new() -> FileTree {
-        FileTree {
-            nodes: vec!(Entry{
-                name: PathBuf::new(),
-                is_directory: true,
-                parent: None,
-                children: vec!(),
-            }),
+    pub fn new(root: impl AsRef<Path>) -> Result<FileTree, ErrorKind> {
+        let root = root.as_ref();
+        if !is_absolute(&root) {
+            Err(ErrorKind::PathNotAbsolute)
+        } else {
+            Ok(FileTree {
+                nodes: vec!(Entry{
+                    name: root.to_path_buf(),
+                    is_directory: true,
+                    parent: None,
+                    children: vec!(),
+                }),
+            })
         }
     }
 
@@ -69,7 +76,15 @@ impl FileTree {
         self.nodes[entry.0].clone()
     }
 
+    pub fn absolute_path(&self, entry: &EntryHandle) -> PathBuf {
+        self.path(entry, true)
+    }
+
     pub fn relative_path(&self, entry: &EntryHandle) -> PathBuf {
+        self.path(entry, false)
+    }
+
+    fn path(&self, entry: &EntryHandle, is_absolute: bool) -> PathBuf {
         let mut p = &self.nodes[entry.0];
         // TODO store handles not pathbufs
         let mut entries = vec!(&p.name);
@@ -79,9 +94,11 @@ impl FileTree {
             p = parent;
         }
 
-        entries.iter().rev().fold(PathBuf::new(), |acc, e| {
+        let skip_num = if is_absolute { 0 } else { 1 };
+        entries.iter().rev().skip(skip_num).fold(PathBuf::new(), |acc, e| {
             acc.join(e)
         })
+
     }
 
     /// Find the last existing node that is involved in `path`.
@@ -300,7 +317,6 @@ mod test {
     fn test_is_absolute() {
         assert!(is_absolute(Path::new("/tmp/foo")));
         assert!(is_absolute(Path::new("/")));
-        assert!(is_absolute(Path::new("\\")));
         assert!(is_absolute(Path::new("\\\\?\\")));
         assert!(is_absolute(Path::new("C:\\windwos")));
         assert!(is_absolute(Path::new("C:")));
@@ -310,6 +326,7 @@ mod test {
         assert!(is_absolute(Path::new("D:\\")));
         assert!(is_absolute(Path::new("z:\\")));
 
+        assert!(!is_absolute(Path::new("\\")));
         assert!(!is_absolute(Path::new("tmp")));
         assert!(!is_absolute(Path::new("tmp/")));
         assert!(!is_absolute(Path::new("tmp\\")));
@@ -320,11 +337,21 @@ mod test {
     }
 
     #[test]
+    fn file_tree_new_rejects_relative_paths() {
+        assert!(matches!(FileTree::new(Path::new("foo")), Err(ErrorKind::PathNotAbsolute)));
+        assert!(matches!(FileTree::new(Path::new("./foo")), Err(ErrorKind::PathNotAbsolute)));
+        assert!(matches!(FileTree::new(Path::new("foo/bar")), Err(ErrorKind::PathNotAbsolute)));
+        assert!(matches!(FileTree::new(Path::new("./foo/bar")), Err(ErrorKind::PathNotAbsolute)));
+        assert!(matches!(FileTree::new(Path::new("\\foo")), Err(ErrorKind::PathNotAbsolute)));
+    }
+
+    #[test]
     fn test_add() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let txt_path = Path::new("./bar/baz/file.txt");
         let txt = ft.add(txt_path, false).unwrap();
         assert_eq!(ft.relative_path(&txt), Path::new("bar").join("baz").join("file.txt"));
+        assert_eq!(ft.absolute_path(&txt), Path::new("/foo").join("bar").join("baz").join("file.txt"));
 
         let txt_entry = ft.entry(&txt);
         assert_eq!(txt_entry.name, Path::new("file.txt"));
@@ -342,6 +369,7 @@ mod test {
         let mov_path = Path::new("bar/baz/mov.mp4");
         let mov = ft.add(mov_path, false).unwrap();
         assert_eq!(ft.relative_path(&mov), mov_path);
+        assert_eq!(ft.absolute_path(&mov), Path::new("/foo").join(mov_path));
         let mov_entry = ft.entry(&mov);
         assert_eq!(mov_entry.name, Path::new("mov.mp4"));
         assert_eq!(ft.find_last_existing(&mov_path).0, mov);
@@ -355,6 +383,7 @@ mod test {
         let bin_path = Path::new("bar/file.bin");
         let bin = ft.add(bin_path, false).unwrap();
         assert_eq!(ft.relative_path(&bin), bin_path);
+        assert_eq!(ft.absolute_path(&bin), Path::new("/foo").join(bin_path));
         let bin_entry = ft.entry(&bin);
         assert_eq!(bin_entry.name, Path::new("file.bin"));
         assert_eq!(ft.find_last_existing(&bin_path).0, bin);
@@ -363,7 +392,7 @@ mod test {
     #[test]
     #[should_panic]
     fn test_add_panic_on_absoulte_path() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         // NOTE: `is_absolute` is platform dependent, so e.g. `/tmp` is
         //       not absolute on Windows
         let txt_path = std::env::current_dir().unwrap().join(
@@ -373,7 +402,7 @@ mod test {
 
     #[test]
     fn test_add_ignores_curdir() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let txt_path = Path::new("./bar/./baz/./file.txt");
         let txt = ft.add(txt_path, false).unwrap();
 
@@ -385,7 +414,7 @@ mod test {
 
     #[test]
     fn test_add_adds_intermediate_dirs() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let txt_path = Path::new("./bar/baz/file.txt");
         let txt = ft.add(txt_path, false).unwrap();
         assert_eq!(ft.relative_path(&txt), Path::new("bar").join("baz").join("file.txt"));
@@ -406,7 +435,7 @@ mod test {
 
     #[test]
     fn test_add_reuses_dir_entries() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
 
         let txt = ft.add(
             Path::new("./bar/baz/file.txt"), false).unwrap();
@@ -434,7 +463,7 @@ mod test {
 
     #[test]
     fn test_add_returns_entry_if_present() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
 
         let txt = ft.add(
             Path::new("./bar/baz/file.txt"), false).unwrap();
@@ -444,7 +473,7 @@ mod test {
 
     #[test]
     fn test_add_child_returns_entry_if_present() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
 
         let dir = ft.add("./bar/baz", true)
             .unwrap();
@@ -457,7 +486,7 @@ mod test {
 
     #[test]
     fn test_add_errors_when_pardir_path() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let txt_path = Path::new("bar/baz/../file.txt");
         assert_eq!(ft.add(txt_path, false), Err(ErrorKind::NonCanoncialPath));
     }

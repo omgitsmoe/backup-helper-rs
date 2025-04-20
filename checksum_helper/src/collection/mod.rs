@@ -30,7 +30,6 @@ pub struct HashCollection {
     //      one can reset it when nothing else has changed
 }
 
-// TODO verify method
 impl HashCollection {
     pub fn new(path: Option<&impl AsRef<Path>>) -> Result<HashCollection> {
         Ok(HashCollection {
@@ -60,6 +59,10 @@ impl HashCollection {
         match self.root_dir {
             None => self.root_dir = Some(root_dir.to_path_buf()),
             Some(ref old_root) => {
+                // TODO: leftoff how to handle relocating to a directory above old_root
+                // could enforce self.root_dir to be absolute then
+                // compute the diff and then re-add the new relative path to file_tree
+                // and exchange it in the hash_map (and file)
                 todo!("transform all paths to add new_root.relative_to(old_root)")
             }
         }
@@ -170,6 +173,11 @@ impl HashCollection {
         }
 
         Ok(())
+    }
+
+    pub fn verify(&self, checksum_helper_root: &Path, file_tree: &FileTree) -> Result<()> {
+        // NOTE: root 
+        todo!()
     }
 }
 
@@ -299,8 +307,8 @@ mod test {
         assert!(!is_path_above_hash_file("./foo/././baz/.."));
     }
 
-    pub fn setup_minimal_hc() -> (HashCollection, FileTree, &'static str) {
-        let mut ft = FileTree::new();
+    pub fn setup_minimal_hc(root: &Path) -> (HashCollection, FileTree, &'static str) {
+        let mut ft = FileTree::new(root).unwrap();
 
         let mut hc = HashCollection::new(None::<&&str>).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
@@ -352,7 +360,7 @@ mod test {
     fn test_write_never_overwrites() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
-        let ft = FileTree::new();
+        let ft = FileTree::new(&testdir).unwrap();
         let hc = HashCollection::new(Some(&path)).unwrap();
         fs::write(path, "foo").unwrap();
 
@@ -370,7 +378,7 @@ mod test {
     fn test_write() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
-        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc();
+        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc(&testdir);
         hc.relocate(&testdir, &mut ft).unwrap();
         hc.rename(&OsString::from("foo.cshd"));
 
@@ -387,7 +395,7 @@ mod test {
     fn test_from_disk() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
-        let (mut hc, mut ft, _) = setup_minimal_hc();
+        let (mut hc, mut ft, _) = setup_minimal_hc(&testdir);
         hc.relocate(&testdir, &mut ft).unwrap();
         hc.rename(&OsString::from("foo.cshd"));
 
@@ -430,7 +438,7 @@ abcdefff foo/xer.mp4
             hash_hex
         );
         fs::write(&path, single_hash).unwrap();
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(&testdir).unwrap();
 
         let hc = HashCollection::from_disk(&path, &mut ft).unwrap();
 
@@ -465,6 +473,53 @@ abcdefff foo/xer.mp4
   foo/bar/baz
   foo/xer.mp4
 }"
+        );
+    }
+
+    #[test]
+    fn relocate() {
+        todo!()
+    }
+
+    #[test]
+    fn merge_keeps_own_entry_if_newer() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+
+        let mut hc = HashCollection::new(Some(&"./hc.cshd")).unwrap();
+        let path_handle = ft.add_file("foo/file1.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(222, 0)),
+                Some(1337),
+                HashType::Md5,
+                vec![0xaa, 0xbb, 0xcc, 0xdd],
+            ),
+        );
+
+        let mut other = HashCollection::new(Some(&"./foo/other.cshd")).unwrap();
+        other.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(111, 0)),
+                None,
+                HashType::Md5,
+                vec![0xee, 0xff, 0x00, 0x11],
+            ),
+        );
+
+        hc.merge(other, &mut ft).unwrap();
+
+        let mut buf = vec![];
+        hc.serialize(&mut buf, &ft).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\
+# version 1
+222.0,1337,md5,aabbccdd foo/file1.txt
+"
         );
     }
 }

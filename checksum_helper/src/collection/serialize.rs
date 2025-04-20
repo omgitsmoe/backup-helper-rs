@@ -19,6 +19,7 @@ pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tre
     Ok(())
 }
 
+// TODO test that an entry gets its correct path when the FT has a different root than the collection
 fn serialize_entry<W: Write>(
     writer: &mut W,
     path_handle: &EntryHandle,
@@ -88,10 +89,11 @@ mod test {
     use super::*;
     use super::super::test::setup_minimal_hc;
     use pretty_assertions::assert_eq;
+    use std::path::Path;
 
     #[test]
     fn test_serialize_entry() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let mut buf = vec![];
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
         let file = FileRaw::new(
@@ -111,7 +113,7 @@ mod test {
 
     #[test]
     fn test_serialize_entry_missing_mtime_and_size() {
-        let mut ft = FileTree::new();
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let mut buf = vec![];
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
         let file = FileRaw::new(
@@ -132,7 +134,7 @@ mod test {
     #[test]
     fn test_serialize() {
         let mut buf = vec![];
-        let (hc, ft, expected_serialization) = setup_minimal_hc();
+        let (hc, ft, expected_serialization) = setup_minimal_hc(Path::new("/foo"));
 
         hc.serialize(&mut buf, &ft).unwrap();
 

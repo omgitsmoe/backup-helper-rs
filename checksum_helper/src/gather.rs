@@ -196,7 +196,7 @@ stop d1"#
     #[test]
     fn no_filter() {
         let test_path = setup_ftree();
-        let mut file_tree = FileTree::new();
+        let mut file_tree = FileTree::new(&test_path).unwrap();
         let _ = gather_into_file_tree(&test_path, &mut file_tree, |_| true).unwrap();
         let str = to_file_list(file_tree);
         assert_eq!(
@@ -219,7 +219,7 @@ stop d1"#
     #[test]
     fn filter_extension() {
         let test_path = setup_ftree();
-        let mut file_tree = FileTree::new();
+        let mut file_tree = FileTree::new(&test_path).unwrap();
         let _ = gather_into_file_tree(&test_path, &mut file_tree, |p| {
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the file name
@@ -241,7 +241,7 @@ stop d1"#
     #[test]
     fn filter_dir() {
         let test_path = setup_ftree();
-        let mut file_tree = FileTree::new();
+        let mut file_tree = FileTree::new(&test_path).unwrap();
         let _ = gather_into_file_tree(&test_path, &mut file_tree, |p| {
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the file name
