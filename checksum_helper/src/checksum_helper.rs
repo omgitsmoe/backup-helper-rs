@@ -62,6 +62,8 @@ impl ChecksumHelper {
     }
 
     pub fn incremental(&mut self) -> &HashCollection {
+        // TODO progress callback
+        // prob best to gather files first then do the checksumming -> better progress indicator
         todo!();
     }
 
@@ -76,6 +78,14 @@ impl ChecksumHelper {
 
     pub fn update_most_current(&mut self) {
         todo!();
+    }
+
+    pub fn verify<F>(&self, include: F) -> Result<()>
+    where
+        F: Fn(&path::Path) -> bool,
+    {
+        // TODO progress callback
+        todo!()
     }
 
     // TODO copy as well?

@@ -212,9 +212,31 @@ impl HashCollection {
         Ok(())
     }
 
-    pub fn verify(&self, checksum_helper_root: &Path, file_tree: &FileTree) -> Result<()> {
-        // NOTE: root 
-        todo!()
+    /// `include`: Predicate function which determines whether to include the
+    ///            Path passed to it in verification. The path is relative
+    ///            to the `file_tree.root()`.
+    pub fn verify<F, P>(&self, file_tree: &FileTree, include: F, progress: P) -> Result<()>
+    where
+        F: Fn(&Path) -> bool,
+        P: FnMut(&Path, ),
+    {
+        // NOTE: root??? what is meant here?
+        for (path_handle, file_raw) in self.map.iter() {
+            let path = file_tree.relative_path(path_handle);
+            if !include(&path) {
+                continue;
+            }
+
+            let file = file_raw.with_context(file_tree);
+            // TODO should verify just never error and instead return it as part of VerifyResult?
+            //      and what should we pass on to progress?
+            match file.verify() {
+                Ok(result) => todo!(),
+                Err(e) => todo!(),
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -254,6 +276,7 @@ pub enum HashCollectionError {
     UnsupportedHashType(String),
     IOError(std::io::ErrorKind),
     NonUnicodePath(PathBuf),
+    HashedFileError(crate::hashed_file::HashedFileError),
 }
 
 impl fmt::Display for HashCollectionError {
@@ -310,6 +333,9 @@ impl fmt::Display for HashCollectionError {
             HashCollectionError::MissingMTime => {
                 write!(f, "missing modification time")
             },
+            HashCollectionError::HashedFileError(ref e) => {
+                write!(f, "hashed file error: {}", e)
+            },
         }
     }
 }
@@ -318,6 +344,7 @@ impl Error for HashCollectionError {
     // return the source for this error, e.g. std::io::Eror if we wrapped it
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match *self {
+            HashCollectionError::HashedFileError(ref e) => Some(e),
             _ => None,
         }
     }
@@ -326,6 +353,12 @@ impl Error for HashCollectionError {
 impl From<std::io::Error> for HashCollectionError {
     fn from(value: std::io::Error) -> Self {
         HashCollectionError::IOError(value.kind())
+    }
+}
+
+impl From<crate::hashed_file::HashedFileError> for HashCollectionError {
+    fn from(value: crate::hashed_file::HashedFileError) -> Self {
+        HashCollectionError::HashedFileError(value)
     }
 }
 

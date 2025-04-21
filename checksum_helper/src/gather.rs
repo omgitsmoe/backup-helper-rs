@@ -38,10 +38,7 @@ where
 {
     let mut errors = vec![];
     let mut directories = vec![(0u32, start.to_path_buf())];
-    while !directories.is_empty() {
-        let (depth, directory) = directories
-            .pop()
-            .expect("Directory must not be None, since it's the loop condition!");
+    while let Some((depth, directory)) = directories.pop() {
         let iter_dir = match fs::read_dir(&directory) {
             Ok(iter) => iter,
             Err(e) => {

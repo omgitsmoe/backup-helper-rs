@@ -11,12 +11,12 @@ use std::path;
 
 type Result<T> = std::result::Result<T, HashedFileError>;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum HashedFileError {
     MissingMTime,
     MissingHash,
     // wrap io::Error
-    IOError(std::io::Error),
+    IOError((Option<path::PathBuf>, std::io::ErrorKind)),
 }
 
 impl fmt::Display for HashedFileError {
@@ -26,7 +26,10 @@ impl fmt::Display for HashedFileError {
             HashedFileError::MissingHash => write!(f, "missing hash"),
             // The wrapped error contains additional information and is available
             // via the source() method.
-            HashedFileError::IOError(..) => write!(f, "disk i/o error"),
+            HashedFileError::IOError((Some(ref p), kind)) =>
+                write!(f, "disk i/o error at '{:?}': {}", p, kind),
+            HashedFileError::IOError((None, kind)) =>
+                write!(f, "disk i/o error: {}", kind.clone()),
         }
     }
 }
@@ -35,18 +38,8 @@ impl Error for HashedFileError {
     // return the source for this error, e.g. std::io::Eror if we wrapped it
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match *self {
-            HashedFileError::MissingMTime | HashedFileError::MissingHash => None,
-            // The cause is the underlying implementation error type. Is implicitly
-            // cast to the trait object `&error::Error`. This works because the
-            // underlying type already implements the `Error` trait.
-            HashedFileError::IOError(ref e) => Some(e),
+            _ => None,
         }
-    }
-}
-
-impl From<std::io::Error> for HashedFileError {
-    fn from(value: std::io::Error) -> Self {
-        HashedFileError::IOError(value)
     }
 }
 
@@ -174,9 +167,12 @@ impl FileRaw {
 
     // TODO this should probably return the path relative to the collection root, not
     //      to the file tree
-    //      or just return an absolute path?
     pub fn relative_path(&self, file_tree: &FileTree) -> path::PathBuf {
         file_tree.relative_path(&self.path)
+    }
+
+    pub fn absolute_path(&self, file_tree: &FileTree) -> path::PathBuf {
+        file_tree.absolute_path(&self.path)
     }
 
     pub fn mtime(&self) -> Option<FileTime> {
@@ -212,38 +208,65 @@ impl FileRaw {
     }
 
     pub(crate) fn with_context<'a>(
-        &'a mut self,
-        root: &'a path::Path,
+        &'a self,
         file_tree: &'a FileTree,
     ) -> File<'a> {
-        File::from_raw(self, root, file_tree)
+        File::from_raw(self, file_tree)
+    }
+
+    pub(crate) fn with_context_mut<'a>(
+        &'a mut self,
+        file_tree: &'a FileTree,
+    ) -> File<'a> {
+        File::from_raw(self, file_tree)
     }
 }
 
+// @Design could use a shared trait here that works for wrapping both a
+// mut FileRaw and non-mut, but then we'd have to impl that for each
+// of those variations.
+// Makes more sense if you have more types. Here it's just two distinctions
+// and we're not trying to abstract mainly common behaviour.
+// Instead we chose to use separate structs, one for wrapping a mut,
+// one for a non-mut reference. This reduces duplication, since
+// the mut wrapper can just return a non-mut one.
 pub struct File<'a> {
-    file: &'a mut FileRaw,
-    root: &'a path::Path,
+    file: &'a FileRaw,
     context: &'a FileTree,
 }
 
-impl<'a> File<'a> {
-    pub fn from_raw(
-        raw: &'a mut FileRaw,
-        root: &'a path::Path,
-        file_tree: &'a FileTree,
-    ) -> File<'a> {
-        assert!(root.is_absolute());
-        File {
-            file: raw,
-            root,
-            context: file_tree,
-        }
+pub struct FileMut<'a> {
+    file: &'a mut FileRaw,
+    context: &'a FileTree,
+}
+
+impl<'a> FileMut<'a> {
+    pub fn from_raw(file: &'a mut FileRaw, file_tree: &'a FileTree) -> FileMut<'a> {
+        FileMut { file, context: file_tree }
     }
 
     // NOTE: Use a closure here so we don't run into borrow/lifetime issues
-    pub fn raw<F, R>(&mut self, func: F) -> R
+    pub fn raw<C, R>(&mut self, func: C) -> R
     where
-        F: FnOnce(&mut FileRaw) -> R,
+        C: FnOnce(&mut FileRaw) -> R,
+    {
+        func(self.file)
+    }
+
+    pub fn as_file(&'a self) -> File<'a> {
+        File { file: self.file, context: self.context }
+    }
+}
+
+impl<'a> File<'a> {
+    pub fn from_raw(file: &'a FileRaw, file_tree: &'a FileTree) -> File<'a> {
+        File { file, context: file_tree }
+    }
+
+    // NOTE: Use a closure here so we don't run into borrow/lifetime issues
+    pub fn raw<C, R>(&mut self, func: C) -> R
+    where
+        C: FnOnce(&FileRaw) -> R,
     {
         func(self.file)
     }
@@ -255,26 +278,28 @@ impl<'a> File<'a> {
         self.file.relative_path(self.context)
     }
 
-    fn path_with_root(&self) -> path::PathBuf {
-        self.root.join(self.relative_path())
+    fn absolute_path(&self) -> path::PathBuf {
+        self.file.absolute_path(self.context)
     }
 
     fn fetch_size(&self) -> Result<u64> {
-        let path = self.path_with_root();
-        let metadata = std::fs::metadata(path)?;
+        let path = self.absolute_path();
+        let metadata = std::fs::metadata(&path)
+            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
         Ok(metadata.len())
     }
 
     fn fetch_mtime(&self) -> Result<FileTime> {
-        let path = self.path_with_root();
-        let metadata = std::fs::metadata(path)?;
+        let path = self.absolute_path();
+        let metadata = std::fs::metadata(&path)
+            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
         Ok(FileTime::from_last_modification_time(&metadata))
     }
 
     fn mtime_to_disk(&self) -> Result<()> {
-        let path = self.path_with_root();
-        filetime::set_file_mtime(path, self.file.mtime.ok_or(HashedFileError::MissingMTime)?)
-            .map_err(|e| HashedFileError::IOError(e))
+        let path = self.absolute_path();
+        filetime::set_file_mtime(&path, self.file.mtime.ok_or(HashedFileError::MissingMTime)?)
+            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))
     }
 
     pub fn verify(&self) -> Result<VerifyResult> {
@@ -282,20 +307,18 @@ impl<'a> File<'a> {
             return Err(HashedFileError::MissingHash);
         }
 
-        let path = self.path_with_root();
-        if !fs::exists(path)? {
+        let path = self.absolute_path();
+        if !fs::exists(&path)
+            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))? {
             return Ok(VerifyResult::FileMissing);
         }
 
         // TODO @Perf fetch metadata only once and get mtime/size manually from it?
-        match self.file.size() {
-            Some(ref expected) => {
-                let size_on_disk = self.fetch_size()?;
-                if size_on_disk != *expected {
-                    return Ok(VerifyResult::MismatchSize);
-                }
+        if let Some(ref expected) = self.file.size() {
+            let size_on_disk = self.fetch_size()?;
+            if size_on_disk != *expected {
+                return Ok(VerifyResult::MismatchSize);
             }
-            None => {}
         };
 
         let hash_on_disk = self.compute_hash()?;
@@ -320,8 +343,9 @@ impl<'a> File<'a> {
     }
 
     pub fn compute_hash_with(&self, hash_type: HashType) -> Result<Vec<u8>> {
-        let path = self.path_with_root();
-        let file = fs::File::open(path)?;
+        let path = self.absolute_path();
+        let file = fs::File::open(&path)
+            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
         let reader = BufReader::new(file);
         compute_hash(reader, hash_type)
     }
@@ -434,7 +458,7 @@ fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Resu
     loop {
         let bytes_read = reader
             .read(&mut buf)
-            .map_err(|e| HashedFileError::IOError(e))?;
+            .map_err(|e| HashedFileError::IOError((None, e.kind())))?;
         if bytes_read == 0 {
             break;
         }
@@ -447,15 +471,6 @@ fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Resu
 mod test {
     use super::*;
     use crate::test_utils::*;
-    use std::path::Path;
-
-    #[should_panic]
-    #[test]
-    fn test_file_new_panics_on_relative_path() {
-        let ft = FileTree::new(Path::new("/foo")).unwrap();
-        let mut raw = FileRaw::bare(ft.root(), HashType::Md5);
-        File::from_raw(&mut raw, path::Path::new("./test"), &ft);
-    }
 
     fn setup_testfile<'a>() -> (
         path::PathBuf,
@@ -494,7 +509,7 @@ mod test {
     #[test]
     fn test_fetch_size() {
         let (testdir, _, _, testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw, &testdir, &ft);
+        let file = File::from_raw(&mut raw, &ft);
         assert_eq!(file.fetch_size().unwrap(), testcontent.len() as u64);
     }
 
@@ -505,7 +520,7 @@ mod test {
         let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
         filetime::set_file_mtime(&testfile, expected_mtime).unwrap();
 
-        let file = File::from_raw(&mut raw, &testdir, &ft);
+        let file = File::from_raw(&mut raw, &ft);
         assert_eq!(file.fetch_mtime().unwrap(), expected_mtime);
     }
 
@@ -513,20 +528,20 @@ mod test {
     fn test_mtime_to_disk() {
         let (testdir, _, _, _, ft, mut raw, _) = setup_testfile();
         let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
-        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+        let mut file = FileMut::from_raw(&mut raw,  &ft);
 
         file.raw(|raw| raw.update_mtime(Some(expected_mtime)));
 
-        file.mtime_to_disk().unwrap();
+        file.as_file().mtime_to_disk().unwrap();
 
-        assert_eq!(file.fetch_mtime().unwrap(), expected_mtime);
+        assert_eq!(file.as_file().fetch_mtime().unwrap(), expected_mtime);
     }
 
     #[test]
     fn test_compute_hash() {
         let (testdir, _testfile_name, _testfile_abs, testcontent, ft, mut raw, expected_hex) =
             setup_testfile();
-        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+        let mut file = File::from_raw(&mut raw, &ft);
 
         let expected = hex::decode(expected_hex).unwrap();
         assert_eq!(
@@ -546,7 +561,7 @@ mod test {
     fn test_verify_ok() {
         let (testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
             setup_testfile();
-        let file = File::from_raw(&mut raw, &testdir, &ft);
+        let file = File::from_raw(&mut raw, &ft);
 
         assert_eq!(file.verify().unwrap(), VerifyResult::Ok);
     }
@@ -555,7 +570,7 @@ mod test {
     fn test_verify_missing_hash() {
         let (testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
             setup_testfile();
-        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+        let mut file = FileMut::from_raw(&mut raw, &ft);
 
         file.raw(|raw| raw.hash_bytes = vec![]);
 
@@ -563,13 +578,13 @@ mod test {
         // this could be used to check the contents as well:
         // assert!(matches!(file.verify(), Err(HashedFileError::IOError(k))
         //         if k.kind() == std::io::ErrorKind::NotFound));
-        assert!(matches!(file.verify(), Err(HashedFileError::MissingHash)));
+        assert!(matches!(file.as_file().verify(), Err(HashedFileError::MissingHash)));
     }
 
     #[test]
     fn test_verify_missing_file() {
         let (testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw, &testdir, &ft);
+        let file = File::from_raw(&mut raw,&ft);
 
         std::fs::remove_file(testfile_abs).unwrap();
 
@@ -580,7 +595,7 @@ mod test {
     #[test]
     fn test_verify_mismatch_size() {
         let (testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw, &testdir, &ft);
+        let file = File::from_raw(&mut raw,&ft);
 
         std::fs::write(testfile_abs, "newsize1234").unwrap();
 
@@ -591,7 +606,7 @@ mod test {
     #[test]
     fn test_verify_mismatch() {
         let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw, &testdir, &ft);
+        let file = File::from_raw(&mut raw,&ft);
 
         let new_content = "foobaz";
         assert_eq!(testcontent.len(), new_content.len());
@@ -604,23 +619,23 @@ mod test {
     #[test]
     fn test_verify_mismatch_corrupted() {
         let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
-        let mut file = File::from_raw(&mut raw, &testdir, &ft);
+        let mut file = FileMut::from_raw(&mut raw, &ft);
 
         let new_content = "foobaz";
         assert_eq!(testcontent.len(), new_content.len());
         std::fs::write(testfile_abs, new_content).unwrap();
-        let new_mtime = file.fetch_mtime().unwrap();
+        let new_mtime = file.as_file().fetch_mtime().unwrap();
         file.raw(|raw| raw.update_mtime(Some(new_mtime)));
 
-        let result = file.verify();
+        let result = file.as_file().verify();
         assert!(matches!(result, Ok(VerifyResult::MismatchCorrupted)));
     }
 
     #[test]
     fn test_verify_mismatch_outdated() {
         let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
-        let mut file = File::from_raw(&mut raw, &testdir, &ft);
-        let current_mtime = file.fetch_mtime().unwrap();
+        let mut file = FileMut::from_raw(&mut raw,&ft);
+        let current_mtime = file.as_file().fetch_mtime().unwrap();
         let outdated_mtime = filetime::FileTime::from_unix_time(
             current_mtime.seconds() - 5, current_mtime.nanoseconds());
         file.raw(|raw| raw.update_mtime(Some(outdated_mtime)));
@@ -629,7 +644,7 @@ mod test {
         assert_eq!(testcontent.len(), new_content.len());
         std::fs::write(testfile_abs, new_content).unwrap();
 
-        let result = file.verify();
+        let result = file.as_file().verify();
         assert!(matches!(result, Ok(VerifyResult::MismatchOutdatedHash)));
     }
 }
