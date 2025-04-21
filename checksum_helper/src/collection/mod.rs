@@ -100,12 +100,14 @@ impl HashCollection {
         self.map.get_mut(path_handle)
     }
 
-    pub fn from_str(str: &str, file_tree: &mut FileTree) -> Result<HashCollection> {
-        parser::parse(Cursor::new(str), file_tree)
+    pub fn from_str(str: &str, collection_path: impl AsRef<Path>, file_tree: &mut FileTree) -> Result<HashCollection> {
+        parser::parse(Cursor::new(str), collection_path, file_tree)
     }
 
     pub fn from_disk(path: &Path, file_tree: &mut FileTree) -> Result<HashCollection> {
         let file = fs::File::open(path)?;
+        let mtime = filetime::FileTime::from_last_modification_time(
+            &file.metadata()?);
         let root = path
             .parent()
             .ok_or_else(|| HashCollectionError::InvalidPath(path.to_owned()))?;
@@ -118,17 +120,18 @@ impl HashCollection {
             .extension()
             .ok_or_else(|| HashCollectionError::InvalidExtension(OsString::new()))?;
         let result = if extension == OsStr::new("cshd") {
-            parser::parse(reader, file_tree)
+            parser::parse(reader, path, file_tree)
         } else {
             let hash_type = HashType::try_from(extension)
                 .map_err(|_| HashCollectionError::InvalidExtension(extension.to_os_string()))?;
-            parser::parse_single_hash(reader, hash_type, file_tree)
+            parser::parse_single_hash(reader, hash_type, path, file_tree)
         };
 
         match result {
             Ok(mut hc) => {
                 hc.relocate(root);
                 hc.rename(file_name);
+                hc.set_mtime(Some(mtime));
 
                 Ok(hc)
             }
@@ -446,11 +449,15 @@ mod test {
         hc.rename(&OsString::from("foo.cshd"));
 
         hc.write(&ft).unwrap();
+        let expected_mtime = filetime::FileTime::from_unix_time(
+            1337, 0);
+        filetime::set_file_mtime(&path, expected_mtime).unwrap();
         let expected_len = ft.len();
 
         let actual = HashCollection::from_disk(&path, &mut ft).unwrap();
         assert_eq!(actual.root_dir, Some(testdir));
         assert_eq!(actual.name.unwrap(), path.file_name().unwrap());
+        assert_eq!(actual.mtime, Some(expected_mtime));
         assert_eq!(ft.len(), expected_len);
 
         for (ph, f) in actual.map {
@@ -484,9 +491,15 @@ abcdefff foo/xer.mp4
             hash_hex
         );
         fs::write(&path, single_hash).unwrap();
+        let expected_mtime = filetime::FileTime::from_unix_time(
+            1337, 0);
+        filetime::set_file_mtime(&path, expected_mtime).unwrap();
         let mut ft = FileTree::new(&testdir).unwrap();
 
         let hc = HashCollection::from_disk(&path, &mut ft).unwrap();
+        assert_eq!(hc.root_dir, Some(testdir));
+        assert_eq!(hc.name.unwrap(), path.file_name().unwrap());
+        assert_eq!(hc.mtime, Some(expected_mtime));
 
         let key = ft.find(".gitignore").unwrap();
         let hf = &hc.map[&key];

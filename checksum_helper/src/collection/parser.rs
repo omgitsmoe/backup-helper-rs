@@ -4,28 +4,31 @@ use crate::file_tree::{is_absolute, FileTree};
 use crate::hashed_file::{FileRaw, HashType};
 
 use hex;
+use pathdiff::diff_paths;
 use log::{error, warn};
 
 use std::io::{BufRead, Cursor};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // TODO separate parser that just has a feed/feed_line method -> more flexible?
 // TODO test that this is correctly read in when its location/root directory is different from
 //      the FT's root directory
 //      -> the root may be None, which means it's assumed that it is the same as the FT's
-pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashCollection> {
+pub fn parse<R: BufRead>(reader: R, collection_path: impl AsRef<Path>, file_tree: &mut FileTree) -> Result<HashCollection> {
     let mut lines = reader.lines();
     let mut result =
-        HashCollection::new(None::<&&str>, None).expect("should always succeed without root");
+        HashCollection::new(Some(&collection_path), None).expect("should always succeed without root");
     let mut warned_above_hash_file = false;
 
+    let prefix = ft_to_collection_root_prefix(&result, file_tree)?;
     let version = match &lines.next() {
         Some(Ok(line)) => {
             let (found, version) = parse_version_header(&line)?;
             if !found {
                 // no header line found, parse the line
                 parse_line(
-                    &line,
+                    line,
+                    &prefix,
                     file_tree,
                     version,
                     &mut warned_above_hash_file,
@@ -43,6 +46,7 @@ pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashColl
         match line {
             Ok(line) => parse_line(
                 &line,
+                &prefix,
                 file_tree,
                 version,
                 &mut warned_above_hash_file,
@@ -55,23 +59,35 @@ pub fn parse<R: BufRead>(reader: R, file_tree: &mut FileTree) -> Result<HashColl
     Ok(result)
 }
 
+fn ft_to_collection_root_prefix(collection: &HashCollection, file_tree: &FileTree) -> Result<PathBuf> {
+    let root = &collection.root_dir
+        .as_ref()
+        .expect("expected to be set by parse on the hash collection");
+    let prefix = diff_paths(
+        root, file_tree.absolute_path(&file_tree.root()))
+        .ok_or_else(|| HashCollectionError::InvalidCollectionRoot(Some((*root).clone())))?;
+    Ok(prefix)
+}
+
 // TODO same root dir difference test than above
 pub fn parse_single_hash<R: BufRead>(
     reader: R,
     hash_type: HashType,
+    collection_path: impl AsRef<Path>,
     file_tree: &mut FileTree,
 ) -> Result<HashCollection> {
     let mut result =
-        HashCollection::new(None::<&&str>, None).expect("should always succeed without root");
-    for line in reader.lines() {
-        match line {
+        HashCollection::new(Some(&collection_path), None).expect("should always succeed without root");
+    let prefix = ft_to_collection_root_prefix(&result, file_tree)?;
+    for line in reader.lines() { match line {
             Ok(line) => {
                 let (hash_hex, file_path) = line.split_once(' ').ok_or_else(|| {
                     HashCollectionError::InvalidSingleHashLine((line.to_string(), "".to_string()))
                 })?;
+                let file_path = prefix.join(file_path);
                 let path_handle = file_tree
-                    .add(file_path, false)
-                    .map_err(|e| HashCollectionError::FileTreeError(e))?;
+                    .add(&file_path, false)
+                    .map_err(HashCollectionError::FileTreeError)?;
                 result.update(
                     path_handle.clone(),
                     FileRaw::new(
@@ -82,7 +98,7 @@ pub fn parse_single_hash<R: BufRead>(
                         hex::decode(hash_hex).map_err(|_| {
                             HashCollectionError::InvalidSingleHashLine((
                                 hash_hex.to_string(),
-                                file_path.to_string(),
+                                format!("{:?}", file_path),
                             ))
                         })?,
                     ),
@@ -97,6 +113,7 @@ pub fn parse_single_hash<R: BufRead>(
 
 fn parse_line(
     line: &str,
+    prefix: &Path,
     file_tree: &mut FileTree,
     version: u32,
     warned_above_hash_file: &mut bool,
@@ -129,7 +146,8 @@ fn parse_line(
         *warned_above_hash_file = true;
     }
 
-    let path_handle = match file_tree.add(Path::new(file_path), false) {
+    let file_path = prefix.join(file_path);
+    let path_handle = match file_tree.add(&file_path, false) {
         Ok(path_handle) => path_handle,
         Err(e) => return Err(HashCollectionError::FileTreeError(e)),
     };
@@ -346,13 +364,29 @@ mod test {
     #[test]
     fn test_parse_handles_empty_string() {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
-        assert!(parse(Cursor::new(""), &mut ft,)
+        assert!(parse(Cursor::new(""), Path::new("/foo/hc.cshd"), &mut ft,)
             .inspect_err(|e| println!("{}", e))
             .is_ok());
 
-        assert!(parse(Cursor::new("\n"), &mut ft,)
+        assert!(parse(Cursor::new("\n"), Path::new("/foo/hc.cshd"), &mut ft,)
             .inspect_err(|e| println!("{}", e))
             .is_ok());
+    }
+
+    #[test]
+    fn parse_line_respects_prefix() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut hc = HashCollection::new(
+            Some(&Path::new("/foo/hc.cshd")), None)
+            .unwrap();
+        let line = "123,1337,md5,aabbccdd foo/bar/baz.txt";
+
+        parse_line(line, Path::new("bar"), &mut ft, 1, &mut false, &mut hc)
+            .unwrap();
+
+        let (path_handle, _file) = hc.map.iter().next().unwrap();
+        let path = ft.relative_path(path_handle);
+        assert_eq!(path, Path::new("bar/foo/bar/baz.txt"));
     }
 
     #[test]
@@ -378,22 +412,23 @@ mod test {
                 hash_hex,
                 file_path
             )),
+            Path::new("/foo/bar/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))
         .unwrap();
 
-        let key = ft.find(".gitignore").unwrap();
+        let key = ft.find("bar/.gitignore").unwrap();
         let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new(file_path));
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/.gitignore"));
         assert_eq!(hf.mtime_str(), Some(mtime.to_owned()));
         assert_eq!(hf.size(), Some(size));
         assert_eq!(hf.hash_type(), hash_type);
         assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
 
-        let key = ft.find("foo/xer.mp4").unwrap();
+        let key = ft.find("bar/foo/xer.mp4").unwrap();
         let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/xer.mp4"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), HashType::Sha3_256);
@@ -402,9 +437,9 @@ mod test {
         assert_eq!(
             to_file_list(ft),
             "FileTree{
-  .gitignore
-  foo/bar/baz
-  foo/xer.mp4
+  bar/.gitignore
+  bar/foo/bar/baz
+  bar/foo/xer.mp4
 }"
         );
     }
@@ -429,30 +464,31 @@ mod test {
                 hash_hex,
                 file_path
             )),
+            Path::new("/foo/bar/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))
         .unwrap();
 
-        let key = ft.find(".gitignore").unwrap();
+        let key = ft.find("bar/.gitignore").unwrap();
         let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new(file_path));
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/.gitignore"));
         assert_eq!(hf.mtime_str(), Some(mtime.to_owned()));
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
         assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
 
-        let key = ft.find("foo/bar/baz").unwrap();
+        let key = ft.find("bar/foo/bar/baz").unwrap();
         let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new("foo/bar/baz"));
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/bar/baz"));
         assert_eq!(hf.mtime_str(), Some("0".to_string()));
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), HashType::Md5);
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
-        let key = ft.find("foo/xer.mp4").unwrap();
+        let key = ft.find("bar/foo/xer.mp4").unwrap();
         let hf = &hc.map[&key];
-        assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/xer.mp4"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), HashType::Sha3_256);
@@ -461,9 +497,9 @@ mod test {
         assert_eq!(
             to_file_list(ft),
             "FileTree{
-  .gitignore
-  foo/bar/baz
-  foo/xer.mp4
+  bar/.gitignore
+  bar/foo/bar/baz
+  bar/foo/xer.mp4
 }"
         );
     }
@@ -486,6 +522,7 @@ abcdefff foo/xer.mp4
                 file_path
             )),
             hash_type,
+            Path::new("/foo/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))
@@ -521,6 +558,64 @@ abcdefff foo/xer.mp4
   .gitignore
   foo/bar/baz
   foo/xer.mp4
+}"
+        );
+    }
+
+    #[test]
+    fn test_parse_single_hash_respects_ft_root() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let hash_type = HashType::Sha512;
+        let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
+        let file_path = ".gitignore";
+        let hc = parse_single_hash(
+            Cursor::new(&format!(
+                "\
+{} {}
+abcdefff foo/bar/baz
+abcdefff foo/xer.mp4
+\
+        ",
+                hash_hex,
+                file_path
+            )),
+            hash_type,
+            Path::new("/foo/bar/hc.cshd"),
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .unwrap();
+
+        let key = ft.find("bar/.gitignore").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/.gitignore"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
+
+        let key = ft.find("bar/foo/bar/baz").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/bar/baz"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
+        let key = ft.find("bar/foo/xer.mp4").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/xer.mp4"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
+        assert_eq!(
+            to_file_list(ft),
+            "FileTree{
+  bar/.gitignore
+  bar/foo/bar/baz
+  bar/foo/xer.mp4
 }"
         );
     }

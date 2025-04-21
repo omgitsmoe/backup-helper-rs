@@ -172,6 +172,9 @@ impl FileRaw {
         }
     }
 
+    // TODO this should probably return the path relative to the collection root, not
+    //      to the file tree
+    //      or just return an absolute path?
     pub fn relative_path(&self, file_tree: &FileTree) -> path::PathBuf {
         file_tree.relative_path(&self.path)
     }
@@ -242,9 +245,12 @@ impl<'a> File<'a> {
     where
         F: FnOnce(&mut FileRaw) -> R,
     {
-        func(&mut self.file)
+        func(self.file)
     }
 
+    // TODO this should probably return the path relative to the collection root, not
+    //      to the file tree
+    //      or just return an absolute path?
     fn relative_path(&self) -> path::PathBuf {
         self.file.relative_path(self.context)
     }
