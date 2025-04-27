@@ -1,5 +1,5 @@
 use crate::file_tree::{EntryHandle, ErrorKind, FileTree};
-use crate::hashed_file::{FileRaw, HashType};
+use crate::hashed_file::{FileRaw, HashType, VerifyResult};
 
 use log::{debug, error, info, warn};
 
@@ -215,12 +215,11 @@ impl HashCollection {
     /// `include`: Predicate function which determines whether to include the
     ///            Path passed to it in verification. The path is relative
     ///            to the `file_tree.root()`.
-    pub fn verify<F, P>(&self, file_tree: &FileTree, include: F, progress: P) -> Result<()>
+    pub fn verify<F, P>(&self, file_tree: &FileTree, include: F, mut progress: P) -> Result<()>
     where
         F: Fn(&Path) -> bool,
-        P: FnMut(&Path, ),
+        P: FnMut(&Path, &VerifyResult),
     {
-        // NOTE: root??? what is meant here?
         for (path_handle, file_raw) in self.map.iter() {
             let path = file_tree.relative_path(path_handle);
             if !include(&path) {
@@ -228,12 +227,11 @@ impl HashCollection {
             }
 
             let file = file_raw.with_context(file_tree);
-            // TODO should verify just never error and instead return it as part of VerifyResult?
-            //      and what should we pass on to progress?
-            match file.verify() {
-                Ok(result) => todo!(),
-                Err(e) => todo!(),
-            }
+            // NOTE: Only errors that need to stop the verification progress can come from
+            //       verify, so it's fine to use `?` here. For everything else a corresponding
+            //       VerifyResult is used.
+            let result = file.verify()?;
+            progress(&path, &result);
         }
 
         Ok(())

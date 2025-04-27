@@ -186,7 +186,7 @@ impl FileRaw {
     }
 
     pub fn mtime_str(&self) -> Option<String> {
-        self.mtime.and_then(|m| {
+        self.mtime.map(|m| {
             // NOTE: to_string returns the string with the OS' epoch
             //       so we need to do our own conversion that is portable
             let usecs = m.unix_seconds() as f64;
@@ -194,7 +194,7 @@ impl FileRaw {
             const SECS_PER_NS: f64 = 1.0 / 1_000_000_000.0;
             let fract = (nanosecs as f64) * SECS_PER_NS;
             let combined = (usecs as f64) + fract;
-            Some(format!("{}", combined))
+            format!("{}", combined)
         })
     }
     pub fn size(&self) -> Option<u64> {
@@ -310,14 +310,13 @@ impl<'a> File<'a> {
         }
 
         let path = self.absolute_path();
-        if !fs::exists(&path)
-            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))? {
-            return Ok(VerifyResult::FileMissing);
-        }
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => return Ok(VerifyResult::FileMissing(e.kind())),
+        };
 
-        // TODO @Perf fetch metadata only once and get mtime/size manually from it?
         if let Some(ref expected) = self.file.size() {
-            let size_on_disk = self.fetch_size()?;
+            let size_on_disk = meta.len();
             if size_on_disk != *expected {
                 return Ok(VerifyResult::MismatchSize);
             }
@@ -332,7 +331,7 @@ impl<'a> File<'a> {
             return Ok(VerifyResult::Mismatch);
         }
 
-        let mtime_on_disk = self.fetch_mtime()?;
+        let mtime_on_disk = filetime::FileTime::from_last_modification_time(&meta);
         if self.file.mtime().expect("checked above") == mtime_on_disk {
             Ok(VerifyResult::MismatchCorrupted)
         } else {
@@ -358,8 +357,10 @@ pub enum VerifyResult {
     /// The hashes matched.
     Ok,
 
-    /// Could not compare hashes, since the file on disk was not found.
-    FileMissing,
+    /// Could not compare hashes, since the file on disk was not found
+    /// or there were permission errors. Inspect the `std::io::ErrorKind`
+    /// to find the concrete reason.
+    FileMissing(std::io::ErrorKind),
 
     /// The file on disk did not match the stored hash. There was no stored
     /// modification time, so it is unknown whether the file is corrupted.
@@ -591,7 +592,7 @@ mod test {
         std::fs::remove_file(testfile_abs).unwrap();
 
         let result = file.verify();
-        assert!(matches!(result, Ok(VerifyResult::FileMissing)));
+        assert!(matches!(result, Ok(VerifyResult::FileMissing(std::io::ErrorKind::NotFound))));
     }
 
     #[test]
