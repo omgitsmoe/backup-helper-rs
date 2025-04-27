@@ -165,10 +165,12 @@ impl FileRaw {
         }
     }
 
-    // TODO this should probably return the path relative to the collection root, not
-    //      to the file tree
     pub fn relative_path(&self, file_tree: &FileTree) -> path::PathBuf {
         file_tree.relative_path(&self.path)
+    }
+
+    pub fn relative_path_to(&self, file_tree: &FileTree, base: impl AsRef<path::Path>) -> path::PathBuf {
+        file_tree.relative_path_to(&self.path, base)
     }
 
     pub fn absolute_path(&self, file_tree: &FileTree) -> path::PathBuf {

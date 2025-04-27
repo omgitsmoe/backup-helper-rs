@@ -11,9 +11,6 @@ use std::io::{BufRead, Cursor};
 use std::path::{Path, PathBuf};
 
 // TODO separate parser that just has a feed/feed_line method -> more flexible?
-// TODO test that this is correctly read in when its location/root directory is different from
-//      the FT's root directory
-//      -> the root may be None, which means it's assumed that it is the same as the FT's
 pub fn parse<R: BufRead>(reader: R, collection_path: impl AsRef<Path>, file_tree: &mut FileTree) -> Result<HashCollection> {
     let mut lines = reader.lines();
     let mut result =
@@ -69,7 +66,6 @@ fn ft_to_collection_root_prefix(collection: &HashCollection, file_tree: &FileTre
     Ok(prefix)
 }
 
-// TODO same root dir difference test than above
 pub fn parse_single_hash<R: BufRead>(
     reader: R,
     hash_type: HashType,
@@ -158,7 +154,8 @@ fn parse_line(
     ) {
         error!(
             "Duplicate file path: {}",
-            old.relative_path(file_tree).display()
+            old.relative_path_to(file_tree, result.root_dir.as_ref()
+                .expect("root_dir is expected to be known in parse_line!")).display()
         );
     };
 
@@ -421,6 +418,7 @@ mod test {
         let key = ft.find("bar/.gitignore").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/.gitignore"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new(".gitignore"));
         assert_eq!(hf.mtime_str(), Some(mtime.to_owned()));
         assert_eq!(hf.size(), Some(size));
         assert_eq!(hf.hash_type(), hash_type);
@@ -429,6 +427,7 @@ mod test {
         let key = ft.find("bar/foo/xer.mp4").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/xer.mp4"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/xer.mp4"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), HashType::Sha3_256);
@@ -473,6 +472,7 @@ mod test {
         let key = ft.find("bar/.gitignore").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/.gitignore"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new(".gitignore"));
         assert_eq!(hf.mtime_str(), Some(mtime.to_owned()));
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
@@ -481,6 +481,7 @@ mod test {
         let key = ft.find("bar/foo/bar/baz").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/bar/baz"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/bar/baz"));
         assert_eq!(hf.mtime_str(), Some("0".to_string()));
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), HashType::Md5);
@@ -489,6 +490,7 @@ mod test {
         let key = ft.find("bar/foo/xer.mp4").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/xer.mp4"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/xer.mp4"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), HashType::Sha3_256);
@@ -531,6 +533,7 @@ abcdefff foo/xer.mp4
         let key = ft.find(".gitignore").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new(file_path));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new(".gitignore"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
@@ -539,6 +542,7 @@ abcdefff foo/xer.mp4
         let key = ft.find("foo/bar/baz").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("foo/bar/baz"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/bar/baz"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
@@ -547,6 +551,7 @@ abcdefff foo/xer.mp4
         let key = ft.find("foo/xer.mp4").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("foo/xer.mp4"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/xer.mp4"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
@@ -589,6 +594,7 @@ abcdefff foo/xer.mp4
         let key = ft.find("bar/.gitignore").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/.gitignore"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new(".gitignore"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
@@ -597,6 +603,7 @@ abcdefff foo/xer.mp4
         let key = ft.find("bar/foo/bar/baz").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/bar/baz"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/bar/baz"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
@@ -605,9 +612,73 @@ abcdefff foo/xer.mp4
         let key = ft.find("bar/foo/xer.mp4").unwrap();
         let hf = &hc.map[&key];
         assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/xer.mp4"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/xer.mp4"));
         assert_eq!(hf.mtime_str(), None);
         assert_eq!(hf.size(), None);
         assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
+        assert_eq!(
+            to_file_list(ft),
+            "FileTree{
+  bar/.gitignore
+  bar/foo/bar/baz
+  bar/foo/xer.mp4
+}"
+        );
+    }
+
+    #[test]
+    fn parse_respects_ft_root() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mtime = "1673815645.7979772";
+        let hash_type = HashType::Sha512;
+        let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
+        let file_path = ".gitignore";
+        let hc = parse(
+            Cursor::new(&format!(
+                "\
+{},{},{} {}
+0,md5,abcdefff foo/bar/baz
+,sha3_256,abcdefff foo/xer.mp4
+\
+        ",
+                mtime,
+                hash_type.to_str(),
+                hash_hex,
+                file_path
+            )),
+            Path::new("/foo/bar/hc.cshd"),
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .unwrap();
+
+        let key = ft.find("bar/.gitignore").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/.gitignore"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new(".gitignore"));
+        assert_eq!(hf.mtime_str(), Some(mtime.to_owned()));
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
+
+        let key = ft.find("bar/foo/bar/baz").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/bar/baz"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/bar/baz"));
+        assert_eq!(hf.mtime_str(), Some("0".to_string()));
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), HashType::Md5);
+        assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
+
+        let key = ft.find("bar/foo/xer.mp4").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.relative_path(&ft), Path::new("bar/foo/xer.mp4"));
+        assert_eq!(hf.relative_path_to(&ft, hc.root_dir.as_ref().unwrap()), Path::new("foo/xer.mp4"));
+        assert_eq!(hf.mtime_str(), None);
+        assert_eq!(hf.size(), None);
+        assert_eq!(hf.hash_type(), HashType::Sha3_256);
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
         assert_eq!(

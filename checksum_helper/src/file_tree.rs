@@ -84,6 +84,14 @@ impl FileTree {
         self.path(entry, false)
     }
 
+    pub fn relative_path_to(&self, entry: &EntryHandle, base: impl AsRef<Path>) -> PathBuf {
+        let absolute_path = self.absolute_path(entry);
+        assert!(absolute_path.starts_with(&base), "Base must be a subpath of the file tree");
+        pathdiff::diff_paths(&absolute_path, base)
+            .expect("BUG: should always succeed, since base must be \
+                          a subpath of the file tree")
+    }
+
     fn path(&self, entry: &EntryHandle, is_absolute: bool) -> PathBuf {
         let mut p = &self.nodes[entry.0];
         // TODO store handles not pathbufs
@@ -284,7 +292,6 @@ impl <'a>Iterator for FileTreeIter<'a> {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct EntryHandle(usize);
 
-// TODO is_dir
 #[derive(Debug, Clone)]
 pub struct Entry {
     name: PathBuf,
@@ -494,5 +501,25 @@ mod test {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let txt_path = Path::new("bar/baz/../file.txt");
         assert_eq!(ft.add(txt_path, false), Err(ErrorKind::NonCanoncialPath));
+    }
+
+    #[test]
+    #[should_panic]
+    fn relative_path_to_panics_if_base_not_subpath_of_filetree() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let fh = ft.add("foo/bar/baz/file.txt", false)
+            .unwrap();
+        println!("Should panic relative_to: {:?}", ft.relative_path_to(&fh, "/bar"));
+    }
+
+    #[test]
+    fn relative_path_to() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let fh = ft.add("foo/bar/baz/file.txt", false)
+            .unwrap();
+        assert_eq!(ft.relative_path_to(&fh, "/foo"), Path::new("foo/bar/baz/file.txt"));
+        assert_eq!(ft.relative_path_to(&fh, "/foo/foo"), Path::new("bar/baz/file.txt"));
+        assert_eq!(ft.relative_path_to(&fh, "/foo/foo/bar"), Path::new("baz/file.txt"));
+        assert_eq!(ft.relative_path_to(&fh, "/foo/foo/bar/baz"), Path::new("file.txt"));
     }
 }
