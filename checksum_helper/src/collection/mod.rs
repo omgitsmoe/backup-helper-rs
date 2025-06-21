@@ -16,8 +16,10 @@ use std::string::ToString;
 
 mod parser;
 mod serialize;
+mod writer;
 
 pub use serialize::sort_serialized;
+pub use writer::HashCollectionWriter;
 
 type Result<T> = std::result::Result<T, HashCollectionError>;
 
@@ -31,6 +33,8 @@ pub struct HashCollection {
     //      one can reset it when nothing else has changed
 }
 
+// TODO: add datetime/mtime of the collection itself to the file, then we don't have to
+//       rely on mtime for cshd >=v1 files
 impl HashCollection {
     pub fn new(path: Option<&impl AsRef<Path>>, mtime: Option<filetime::FileTime>) -> Result<HashCollection> {
         Ok(HashCollection {
@@ -69,6 +73,22 @@ impl HashCollection {
         self.name = Some(name.to_owned());
     }
 
+    pub fn full_path(&self) -> Result<PathBuf> {
+        if self.root_dir.is_none() || self.name.is_none() {
+            return Err(HashCollectionError::MissingPath((
+                self.root_dir.clone(),
+                self.name.clone(),
+            )));
+        }
+
+        let full_path = self
+            .root_dir
+            .as_ref()
+            .expect("was checked above")
+            .join(self.name.as_ref().expect("was checked above"));
+        Ok(full_path)
+    }
+
     pub fn set_mtime(&mut self, mtime: Option<filetime::FileTime>) {
         self.mtime = mtime;
     }
@@ -104,6 +124,7 @@ impl HashCollection {
         parser::parse(Cursor::new(str), collection_path, file_tree)
     }
 
+    // TODO separate into Reader?
     pub fn from_disk(path: &Path, file_tree: &mut FileTree) -> Result<HashCollection> {
         let file = fs::File::open(path)?;
         let mtime = filetime::FileTime::from_last_modification_time(
@@ -139,9 +160,8 @@ impl HashCollection {
         }
     }
 
-    // TODO: flush-able hash collection
     pub fn serialize<W: Write>(&self, writer: &mut W, file_tree: &FileTree) -> Result<()> {
-        serialize::serialize(self, writer, file_tree)
+        serialize::serialize(self, writer, file_tree, true)
     }
 
     pub fn to_str(&self, file_tree: &FileTree) -> Result<String> {
@@ -149,28 +169,6 @@ impl HashCollection {
         self.serialize(&mut buf, file_tree)?;
         String::from_utf8(buf)
             .map_err(|e| HashCollectionError::InvalidUtf8(e.into_bytes()))
-    }
-
-    pub fn write(&self, file_tree: &FileTree) -> Result<()> {
-        if self.root_dir.is_none() || self.name.is_none() {
-            return Err(HashCollectionError::MissingPath((
-                self.root_dir.clone(),
-                self.name.clone(),
-            )));
-        }
-
-        let full_path = self
-            .root_dir
-            .as_ref()
-            .expect("was checked above")
-            .join(self.name.as_ref().expect("was checked above"));
-        let file = fs::File::create_new(full_path)?;
-        let mut buf_writer = std::io::BufWriter::new(file);
-        self.serialize(&mut buf_writer, file_tree)
-    }
-
-    pub fn flush(&mut self, file_tree: &FileTree) -> Result<()> {
-        todo!("flushes the current entries to disk")
     }
 
     /// Merges all entries in `other` into `self`. If there are conflicts:
@@ -215,12 +213,14 @@ impl HashCollection {
     /// `include`: Predicate function which determines whether to include the
     ///            Path passed to it in verification. The path is relative
     ///            to the `file_tree.root()`.
+    /// `progress`: Progress callback that receives...
     pub fn verify<F, P>(&self, file_tree: &FileTree, include: F, mut progress: P) -> Result<()>
     where
         F: Fn(&Path) -> bool,
         P: FnMut(&Path, &VerifyResult),
     {
-        for (path_handle, file_raw) in self.map.iter() {
+        let files_total = self.map.len();
+        for (idx, (path_handle, file_raw)) in self.map.iter().enumerate() {
             let path = file_tree.relative_path(path_handle);
             if !include(&path) {
                 continue;
@@ -361,10 +361,11 @@ impl From<crate::hashed_file::HashedFileError> for HashCollectionError {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
     use crate::hashed_file::HashType;
     use crate::test_utils::*;
+    use hashes::sha2::sha512;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -437,41 +438,6 @@ mod test {
     }
 
     #[test]
-    fn test_write_never_overwrites() {
-        let testdir = testdir!();
-        let path = testdir.join("foo.cshd");
-        let ft = FileTree::new(&testdir).unwrap();
-        let hc = HashCollection::new(Some(&path), None).unwrap();
-        fs::write(path, "foo").unwrap();
-
-        let result = hc.write(&ft);
-
-        assert_eq!(
-            result,
-            Err(HashCollectionError::IOError(
-                std::io::ErrorKind::AlreadyExists
-            ))
-        );
-    }
-
-    #[test]
-    fn test_write() {
-        let testdir = testdir!();
-        let path = testdir.join("foo.cshd");
-        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc(&testdir);
-        hc.relocate(&testdir);
-        hc.rename(&OsString::from("foo.cshd"));
-
-        hc.write(&ft).unwrap();
-
-        let read_back = fs::read_to_string(path).unwrap();
-        assert_eq!(
-            serialize::sort_serialized(&read_back).unwrap(),
-            expected_serialization,
-        );
-    }
-
-    #[test]
     fn test_from_disk() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
@@ -479,7 +445,9 @@ mod test {
         hc.relocate(&testdir);
         hc.rename(&OsString::from("foo.cshd"));
 
-        hc.write(&ft).unwrap();
+        let mut writer = writer::HashCollectionWriter::new();
+        writer.write(&mut hc, &ft).unwrap();
+
         let expected_mtime = filetime::FileTime::from_unix_time(
             1337, 0);
         filetime::set_file_mtime(&path, expected_mtime).unwrap();

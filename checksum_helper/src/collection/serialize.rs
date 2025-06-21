@@ -13,7 +13,7 @@ use std::path;
 //      converting to .cshd
 
 const VERSION_HEADER: &str = "# version 1\n";
-pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tree: &FileTree) -> Result<()> {
+pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tree: &FileTree, with_header: bool) -> Result<()> {
     let prefix = match &collection.root_dir {
         None => return Err(HashCollectionError::MissingPath(
                 (collection.root_dir.clone(), collection.name.clone()))),
@@ -28,7 +28,9 @@ pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tre
         !&prefix.components().any(|c| c == path::Component::ParentDir),
         "prefix contains parent dir components: collection root is not a subpath of the file tree root!");
 
-    writer.write_all(VERSION_HEADER.as_bytes())?;
+    if with_header {
+        writer.write_all(VERSION_HEADER.as_bytes())?;
+    }
     for (path_handle, hashed_file) in &collection.map {
         serialize_entry(writer, &prefix, path_handle, hashed_file, file_tree)?;
     }
@@ -159,7 +161,7 @@ mod test {
         let (mut hc, ft, expected_serialization) = setup_minimal_hc(Path::new("/foo"));
         hc.relocate(Path::new("/foo"));
 
-        serialize(&hc, &mut buf, &ft).unwrap();
+        serialize(&hc, &mut buf, &ft, true).unwrap();
 
         let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
         assert_eq!(
@@ -218,13 +220,49 @@ mod test {
 ,4206969,sha3_512,eeff0011 xer.mp4\n";
 
         let mut buf = vec![];
-        serialize(&hc, &mut buf, &ft).unwrap();
+        serialize(&hc, &mut buf, &ft, true).unwrap();
 
         let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
         assert_eq!(
             result,
             expected_serialization_sorted,
         );
+    }
+
+    #[test]
+    fn serialize_with_and_without_header() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut hc = HashCollection::new(
+            Some(&"/foo/foo/bar/foo.cshd"), None).unwrap();
+        let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1337, 1_330_000)),
+                Some(1337),
+                HashType::Sha512,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+
+        let mut buf = vec![];
+        serialize(&hc, &mut buf, &ft, true).unwrap();
+        let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
+
+        assert_eq!(
+            result,
+            "\
+# version 1
+1337.00133,1337,sha512,deadbeef baz.txt\n");
+
+        let mut buf = vec![];
+        serialize(&hc, &mut buf, &ft, false).unwrap();
+        let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
+        assert_eq!(
+            result,
+            "\
+1337.00133,1337,sha512,deadbeef baz.txt\n");
     }
 
     #[test]
