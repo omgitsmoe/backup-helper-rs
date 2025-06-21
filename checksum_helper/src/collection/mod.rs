@@ -4,7 +4,6 @@ use crate::hashed_file::{FileRaw, HashType, VerifyResult};
 use log::{debug, error, info, warn};
 
 use std::cmp::{Eq, PartialEq};
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -13,6 +12,13 @@ use std::fs;
 use std::io::{BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::string::ToString;
+
+// for deterministic ordering in testing
+#[cfg(test)]
+use std::collections::BTreeMap as Map;
+
+#[cfg(not(test))]
+use std::collections::HashMap as Map;
 
 mod parser;
 mod serialize;
@@ -27,7 +33,7 @@ pub struct HashCollection {
     root_dir: Option<PathBuf>,
     // TODO just change this to a String?
     name: Option<OsString>,
-    map: HashMap<EntryHandle, FileRaw>,
+    map: Map<EntryHandle, FileRaw>,
     mtime: Option<filetime::FileTime>,
     // TODO provide restore_mtime method, so afer relocate + write
     //      one can reset it when nothing else has changed
@@ -36,9 +42,12 @@ pub struct HashCollection {
 // TODO: add datetime/mtime of the collection itself to the file, then we don't have to
 //       rely on mtime for cshd >=v1 files
 impl HashCollection {
-    pub fn new(path: Option<&impl AsRef<Path>>, mtime: Option<filetime::FileTime>) -> Result<HashCollection> {
+    pub fn new(
+        path: Option<&impl AsRef<Path>>,
+        mtime: Option<filetime::FileTime>,
+    ) -> Result<HashCollection> {
         Ok(HashCollection {
-            map: HashMap::new(),
+            map: Map::new(),
             name: match path {
                 Some(p) => Some(
                     p.as_ref()
@@ -101,10 +110,14 @@ impl HashCollection {
 
             filetime::set_file_mtime(
                 root_dir.join(name),
-                self.mtime.expect("should be some, checked above"))?;
+                self.mtime.expect("should be some, checked above"),
+            )?;
             Ok(())
         } else {
-            Err(HashCollectionError::MissingPath((self.root_dir.clone(), self.name.clone())))
+            Err(HashCollectionError::MissingPath((
+                self.root_dir.clone(),
+                self.name.clone(),
+            )))
         }
     }
 
@@ -120,15 +133,18 @@ impl HashCollection {
         self.map.get_mut(path_handle)
     }
 
-    pub fn from_str(str: &str, collection_path: impl AsRef<Path>, file_tree: &mut FileTree) -> Result<HashCollection> {
+    pub fn from_str(
+        str: &str,
+        collection_path: impl AsRef<Path>,
+        file_tree: &mut FileTree,
+    ) -> Result<HashCollection> {
         parser::parse(Cursor::new(str), collection_path, file_tree)
     }
 
     // TODO separate into Reader?
     pub fn from_disk(path: &Path, file_tree: &mut FileTree) -> Result<HashCollection> {
         let file = fs::File::open(path)?;
-        let mtime = filetime::FileTime::from_last_modification_time(
-            &file.metadata()?);
+        let mtime = filetime::FileTime::from_last_modification_time(&file.metadata()?);
         let root = path
             .parent()
             .ok_or_else(|| HashCollectionError::InvalidPath(path.to_owned()))?;
@@ -165,10 +181,9 @@ impl HashCollection {
     }
 
     pub fn to_str(&self, file_tree: &FileTree) -> Result<String> {
-        let mut buf = vec!();
+        let mut buf = vec![];
         self.serialize(&mut buf, file_tree)?;
-        String::from_utf8(buf)
-            .map_err(|e| HashCollectionError::InvalidUtf8(e.into_bytes()))
+        String::from_utf8(buf).map_err(|e| HashCollectionError::InvalidUtf8(e.into_bytes()))
     }
 
     /// Merges all entries in `other` into `self`. If there are conflicts:
@@ -188,8 +203,7 @@ impl HashCollection {
         other.relocate(self.root_dir.as_ref().expect("checked above"));
 
         let keep_ours = match (self.mtime, other.mtime) {
-            (Some(our_mtime), Some(their_mtime)) =>
-                our_mtime > their_mtime,
+            (Some(our_mtime), Some(their_mtime)) => our_mtime > their_mtime,
             (None, Some(_)) => false,
             (Some(_), None) => true,
             (None, None) => true,
@@ -200,7 +214,7 @@ impl HashCollection {
                     if !keep_ours {
                         self.map.insert(path_handle, theirs);
                     }
-                },
+                }
                 None => {
                     self.map.insert(path_handle, theirs);
                 }
@@ -210,32 +224,87 @@ impl HashCollection {
         Ok(())
     }
 
+    /// Verify all files matching predicated `include` in the `HashCollection`
+    ///
+    /// Warning: The passed `file_tree` has to match the file_tree used for the
+    ///          added files in the `HashCollection`.
+    ///
     /// `include`: Predicate function which determines whether to include the
     ///            Path passed to it in verification. The path is relative
     ///            to the `file_tree.root()`.
-    /// `progress`: Progress callback that receives...
+    /// `progress`: Progress callback that receives a `VerifyProgress`
+    ///             before and after procressing the file.
     pub fn verify<F, P>(&self, file_tree: &FileTree, include: F, mut progress: P) -> Result<()>
     where
         F: Fn(&Path) -> bool,
-        P: FnMut(&Path, &VerifyResult),
+        P: FnMut(VerifyProgress),
     {
-        let files_total = self.map.len();
+        let tree_root = self.root_dir.as_ref().ok_or_else(|| {
+            HashCollectionError::MissingPath((self.root_dir.clone(), self.name.clone()))
+        })?;
+        let files_total = self.map.len() as u64;
+        let size_total_bytes: u64 = self.map.values().map(|file| file.size().unwrap_or(0)).sum();
+        let mut size_processed_bytes = 0u64;
+
         for (idx, (path_handle, file_raw)) in self.map.iter().enumerate() {
             let path = file_tree.relative_path(path_handle);
             if !include(&path) {
                 continue;
             }
 
+            progress(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root,
+                relative_path: &path,
+                file_number_processed: idx as u64,
+                file_number_total: files_total,
+                size_processed_bytes,
+                size_total_bytes,
+            }));
+
             let file = file_raw.with_context(file_tree);
             // NOTE: Only errors that need to stop the verification progress can come from
             //       verify, so it's fine to use `?` here. For everything else a corresponding
             //       VerifyResult is used.
             let result = file.verify()?;
-            progress(&path, &result);
+            size_processed_bytes += file.raw(|f| f.size().unwrap_or(0));
+
+            progress(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root,
+                    relative_path: &path,
+                    file_number_processed: (idx + 1) as u64,
+                    file_number_total: files_total,
+                    size_processed_bytes,
+                    size_total_bytes,
+                },
+                result: &result,
+            }));
         }
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum VerifyProgress<'a> {
+    Pre(VerifyProgressCommon<'a>),
+    Post(VerifyProgressPost<'a>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyProgressCommon<'a> {
+    tree_root: &'a Path,
+    relative_path: &'a Path,
+    file_number_processed: u64,
+    file_number_total: u64,
+    size_processed_bytes: u64,
+    size_total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyProgressPost<'a> {
+    progress: VerifyProgressCommon<'a>,
+    result: &'a VerifyResult,
 }
 
 fn is_path_above_hash_file(path: &str) -> bool {
@@ -327,13 +396,13 @@ impl fmt::Display for HashCollectionError {
                     "can't merge with a missing root path: ours {:?} theirs {:?}",
                     ours, theirs
                 )
-            },
+            }
             HashCollectionError::MissingMTime => {
                 write!(f, "missing modification time")
-            },
+            }
             HashCollectionError::HashedFileError(ref e) => {
                 write!(f, "hashed file error: {}", e)
-            },
+            }
         }
     }
 }
@@ -448,8 +517,7 @@ pub mod test {
         let mut writer = writer::HashCollectionWriter::new();
         writer.write(&mut hc, &ft).unwrap();
 
-        let expected_mtime = filetime::FileTime::from_unix_time(
-            1337, 0);
+        let expected_mtime = filetime::FileTime::from_unix_time(1337, 0);
         filetime::set_file_mtime(&path, expected_mtime).unwrap();
         let expected_len = ft.len();
 
@@ -490,8 +558,7 @@ abcdefff foo/xer.mp4
             hash_hex
         );
         fs::write(&path, single_hash).unwrap();
-        let expected_mtime = filetime::FileTime::from_unix_time(
-            1337, 0);
+        let expected_mtime = filetime::FileTime::from_unix_time(1337, 0);
         filetime::set_file_mtime(&path, expected_mtime).unwrap();
         let mut ft = FileTree::new(&testdir).unwrap();
 
@@ -539,8 +606,7 @@ abcdefff foo/xer.mp4
         let root = Path::new("/foo");
         let mut ft = FileTree::new(root).unwrap();
 
-        let mut hc = HashCollection::new(
-            Some(&root.join("foo.cshd")), None).unwrap();
+        let mut hc = HashCollection::new(Some(&root.join("foo.cshd")), None).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz/file.txt").unwrap();
         hc.update(
             path_handle.clone(),
@@ -584,10 +650,7 @@ abcdefff foo/xer.mp4
 ,4206969,sha3_512,eeff0011 foo/xer.mp4\n";
 
         let result = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
-        assert_eq!(
-            result,
-            expected_serialization_sorted,
-        );
+        assert_eq!(result, expected_serialization_sorted,);
 
         hc.relocate(Path::new("/foo/foo"));
 
@@ -597,10 +660,7 @@ abcdefff foo/xer.mp4
 1212,,md5,aabbccdd bar/foo.txt
 ,4206969,sha3_512,eeff0011 xer.mp4\n";
         let result = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
-        assert_eq!(
-            result,
-            expected_serialization_sorted_relocated,
-        );
+        assert_eq!(result, expected_serialization_sorted_relocated,);
     }
 
     #[test]
@@ -608,25 +668,20 @@ abcdefff foo/xer.mp4
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
         std::fs::write(&path, "foo").unwrap();
-        let hc =
-            HashCollection::new(
-                Some(&path),
-                Some(filetime::FileTime::from_unix_time(1337, 0)))
-            .unwrap();
+        let hc = HashCollection::new(
+            Some(&path),
+            Some(filetime::FileTime::from_unix_time(1337, 0)),
+        )
+        .unwrap();
         let mtime = filetime::FileTime::from_last_modification_time(
-            &std::fs::File::open(&path)
-                .unwrap()
-                .metadata()
-                .unwrap());
+            &std::fs::File::open(&path).unwrap().metadata().unwrap(),
+        );
 
         hc.restore_mtime().unwrap();
 
-
         let new_mtime = filetime::FileTime::from_last_modification_time(
-            &std::fs::File::open(&path)
-                .unwrap()
-                .metadata()
-                .unwrap());
+            &std::fs::File::open(&path).unwrap().metadata().unwrap(),
+        );
 
         assert_ne!(mtime, new_mtime);
         assert_eq!(new_mtime, hc.mtime.unwrap());
@@ -636,7 +691,9 @@ abcdefff foo/xer.mp4
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let mut hc = HashCollection::new(
             Some(&"/foo/hc.cshd"),
-            Some(filetime::FileTime::from_unix_time(123, 0))).unwrap();
+            Some(filetime::FileTime::from_unix_time(123, 0)),
+        )
+        .unwrap();
         let path_handle = ft.add_file("foo/file1.txt").unwrap();
         let path_handle2 = ft.add_file("bar/file2.txt").unwrap();
         hc.update(
@@ -661,8 +718,10 @@ abcdefff foo/xer.mp4
         );
 
         let mut other = HashCollection::new(
-            Some(&"./foo/other.cshd"), 
-            Some(filetime::FileTime::from_unix_time(1337, 0))).unwrap();
+            Some(&"./foo/other.cshd"),
+            Some(filetime::FileTime::from_unix_time(1337, 0)),
+        )
+        .unwrap();
         other.update(
             path_handle.clone(),
             FileRaw::new(
@@ -689,9 +748,7 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn merge_keeps_entries_from_newer_collection() {
-
-        let (ft, mut hc, mut other) =
-            setup_two_collections_for_merge();
+        let (ft, mut hc, mut other) = setup_two_collections_for_merge();
         hc.set_mtime(Some(filetime::FileTime::from_unix_time(123, 0)));
         other.set_mtime(Some(filetime::FileTime::from_unix_time(1337, 0)));
 
@@ -710,9 +767,7 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn merge_keeps_entries_from_collection_with_some_mtime() {
-
-        let (ft, mut hc, mut other) =
-            setup_two_collections_for_merge();
+        let (ft, mut hc, mut other) = setup_two_collections_for_merge();
         hc.set_mtime(Some(filetime::FileTime::from_unix_time(123, 0)));
         other.set_mtime(None);
 
@@ -731,9 +786,7 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn merge_keeps_entries_from_self_if_no_mtime() {
-
-        let (ft, mut hc, mut other) =
-            setup_two_collections_for_merge();
+        let (ft, mut hc, mut other) = setup_two_collections_for_merge();
         hc.set_mtime(None);
         other.set_mtime(None);
 
@@ -791,5 +844,136 @@ abcdefff foo/xer.mp4
 222,1337,md5,aabbccdd foo/file1.txt
 "
         );
+    }
+
+    #[test]
+    fn verify() {
+        let testdir = testdir!();
+        fs::create_dir_all(testdir.join("foo/bar")).unwrap();
+        let mut ft = FileTree::new(&testdir).unwrap();
+
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        hc.relocate(&testdir);
+
+        let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1337, 1_330_000)),
+                Some(1337),
+                HashType::Sha512,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+        fs::write(testdir.join("foo/bar/baz.txt"), "").unwrap();
+
+        let path_handle = ft.add_file("./foo/bar/baz2.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1337, 1_330_000)),
+                Some(3),
+                HashType::Sha512,
+                vec![
+                    0xf7, 0xfb, 0xba, 0x6e, 0x06, 0x36, 0xf8, 0x90, 0xe5, 0x6f, 0xbb, 0xf3, 0x28,
+                    0x3e, 0x52, 0x4c, 0x6f, 0xa3, 0x20, 0x4a, 0xe2, 0x98, 0x38, 0x2d, 0x62, 0x47,
+                    0x41, 0xd0, 0xdc, 0x66, 0x38, 0x32, 0x6e, 0x28, 0x2c, 0x41, 0xbe, 0x5e, 0x42,
+                    0x54, 0xd8, 0x82, 0x07, 0x72, 0xc5, 0x51, 0x8a, 0x2c, 0x5a, 0x8c, 0x0c, 0x7f,
+                    0x7e, 0xda, 0x19, 0x59, 0x4a, 0x7e, 0xb5, 0x39, 0x45, 0x3e, 0x1e, 0xd7,
+                ],
+            ),
+        );
+        fs::write(testdir.join("foo/bar/baz2.txt"), "foo").unwrap();
+
+        let path_handle = ft.add_file("./foo/bar/baz3.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                Some(filetime::FileTime::from_unix_time(1337, 1_330_000)),
+                Some(10),
+                HashType::Sha512,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+        fs::write(testdir.join("foo/bar/baz3.txt"), "0123456789").unwrap();
+
+        let mut idx = 0u64;
+        hc.verify(
+            &ft,
+            |_| true,
+            |p| {
+                match (idx, p) {
+                    (0, VerifyProgress::Pre(p)) => {
+                        assert_eq!(p.tree_root, testdir);
+                        assert_eq!(p.relative_path, Path::new("foo/bar/baz.txt"));
+                        assert_eq!(p.file_number_processed, 0);
+                        assert_eq!(p.file_number_total, 3);
+                        assert_eq!(p.size_processed_bytes, 0);
+                        assert_eq!(p.size_total_bytes, 1350);
+                    }
+                    (1, VerifyProgress::Post(p)) => {
+                        assert_eq!(p.progress.tree_root, testdir);
+                        assert_eq!(p.progress.relative_path, Path::new("foo/bar/baz.txt"));
+                        assert_eq!(p.progress.file_number_processed, 1);
+                        assert_eq!(p.progress.file_number_total, 3);
+                        assert_eq!(p.progress.size_processed_bytes, 1337);
+                        assert_eq!(p.progress.size_total_bytes, 1350);
+                        assert_eq!(
+                            p.result,
+                            &VerifyResult::MismatchSize,
+                        );
+                    }
+                    (2, VerifyProgress::Pre(p)) => {
+                        assert_eq!(p.tree_root, testdir);
+                        assert_eq!(p.relative_path, Path::new("foo/bar/baz2.txt"));
+                        assert_eq!(p.file_number_processed, 1);
+                        assert_eq!(p.file_number_total, 3);
+                        assert_eq!(p.size_processed_bytes, 1337);
+                        assert_eq!(p.size_total_bytes, 1350);
+                    }
+                    (3, VerifyProgress::Post(p)) => {
+                        assert_eq!(p.progress.tree_root, testdir);
+                        assert_eq!(p.progress.relative_path, Path::new("foo/bar/baz2.txt"));
+                        assert_eq!(p.progress.file_number_processed, 2);
+                        assert_eq!(p.progress.file_number_total, 3);
+                        assert_eq!(p.progress.size_processed_bytes, 1340);
+                        assert_eq!(p.progress.size_total_bytes, 1350);
+                        assert_eq!(
+                            p.result,
+                            &VerifyResult::Ok
+                        );
+                    }
+                    (4, VerifyProgress::Pre(p)) => {
+                        assert_eq!(p.tree_root, testdir);
+                        assert_eq!(p.relative_path, Path::new("foo/bar/baz3.txt"));
+                        assert_eq!(p.file_number_processed, 2);
+                        assert_eq!(p.file_number_total, 3);
+                        assert_eq!(p.size_processed_bytes, 1340);
+                        assert_eq!(p.size_total_bytes, 1350);
+                    }
+                    (5, VerifyProgress::Post(p)) => {
+                        assert_eq!(p.progress.tree_root, testdir);
+                        assert_eq!(p.progress.relative_path, Path::new("foo/bar/baz3.txt"));
+                        assert_eq!(p.progress.file_number_processed, 3);
+                        assert_eq!(p.progress.file_number_total, 3);
+                        assert_eq!(p.progress.size_processed_bytes, 1350);
+                        assert_eq!(p.progress.size_total_bytes, 1350);
+                        assert_eq!(
+                            p.result,
+                            &VerifyResult::MismatchOutdatedHash
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+
+                idx += 1;
+            },
+        )
+        .unwrap();
+
+        assert!(idx % 2 == 0);
     }
 }

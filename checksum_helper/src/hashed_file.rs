@@ -266,7 +266,14 @@ impl<'a> File<'a> {
     }
 
     // NOTE: Use a closure here so we don't run into borrow/lifetime issues
-    pub fn raw<C, R>(&mut self, func: C) -> R
+    pub fn raw_mut<C, R>(&mut self, func: C) -> R
+    where
+        C: FnOnce(&FileRaw) -> R,
+    {
+        func(self.file)
+    }
+
+    pub fn raw<C, R>(&self, func: C) -> R
     where
         C: FnOnce(&FileRaw) -> R,
     {
@@ -550,7 +557,7 @@ mod test {
         assert_eq!(
             compute_hash(
                 std::io::Cursor::new(testcontent),
-                file.raw(|r| r.hash_type())
+                file.raw_mut(|r| r.hash_type())
             )
             .unwrap(),
             expected

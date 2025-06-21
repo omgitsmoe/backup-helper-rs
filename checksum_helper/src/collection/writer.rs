@@ -38,6 +38,7 @@ impl HashCollectionWriter {
         }
 
         collection.map.clear();
+        #[cfg(not(test))]  // using BTreeMap for testing
         collection.map.shrink_to_fit();
 
         Ok(())

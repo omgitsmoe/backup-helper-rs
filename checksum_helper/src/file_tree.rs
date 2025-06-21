@@ -289,7 +289,7 @@ impl <'a>Iterator for FileTreeIter<'a> {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EntryHandle(usize);
 
 #[derive(Debug, Clone)]
@@ -481,6 +481,19 @@ mod test {
             Path::new("./bar/baz/file.txt"), false).unwrap();
         assert_eq!(txt, ft.add("bar/baz/file.txt", false).unwrap());
         assert_eq!(txt, ft.add("bar/baz/file.txt", false).unwrap());
+    }
+
+    #[test]
+    fn path_for_tree_root() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        assert_eq!(
+            ft.relative_path(&ft.root()),
+            Path::new(""),
+        );
+        assert_eq!(
+            ft.absolute_path(&ft.root()),
+            Path::new("/foo"),
+        );
     }
 
     #[test]
