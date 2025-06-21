@@ -1,4 +1,4 @@
-use crate::collection::HashCollection;
+use crate::collection::{HashCollection, VerifyProgress, HashCollectionError};
 use crate::file_tree::FileTree;
 use crate::gather::{gather, VisitType};
 
@@ -29,7 +29,6 @@ const HASH_FILE_EXTENSIONS: &'static [&'static str] = &[
 
 pub struct ChecksumHelper {
     file_tree: FileTree,
-    gathered_hash_files: bool,
     most_current: Option<HashCollection>,
 }
 
@@ -43,13 +42,14 @@ pub struct DiscoverResult {
 // - discover_hash_files_depth
 // - incremental_skip_unchanged
 // - allow/block list
+//   - hash files
+//   - all files
 impl ChecksumHelper {
     pub fn new(root: &path::Path) -> Result<ChecksumHelper> {
         if root.is_relative() {
             Err(ChecksumHelperError::RootIsRelative(root.to_path_buf()))
         } else {
             Ok(ChecksumHelper {
-                gathered_hash_files: false,
                 most_current: None,
                 file_tree: FileTree::new(root)
                     .expect("must succeed, since path was checked to be absolute!"),
@@ -80,12 +80,22 @@ impl ChecksumHelper {
         todo!();
     }
 
-    pub fn verify<F>(&self, include: F) -> Result<()>
+    pub fn verify<F, P>(&self, collection: &HashCollection, include: F, progress: P) -> Result<()>
     where
         F: Fn(&path::Path) -> bool,
+        P: FnMut(VerifyProgress),
     {
-        // TODO progress callback
-        todo!()
+        collection.verify(&self.file_tree, include, progress)?;
+
+        Ok(())
+    }
+
+    pub fn verify_root<F, P>(&self, include: F, progress: P) -> Result<()>
+    where
+        F: Fn(&path::Path) -> bool,
+        P: FnMut(VerifyProgress),
+    {
+        todo!("verify files matching predicate include in self.root_dir")
     }
 
     // TODO copy as well?
@@ -163,6 +173,12 @@ impl Error for ChecksumHelperError {
             ChecksumHelperError::HashedFileError(ref e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl From<HashCollectionError> for ChecksumHelperError {
+    fn from(value: HashCollectionError) -> Self {
+        ChecksumHelperError::HashCollectionError(value)
     }
 }
 
