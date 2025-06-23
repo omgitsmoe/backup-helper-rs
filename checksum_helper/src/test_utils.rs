@@ -1,13 +1,28 @@
-use crate::file_tree::FileTree;
+use crate::file_tree::{FileTree, EntryHandle};
 
 use std::io::Write;
 
 pub use testdir::testdir;
 
-pub fn to_file_list(ft: FileTree) -> String {
+pub fn to_file_list(ft: &FileTree) -> String {
     format!("{}", ft)
         // always use / as separator
         .replace('\\', "/")
+}
+
+pub fn file_handles_to_file_list(ft: &FileTree, handles: &Vec<EntryHandle>) -> String {
+    let mut result = vec!();
+    for fh in handles {
+        result.push(ft.relative_path(fh)
+            .to_str()
+            .unwrap()
+            .to_string()
+            .replace('\\', "/"));
+    }
+
+    result.sort_unstable();
+
+    result.join("\n")
 }
 
 pub fn create_ftree(root: &std::path::Path, file_list: &str) {

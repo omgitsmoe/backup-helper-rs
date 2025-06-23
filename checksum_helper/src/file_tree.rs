@@ -241,13 +241,13 @@ impl FileTree {
 
 impl Display for FileTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "FileTree{{\n")?;
+        writeln!(f, "FileTree{{")?;
         for entry_handle in self.iter() {
             // NOTE: debug formatting {:?} will use escaping if chars would
             //       need it in a string literal,
             //       use .display directly, which is lossy if the path
             //       is not valid unicode
-            write!(f, "  {}\n", self.relative_path(&entry_handle).display())?;
+            writeln!(f, "  {}", self.relative_path(&entry_handle).display())?;
         }
         write!(f, "}}")
     }
@@ -259,7 +259,7 @@ pub struct FileTreeIter<'a> {
     stack: Vec<(EntryHandle, usize)>,
 }
 
-impl <'a>Iterator for FileTreeIter<'a> {
+impl Iterator for FileTreeIter<'_> {
     type Item = EntryHandle;
 
     fn next(&mut self) -> Option<Self::Item> {

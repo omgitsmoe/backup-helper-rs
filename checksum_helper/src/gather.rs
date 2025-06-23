@@ -1,4 +1,4 @@
-use crate::file_tree::FileTree;
+use crate::file_tree::{FileTree, EntryHandle};
 use std::fs;
 use std::path;
 
@@ -75,13 +75,18 @@ pub fn gather_into_file_tree<F>(
     start: &path::Path,
     file_tree: &mut FileTree,
     mut include_fn: F,
-) -> Result<GatherRes, Error>
+) -> Result<(Vec<EntryHandle>, GatherRes), Error>
 where
     F: FnMut(&fs::DirEntry) -> bool,
 {
+    // in case the file_tree wasn't empty we need a way to just iterate the files
+    // that were gathered into the file_tree, without the previously existing ones
+    let mut result_handles = vec![];
+
     let mut directories = vec![file_tree.root()];
     let mut handle = file_tree.root();
-    gather(start, |visit_type| {
+    let gather_result = gather(
+        start, |visit_type| {
         match visit_type {
             VisitType::ListDirStart(_) => {
                 handle = directories
@@ -93,7 +98,8 @@ where
                     return false;
                 }
 
-                let new_handle = file_tree.add_child(&handle, &e.file_name(), true);
+                let new_handle = file_tree
+                    .add_child(&handle, e.file_name(), true);
                 directories.push(new_handle);
             }
             VisitType::File((_, e)) => {
@@ -101,13 +107,17 @@ where
                     return false;
                 }
 
-                file_tree.add_child(&handle, &e.file_name(), false);
+                let handle = file_tree
+                    .add_child(&handle, e.file_name(), false);
+                result_handles.push(handle);
             }
             _ => {}
         }
 
         true
-    })
+    })?;
+
+    Ok((result_handles, gather_result))
 }
 
 #[cfg(test)]
@@ -194,8 +204,9 @@ stop d1"#
     fn no_filter() {
         let test_path = setup_ftree();
         let mut file_tree = FileTree::new(&test_path).unwrap();
-        let _ = gather_into_file_tree(&test_path, &mut file_tree, |_| true).unwrap();
-        let str = to_file_list(file_tree);
+        let (file_handles, _) = gather_into_file_tree(
+            &test_path, &mut file_tree, |_| true).unwrap();
+        let str = to_file_list(&file_tree);
         assert_eq!(
             str,
             "FileTree{
@@ -211,20 +222,34 @@ stop d1"#
   vid.mp4
 }"
         );
+
+        assert_eq!(
+            file_handles_to_file_list(&file_tree, &file_handles),
+            "\
+file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4");
     }
 
     #[test]
     fn filter_extension() {
         let test_path = setup_ftree();
         let mut file_tree = FileTree::new(&test_path).unwrap();
-        let _ = gather_into_file_tree(&test_path, &mut file_tree, |p| {
+        let (file_handles, _) = gather_into_file_tree(&test_path, &mut file_tree, |p| {
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the file name
             //       -> use exntension or str::ends_with
             p.metadata().unwrap().is_dir() || p.path().to_string_lossy().ends_with(".md5")
         })
         .unwrap();
-        let str = to_file_list(file_tree);
+        let str = to_file_list(&file_tree);
         assert_eq!(
             str,
             "FileTree{
@@ -233,20 +258,26 @@ stop d1"#
   subdir/other/chksms.md5
 }"
         );
+        assert_eq!(
+            file_handles_to_file_list(&file_tree, &file_handles),
+            "\
+subdir/chksum.md5
+subdir/nested/nested/chksum.md5
+subdir/other/chksms.md5");
     }
 
     #[test]
     fn filter_dir() {
         let test_path = setup_ftree();
         let mut file_tree = FileTree::new(&test_path).unwrap();
-        let _ = gather_into_file_tree(&test_path, &mut file_tree, |p| {
+        let (file_handles, _) = gather_into_file_tree(&test_path, &mut file_tree, |p| {
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the file name
             //       -> use exntension or str::ends_with
             !p.metadata().unwrap().is_dir() || !p.path().ends_with("other")
         })
         .unwrap();
-        let str = to_file_list(file_tree);
+        let str = to_file_list(&file_tree);
         assert_eq!(
             str,
             "FileTree{
@@ -260,6 +291,17 @@ stop d1"#
   vid.mp4
 }"
         );
+        assert_eq!(
+            file_handles_to_file_list(&file_tree, &file_handles),
+            "\
+file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+vid.mp4");
     }
 
     fn setup_ftree() -> path::PathBuf {

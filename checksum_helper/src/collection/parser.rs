@@ -434,7 +434,7 @@ mod test {
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
         assert_eq!(
-            to_file_list(ft),
+            to_file_list(&ft),
             "FileTree{
   bar/.gitignore
   bar/foo/bar/baz
@@ -497,7 +497,7 @@ mod test {
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
         assert_eq!(
-            to_file_list(ft),
+            to_file_list(&ft),
             "FileTree{
   bar/.gitignore
   bar/foo/bar/baz
@@ -558,7 +558,7 @@ abcdefff foo/xer.mp4
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
         assert_eq!(
-            to_file_list(ft),
+            to_file_list(&ft),
             "FileTree{
   .gitignore
   foo/bar/baz
@@ -619,7 +619,7 @@ abcdefff foo/xer.mp4
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
         assert_eq!(
-            to_file_list(ft),
+            to_file_list(&ft),
             "FileTree{
   bar/.gitignore
   bar/foo/bar/baz
@@ -682,7 +682,7 @@ abcdefff foo/xer.mp4
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
         assert_eq!(
-            to_file_list(ft),
+            to_file_list(&ft),
             "FileTree{
   bar/.gitignore
   bar/foo/bar/baz

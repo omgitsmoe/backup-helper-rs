@@ -133,6 +133,10 @@ impl HashCollection {
         self.map.get_mut(path_handle)
     }
 
+    pub fn filter_missing(&mut self) -> Result<()> {
+        todo!("filter out all files that do no longer exist")
+    }
+
     pub fn from_str(
         str: &str,
         collection_path: impl AsRef<Path>,
@@ -533,7 +537,7 @@ pub mod test {
         }
 
         assert_eq!(
-            to_file_list(ft),
+            to_file_list(&ft),
             "FileTree{
   foo/bar/baz.txt
   bar/foo.txt
@@ -592,7 +596,7 @@ abcdefff foo/xer.mp4
         assert_eq!(hf.hash_bytes(), vec![0xab, 0xcd, 0xef, 0xff]);
 
         assert_eq!(
-            to_file_list(ft),
+            to_file_list(&ft),
             "FileTree{
   .gitignore
   foo/bar/baz

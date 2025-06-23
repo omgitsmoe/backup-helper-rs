@@ -38,12 +38,6 @@ pub struct DiscoverResult {
 }
 
 // TODO options
-// - include_unchanged_files_incremental
-// - discover_hash_files_depth
-// - incremental_skip_unchanged
-// - allow/block list
-//   - hash files
-//   - all files
 impl ChecksumHelper {
     pub fn new(root: &path::Path) -> Result<ChecksumHelper> {
         if root.is_relative() {
@@ -77,7 +71,11 @@ impl ChecksumHelper {
     }
 
     pub fn update_most_current(&mut self) {
-        todo!();
+        let hash_files = self.discover_hash_files(
+            |v| {
+                // TODO filter from options
+                true
+            });
     }
 
     pub fn verify<F, P>(&self, collection: &HashCollection, include: F, progress: P) -> Result<()>
@@ -107,39 +105,59 @@ impl ChecksumHelper {
         todo!("move files modifying their relative paths in disocovered collections, calling move_collection if it's a collection")
     }
 
-    pub fn discover_hash_files(&self, max_depth: Option<u32>) -> Result<DiscoverResult> {
+    pub fn discover_hash_files<F>(&self, include: F) -> Result<DiscoverResult> 
+    where
+        F: Fn(&VisitType) -> bool,
+    {
         let mut files = vec![];
         let result = gather(&self.root(), |visit_type| {
             match visit_type {
                 VisitType::File((_, e)) => match e.path().extension() {
-                    None => {}
+                    None => false,
                     Some(file_ext) => {
                         for ext in HASH_FILE_EXTENSIONS {
-                            if *ext == file_ext {
+                            if *ext == file_ext && include(&visit_type) {
                                 files.push(e.path());
+                                return true;
                             }
                         }
+                        false
                     }
                 },
-                VisitType::Directory((depth, _)) => {
-                    if let Some(max_depth) = max_depth {
-                        if depth > max_depth {
-                            return false;
-                        }
-                    }
+                VisitType::Directory(_) => {
+                    include(&visit_type)
                 }
-                _ => {}
+                _ => true,
             }
-
-            true
         })
-        .map_err(|e| ChecksumHelperError::GatherError(e))?;
+        .map_err(ChecksumHelperError::GatherError)?;
 
         Ok(DiscoverResult {
             hash_file_paths: files,
             errors: result.errors,
         })
     }
+}
+
+pub struct ChecksumHelperOptions {
+    /// Whether to include files in the output, which did not change compared
+    /// to the previous latest available hash found.
+    incremental_include_unchanged_files: bool,
+
+    /// Whether to skip files when computing hashes if that files has the same
+    /// modification time as in the latest available hash found.
+    incremental_skip_unchanged: bool,
+
+    /// Up to which depth should the root and its subdirectories be searched
+    /// for hash files (*.cshd, *.md5, *.sha512, etc.) to determine the
+    /// current state of hashes.
+    discover_hash_files_depth: Option<u32>,
+
+    // TODO
+    // - allow/block list
+    //   - hash files
+    //   - all files
+    // could use either ignore (used by ripgrep or globset)
 }
 
 #[derive(Debug)]
