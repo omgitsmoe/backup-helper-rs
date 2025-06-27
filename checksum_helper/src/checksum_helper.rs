@@ -1,6 +1,7 @@
 use crate::collection::{HashCollection, VerifyProgress, HashCollectionError};
 use crate::file_tree::FileTree;
 use crate::gather::{gather, VisitType};
+use crate::pathmatcher::PathMatcher;
 
 use std::cmp::{Eq, PartialEq};
 use std::error::Error;
@@ -153,11 +154,17 @@ pub struct ChecksumHelperOptions {
     /// current state of hashes.
     discover_hash_files_depth: Option<u32>,
 
-    // TODO
-    // - allow/block list
-    //   - hash files
-    //   - all files
-    // could use either ignore (used by ripgrep or globset)
+    /// Allow/block list like matching for hash files which will be used
+    /// for building the most current state of hashes.
+    /// These hashes will be used when e.g. using the `incremental`
+    /// method.
+    hash_files_matcher: PathMatcher,
+
+    /// Allow/block list like matching for all files.
+    /// Affects all file discovery behaviour: which files get included
+    /// in an incremental hash file, which files are ignored when checking
+    /// for files that don't have checksums in `check_missing`, etc.
+    all_files_matcher: PathMatcher,
 }
 
 #[derive(Debug)]
