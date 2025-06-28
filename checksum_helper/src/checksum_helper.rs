@@ -1,7 +1,7 @@
 use crate::collection::{HashCollection, VerifyProgress, HashCollectionError};
 use crate::file_tree::FileTree;
 use crate::gather::{gather, VisitType};
-use crate::pathmatcher::PathMatcher;
+use crate::pathmatcher::{PathMatcher, PathMatcherBuilder};
 
 use std::cmp::{Eq, PartialEq};
 use std::error::Error;
@@ -30,6 +30,7 @@ const HASH_FILE_EXTENSIONS: &'static [&'static str] = &[
 
 pub struct ChecksumHelper {
     file_tree: FileTree,
+    options: ChecksumHelperOptions,
     most_current: Option<HashCollection>,
 }
 
@@ -38,7 +39,6 @@ pub struct DiscoverResult {
     pub errors: Vec<String>,
 }
 
-// TODO options
 impl ChecksumHelper {
     pub fn new(root: &path::Path) -> Result<ChecksumHelper> {
         if root.is_relative() {
@@ -46,10 +46,18 @@ impl ChecksumHelper {
         } else {
             Ok(ChecksumHelper {
                 most_current: None,
+                options: ChecksumHelperOptions::default(),
                 file_tree: FileTree::new(root)
                     .expect("must succeed, since path was checked to be absolute!"),
             })
         }
+    }
+
+    pub fn with_options(root: &path::Path, options: ChecksumHelperOptions) -> Result<ChecksumHelper> {
+        let mut ch = ChecksumHelper::new(root)?;
+        ch.options = options;
+
+        Ok(ch)
     }
 
     pub fn root(&self) -> path::PathBuf {
@@ -72,11 +80,7 @@ impl ChecksumHelper {
     }
 
     pub fn update_most_current(&mut self) {
-        let hash_files = self.discover_hash_files(
-            |v| {
-                // TODO filter from options
-                true
-            });
+        let hash_files = self.discover_hash_files();
     }
 
     pub fn verify<F, P>(&self, collection: &HashCollection, include: F, progress: P) -> Result<()>
@@ -106,10 +110,11 @@ impl ChecksumHelper {
         todo!("move files modifying their relative paths in disocovered collections, calling move_collection if it's a collection")
     }
 
-    pub fn discover_hash_files<F>(&self, include: F) -> Result<DiscoverResult> 
-    where
-        F: Fn(&VisitType) -> bool,
+    pub fn discover_hash_files(&self) -> Result<DiscoverResult> 
     {
+        // TODO how to support PathMatcher efficiently such that we don't enter
+        //      directories we don't have to since they're already excluded
+        //      offer extra is_excluded method and call that on the directory?
         let mut files = vec![];
         let result = gather(&self.root(), |visit_type| {
             match visit_type {
@@ -117,7 +122,7 @@ impl ChecksumHelper {
                     None => false,
                     Some(file_ext) => {
                         for ext in HASH_FILE_EXTENSIONS {
-                            if *ext == file_ext && include(&visit_type) {
+                            if *ext == file_ext {
                                 files.push(e.path());
                                 return true;
                             }
@@ -125,8 +130,17 @@ impl ChecksumHelper {
                         false
                     }
                 },
-                VisitType::Directory(_) => {
-                    include(&visit_type)
+                VisitType::Directory((depth, _)) => {
+                    if let Some(max_depth) = self.options.discover_hash_files_depth {
+                        // NOTE: since 0 -> same directory
+                        // 1 -> one directory down
+                        // and we decide if we want to enter here, so it needs to be >=
+                        if depth >= max_depth {
+                            return false;
+                        }
+                    }
+
+                    true
                 }
                 _ => true,
             }
@@ -152,6 +166,9 @@ pub struct ChecksumHelperOptions {
     /// Up to which depth should the root and its subdirectories be searched
     /// for hash files (*.cshd, *.md5, *.sha512, etc.) to determine the
     /// current state of hashes.
+    /// Zero means only files in the root directory will be considered.
+    /// One means at most one subdirectory will be allowed.
+    /// None means no depth limit.
     discover_hash_files_depth: Option<u32>,
 
     /// Allow/block list like matching for hash files which will be used
@@ -165,6 +182,26 @@ pub struct ChecksumHelperOptions {
     /// in an incremental hash file, which files are ignored when checking
     /// for files that don't have checksums in `check_missing`, etc.
     all_files_matcher: PathMatcher,
+}
+
+impl ChecksumHelperOptions {
+    pub fn new() -> Self {
+        ChecksumHelperOptions{
+            incremental_include_unchanged_files: true,
+            incremental_skip_unchanged: false,
+            discover_hash_files_depth: None,
+            hash_files_matcher: PathMatcherBuilder::new().build()
+                .expect("An empty PathMatcher should always be valid"),
+            all_files_matcher: PathMatcherBuilder::new().build()
+                .expect("An empty PathMatcher should always be valid"),
+        }
+    }
+}
+
+impl Default for ChecksumHelperOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug)]
@@ -210,4 +247,107 @@ impl From<HashCollectionError> for ChecksumHelperError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::*;
+    use pretty_assertions::assert_eq;
+
+    fn setup_dir_hash_files() -> std::path::PathBuf {
+        let testdir = testdir!();
+        create_ftree(&testdir,
+"\
+foo/bar/baz/file.md5
+foo/bar/baz/file.cshd
+foo/bar/baz/file.txt
+foo/bar/bar.blake2b
+foo/bar/bar.mp4
+foo/foo.shake_128
+foo/foo.bin
+bar/baz/baz_2025-06-28.sha256
+bar/baz/save.sav
+bar/baz_2025-06-28.cshd
+bar/other.txt
+root.sha3_384
+file.rs");
+        testdir
+    }
+
+    #[test]
+    fn discover_hash_files_all_hash_files_found() {
+        let testdir = setup_dir_hash_files();
+        let ch = ChecksumHelper::new(&testdir).unwrap();
+        let mut result = ch.discover_hash_files()
+            .unwrap();
+        assert!(result.errors.is_empty());
+        result.hash_file_paths.sort();
+        assert_eq!(
+            result.hash_file_paths,
+            vec!{
+                testdir.join("bar").join("baz").join("baz_2025-06-28.sha256"),
+                testdir.join("bar").join("baz_2025-06-28.cshd"),
+                testdir.join("foo").join("bar").join("bar.blake2b"),
+                testdir.join("foo").join("bar").join("baz").join("file.cshd"),
+                testdir.join("foo").join("bar").join("baz").join("file.md5"),
+                testdir.join("foo").join("foo.shake_128"),
+                testdir.join("root.sha3_384"),
+            }
+        );
+    }
+
+    #[test]
+    fn discover_hash_files_respsects_hash_files_depth() {
+        // NOTE: decided this should be part of discover_hash_files
+        //       since update_most_current has a different task
+        //       harder to reuse discover_hash_files then, but
+        //       most likely the options should be respected for everything anyway
+        let testdir = setup_dir_hash_files();
+        let options = ChecksumHelperOptions{
+            discover_hash_files_depth: Some(1),
+            ..Default::default()
+        };
+        
+        let ch = ChecksumHelper::with_options(&testdir, options).unwrap();
+        let mut result = ch.discover_hash_files()
+            .unwrap();
+        assert!(result.errors.is_empty());
+
+        result.hash_file_paths.sort();
+        assert_eq!(
+            result.hash_file_paths,
+            vec!{
+                testdir.join("bar").join("baz_2025-06-28.cshd"),
+                testdir.join("foo").join("foo.shake_128"),
+                testdir.join("root.sha3_384"),
+            }
+        );
+    }
+
+    #[test]
+    fn discover_hash_files_respsects_hash_files_matcher() {
+        // NOTE: decided this should be part of discover_hash_files
+        //       since update_most_current has a different task
+        //       harder to reuse discover_hash_files then, but
+        //       most likely the options should be respected for everything anyway
+        let testdir = setup_dir_hash_files();
+        let matcher = PathMatcherBuilder::new()
+            .allow("**/*.cshd").unwrap()
+            .build().unwrap();
+        let options = ChecksumHelperOptions{
+            hash_files_matcher: matcher,
+            ..Default::default()
+        };
+        
+        let ch = ChecksumHelper::with_options(&testdir, options).unwrap();
+        let mut result = ch.discover_hash_files()
+            .unwrap();
+        assert!(result.errors.is_empty());
+
+        result.hash_file_paths.sort();
+        // TODO fix
+        assert_eq!(
+            result.hash_file_paths,
+            vec!{
+                testdir.join("bar").join("baz_2025-06-28.cshd"),
+                testdir.join("foo").join("bar").join("baz").join("file.cshd"),
+            }
+        );
+    }
 }

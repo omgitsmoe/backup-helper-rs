@@ -27,11 +27,13 @@ pub fn file_handles_to_file_list(ft: &FileTree, handles: &Vec<EntryHandle>) -> S
 
 pub fn create_ftree(root: &std::path::Path, file_list: &str) {
     file_list.split('\n').for_each(|line| {
-        let full_path = root.join(line.trim());
+        let relative_path = line.trim();
+        let full_path = root.join(relative_path);
         std::fs::create_dir_all(full_path.parent().expect("Must have a parent!"))
             .expect("Failed to create parent directories");
+        println!("creating file {}", relative_path);
         let mut file = std::fs::File::create(&full_path).expect("Failed to create file");
-        file.write_all(full_path.to_string_lossy().as_bytes())
+        file.write_all(relative_path.as_bytes())
             .expect("Failed to write to file");
     })
 }
