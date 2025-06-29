@@ -21,6 +21,10 @@ impl PathMatcher {
         // NOTE: allowed files are overridden by block patterns
         allowed && !blocked
     }
+
+    pub fn is_excluded(&self, path: impl AsRef<path::Path>) -> bool {
+        !self.block_list.is_empty() && self.block_list.is_match(&path)
+    }
 }
 
 pub struct PathMatcherBuilder {
@@ -44,7 +48,11 @@ impl PathMatcherBuilder {
     }
 
     pub fn allow(mut self, glob: impl AsRef<str>) -> Result<Self> {
-        let glob = GlobBuilder::new(glob.as_ref())
+        // NOTE: globset has weird behaviour with trailing slashes,
+        //       `foo/` does not match the path `foo`, which can be error-prone
+        //       -> strip trailing slashes
+        let glob = glob.as_ref().trim_end_matches(['/', '\\']);
+        let glob = GlobBuilder::new(glob)
             .case_insensitive(true)
             .literal_separator(true)
             .build()?;
@@ -53,7 +61,11 @@ impl PathMatcherBuilder {
     }
 
     pub fn block(mut self, glob: impl AsRef<str>) -> Result<Self> {
-        let glob = GlobBuilder::new(glob.as_ref())
+        // NOTE: globset has weird behaviour with trailing slashes,
+        //       `foo/` does not match the path `foo`, which can be error-prone
+        //       -> strip trailing slashes
+        let glob = glob.as_ref().trim_end_matches(['/', '\\']);
+        let glob = GlobBuilder::new(glob)
             .case_insensitive(true)
             .literal_separator(true)
             .build()?;
@@ -112,6 +124,15 @@ mod test {
         assert!(matcher.is_match(path::Path::new("xer.mp4")));
         assert!(matcher.is_match(path::Path::new("bar/xer.mp4")));
         assert!(matcher.is_match(path::Path::new("bar/baz/xer.mp4")));
+
+        assert!(!matcher.is_excluded(path::Path::new("foo/bar/baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("/foo")));
+        assert!(!matcher.is_excluded(path::Path::new("./foo/bar/baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("xer.mp4")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/xer.mp4")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/baz/xer.mp4")));
     }
 
     #[test]
@@ -128,6 +149,15 @@ mod test {
         assert!(matcher.is_match(path::Path::new("xer.mp4")));
         assert!(matcher.is_match(path::Path::new("bar/xer.mp4")));
         assert!(matcher.is_match(path::Path::new("bar/baz/xer.mp4")));
+
+        assert!(!matcher.is_excluded(path::Path::new("foo/bar/baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("/foo")));
+        assert!(!matcher.is_excluded(path::Path::new("./foo/bar/baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("xer.mp4")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/xer.mp4")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/baz/xer.mp4")));
     }
 
     #[test]
@@ -163,6 +193,10 @@ mod test {
         assert!(!matcher.is_match(path::Path::new("foo/./bar/baz.txt")));
         assert!(!matcher.is_match(path::Path::new("bar/baz.txt")));
         assert!(!matcher.is_match(path::Path::new("xer.mp4")));
+        assert!(matcher.is_excluded(path::Path::new("foo/bar/baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("foo/./bar/baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("bar/baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("xer.mp4")));
 
         // ./foo not matched by foo/
         assert!(matcher.is_match(path::Path::new("./foo/bar/baz.txt")));
@@ -170,6 +204,11 @@ mod test {
         assert!(matcher.is_match(path::Path::new("baz.txt")));
         assert!(matcher.is_match(path::Path::new("bar/xer.mp4")));
         assert!(matcher.is_match(path::Path::new("bar/baz/xer.mp4")));
+        assert!(!matcher.is_excluded(path::Path::new("./foo/bar/baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("/foo")));
+        assert!(!matcher.is_excluded(path::Path::new("baz.txt")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/xer.mp4")));
+        assert!(!matcher.is_excluded(path::Path::new("bar/baz/xer.mp4")));
     }
 
     #[test]
@@ -193,6 +232,13 @@ mod test {
         assert!(!matcher.is_match(path::Path::new("baz.txt")));
         assert!(!matcher.is_match(path::Path::new("bar/xer.mp4")));
         assert!(!matcher.is_match(path::Path::new("bar/baz/xer.mp4")));
+
+        assert!(matcher.is_excluded(path::Path::new("foo/bar/baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("foo/./bar/baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("bar/baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("./foo/bar/baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("baz.txt")));
+        assert!(matcher.is_excluded(path::Path::new("xer.mp4")));
     }
 
     #[test]
@@ -213,5 +259,27 @@ mod test {
         assert!(!matcher.is_match(path::Path::new("bar/baz.txt")));
         assert!(!matcher.is_match(path::Path::new("bar/xer.mp4")));
         assert!(!matcher.is_match(path::Path::new("bar/baz/xer.mp4")));
+    }
+
+    #[test]
+    fn block_trims_trailing_separators() {
+        let matcher = PathMatcherBuilder::new()
+            .block("foo/").unwrap()
+            .block("bar/baz\\\\").unwrap()
+            .build().unwrap();
+
+        assert!(matcher.is_excluded(path::Path::new("foo")));
+        assert!(matcher.is_excluded(path::Path::new("bar/baz")));
+    }
+
+    #[test]
+    fn allow_trims_trailing_separators() {
+        let matcher = PathMatcherBuilder::new()
+            .allow("foo/").unwrap()
+            .allow("bar/baz\\\\").unwrap()
+            .build().unwrap();
+
+        assert!(matcher.is_match(path::Path::new("foo")));
+        assert!(matcher.is_match(path::Path::new("bar/baz")));
     }
 }
