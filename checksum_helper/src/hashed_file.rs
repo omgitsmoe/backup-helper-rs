@@ -64,27 +64,28 @@ pub enum HashType {
     Sha3_256,
     Sha3_384,
     Sha3_512,
-    Shake128,
-    Shake256,
-    Blake2s,
-    Blake2b,
+    // NOTE: these require more attention due to having varying output sizes
+    // Shake128,
+    // Shake256,
+    // Blake2s,
+    // Blake2b,
 }
 
 impl HashType {
     pub fn to_str(&self) -> &'static str {
         match self {
-            Self::Shake128 => "shake_128",
             Self::Sha3_224 => "sha3_224",
             Self::Md5 => "md5",
-            Self::Shake256 => "shake_256",
-            Self::Blake2s => "blake2s",
+            // Self::Shake128 => "shake_128",
+            // Self::Shake256 => "shake_256",
+            // Self::Blake2s => "blake2s",
+            // Self::Blake2b => "blake2b",
             Self::Sha3_512 => "sha3_512",
             Self::Sha1 => "sha1",
             Self::Sha224 => "sha224",
             Self::Sha3_256 => "sha3_256",
             Self::Sha256 => "sha256",
             Self::Sha512 => "sha512",
-            Self::Blake2b => "blake2b",
             Self::Sha3_384 => "sha3_384",
             Self::Sha384 => "sha384",
         }
@@ -96,18 +97,18 @@ impl TryFrom<&str> for HashType {
 
     fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
         match value {
-            "shake_128" => Ok(Self::Shake128),
             "sha3_224" => Ok(Self::Sha3_224),
             "md5" => Ok(Self::Md5),
-            "shake_256" => Ok(Self::Shake256),
-            "blake2s" => Ok(Self::Blake2s),
+            // "shake_128" => Ok(Self::Shake128),
+            // "shake_256" => Ok(Self::Shake256),
+            // "blake2s" => Ok(Self::Blake2s),
+            // "blake2b" => Ok(Self::Blake2b),
             "sha3_512" => Ok(Self::Sha3_512),
             "sha1" => Ok(Self::Sha1),
             "sha224" => Ok(Self::Sha224),
             "sha3_256" => Ok(Self::Sha3_256),
             "sha256" => Ok(Self::Sha256),
             "sha512" => Ok(Self::Sha512),
-            "blake2b" => Ok(Self::Blake2b),
             "sha3_384" => Ok(Self::Sha3_384),
             "sha384" => Ok(Self::Sha384),
             _ => Err(format!("Unsupported hash type: {}", value)),
@@ -312,7 +313,7 @@ impl<'a> File<'a> {
             .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))
     }
 
-    pub fn verify(&self) -> Result<VerifyResult> {
+    pub fn verify<P: FnMut((u64, u64))>(&self, progress: P) -> Result<VerifyResult> {
         if self.file.hash_bytes.is_empty() {
             return Err(HashedFileError::MissingHash);
         }
@@ -330,7 +331,7 @@ impl<'a> File<'a> {
             }
         };
 
-        let hash_on_disk = self.compute_hash()?;
+        let hash_on_disk = self.compute_hash(progress)?;
         if hash_on_disk == self.file.hash_bytes {
             return Ok(VerifyResult::Ok);
         }
@@ -347,16 +348,30 @@ impl<'a> File<'a> {
         }
     }
 
-    pub fn compute_hash(&self) -> Result<Vec<u8>> {
-        self.compute_hash_with(self.file.hash_type)
+    pub fn compute_hash<P>(&self, progress: P) -> Result<Vec<u8>>
+    where
+        P: FnMut((u64, u64))
+    {
+        self.compute_hash_with(self.file.hash_type, progress)
     }
 
-    pub fn compute_hash_with(&self, hash_type: HashType) -> Result<Vec<u8>> {
+    pub fn compute_hash_with<P>(&self, hash_type: HashType, mut progress: P) -> Result<Vec<u8>>
+    where
+        P: FnMut((u64, u64))
+    {
+
         let path = self.absolute_path();
         let file = fs::File::open(&path)
             .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
+        let bytes_total = file.metadata()
+            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?
+            .len();
         let reader = BufReader::new(file);
-        compute_hash(reader, hash_type)
+        let mut bytes_read = 0u64;
+        compute_hash(reader, hash_type, |num_bytes_read| {
+            bytes_read += num_bytes_read;
+            progress((bytes_read, bytes_total));
+        })
     }
 }
 
@@ -388,82 +403,82 @@ pub enum VerifyResult {
     MismatchOutdatedHash,
 }
 
-fn compute_hash<R: BufRead>(reader: R, hash_type: HashType) -> Result<Vec<u8>> {
+fn compute_hash<R: BufRead, P: FnMut(u64)>(reader: R, hash_type: HashType, progress: P) -> Result<Vec<u8>> {
     match hash_type {
         HashType::Md5 => {
             let mut hasher = md5::Md5::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha1 => {
             let mut hasher = sha1::Sha1::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha224 => {
             let mut hasher = sha2::Sha224::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha256 => {
             let mut hasher = sha2::Sha256::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha384 => {
             let mut hasher = sha2::Sha384::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha512 => {
             let mut hasher = sha2::Sha512::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha3_224 => {
             let mut hasher = sha3::Sha3_224::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha3_256 => {
             let mut hasher = sha3::Sha3_256::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha3_384 => {
             let mut hasher = sha3::Sha3_384::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
         HashType::Sha3_512 => {
             let mut hasher = sha3::Sha3_512::new();
-            update_in_chunks(reader, &mut hasher)?;
+            update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
         }
-        HashType::Shake128 => {
-            let mut hasher = sha1::Sha1::new();
-            update_in_chunks(reader, &mut hasher)?;
-            Ok(hasher.finalize().to_vec())
-        }
-        HashType::Shake256 => {
-            let mut hasher = sha1::Sha1::new();
-            update_in_chunks(reader, &mut hasher)?;
-            Ok(hasher.finalize().to_vec())
-        }
-        HashType::Blake2s => {
-            let mut hasher = sha1::Sha1::new();
-            update_in_chunks(reader, &mut hasher)?;
-            Ok(hasher.finalize().to_vec())
-        }
-        HashType::Blake2b => {
-            let mut hasher = sha1::Sha1::new();
-            update_in_chunks(reader, &mut hasher)?;
-            Ok(hasher.finalize().to_vec())
-        }
+        // HashType::Shake128 => {
+        //     let mut hasher = sha3::Shake128::new();
+        //     update_in_chunks(reader, &mut hasher, progress)?;
+        //     Ok(hasher.finalize().to_vec())
+        // }
+        // HashType::Shake256 => {
+        //     let mut hasher = sha3::Shake256::new();
+        //     update_in_chunks(reader, &mut hasher, progress)?;
+        //     Ok(hasher.finalize().to_vec())
+        // }
+        // HashType::Blake2s => {
+        //     let mut hasher = blake2::Blake2s::new();
+        //     update_in_chunks(reader, &mut hasher, progress)?;
+        //     Ok(hasher.finalize().to_vec())
+        // }
+        // HashType::Blake2b => {
+        //     let mut hasher = blake2::Blake2b::new();
+        //     update_in_chunks(reader, &mut hasher, progress)?;
+        //     Ok(hasher.finalize().to_vec())
+        // }
     }
 }
 
-fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Result<()> {
+fn update_in_chunks<R: BufRead, P: FnMut(u64)>(mut reader: R, hasher: &mut impl Digest, mut progress: P) -> Result<()> {
     // reading 64k (65536 bytes) chunks turned out to be most performant
     let mut buf = [0u8; 65536];
     loop {
@@ -474,6 +489,7 @@ fn update_in_chunks<R: BufRead>(mut reader: R, hasher: &mut impl Digest) -> Resu
             break;
         }
         hasher.update(&buf[..bytes_read]);
+        progress(bytes_read as u64);
     }
     Ok(())
 }
@@ -558,14 +574,17 @@ mod test {
         assert_eq!(
             compute_hash(
                 std::io::Cursor::new(testcontent),
-                file.raw_mut(|r| r.hash_type())
+                file.raw_mut(|r| r.hash_type()),
+                |_| {},
             )
             .unwrap(),
             expected
         );
 
-        assert_eq!(file.compute_hash().unwrap(), expected);
-        assert_eq!(file.compute_hash_with(HashType::Md5).unwrap(), expected);
+        assert_eq!(file.compute_hash(|_| {}).unwrap(), expected);
+
+        let expected = hex::decode("c3ab8ff13720e8ad9047dd39466b3c8974e592c2fa383d4a3960714caef0c4f2").unwrap();
+        assert_eq!(file.compute_hash_with(HashType::Sha256, |_| {}).unwrap(), expected);
     }
 
     #[test]
@@ -574,7 +593,10 @@ mod test {
             setup_testfile();
         let file = File::from_raw(&mut raw, &ft);
 
-        assert_eq!(file.verify().unwrap(), VerifyResult::Ok);
+        assert_eq!(file.verify(|(read, total)| {
+            assert_eq!(read, 6);
+            assert_eq!(total, 6);
+        }).unwrap(), VerifyResult::Ok);
     }
 
     #[test]
@@ -589,7 +611,7 @@ mod test {
         // this could be used to check the contents as well:
         // assert!(matches!(file.verify(), Err(HashedFileError::IOError(k))
         //         if k.kind() == std::io::ErrorKind::NotFound));
-        assert!(matches!(file.as_file().verify(), Err(HashedFileError::MissingHash)));
+        assert!(matches!(file.as_file().verify(|_| {}), Err(HashedFileError::MissingHash)));
     }
 
     #[test]
@@ -599,7 +621,7 @@ mod test {
 
         std::fs::remove_file(testfile_abs).unwrap();
 
-        let result = file.verify();
+        let result = file.verify(|_| {});
         assert!(matches!(result, Ok(VerifyResult::FileMissing(std::io::ErrorKind::NotFound))));
     }
 
@@ -610,7 +632,7 @@ mod test {
 
         std::fs::write(testfile_abs, "newsize1234").unwrap();
 
-        let result = file.verify();
+        let result = file.verify(|_| {});
         assert!(matches!(result, Ok(VerifyResult::MismatchSize)));
     }
 
@@ -623,7 +645,7 @@ mod test {
         assert_eq!(testcontent.len(), new_content.len());
         std::fs::write(testfile_abs, new_content).unwrap();
 
-        let result = file.verify();
+        let result = file.verify(|_| {});
         assert!(matches!(result, Ok(VerifyResult::Mismatch)));
     }
 
@@ -638,7 +660,7 @@ mod test {
         let new_mtime = file.as_file().fetch_mtime().unwrap();
         file.raw(|raw| raw.update_mtime(Some(new_mtime)));
 
-        let result = file.as_file().verify();
+        let result = file.as_file().verify(|_| {});
         assert!(matches!(result, Ok(VerifyResult::MismatchCorrupted)));
     }
 
@@ -655,7 +677,7 @@ mod test {
         assert_eq!(testcontent.len(), new_content.len());
         std::fs::write(testfile_abs, new_content).unwrap();
 
-        let result = file.as_file().verify();
+        let result = file.as_file().verify(|_| {});
         assert!(matches!(result, Ok(VerifyResult::MismatchOutdatedHash)));
     }
 }

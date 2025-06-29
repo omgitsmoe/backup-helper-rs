@@ -273,7 +273,8 @@ impl HashCollection {
             // NOTE: Only errors that need to stop the verification progress can come from
             //       verify, so it's fine to use `?` here. For everything else a corresponding
             //       VerifyResult is used.
-            let result = file.verify()?;
+            // TODO: pass along
+            let result = file.verify(|_| {})?;
             size_processed_bytes += file.raw(|f| f.size().unwrap_or(0));
 
             progress(VerifyProgress::Post(VerifyProgressPost {
@@ -302,6 +303,7 @@ impl HashCollection {
 
 #[derive(Debug, Clone, Copy)]
 pub enum VerifyProgress<'a> {
+    // TODO: Read updating bytes read/total
     Pre(VerifyProgressCommon<'a>),
     Post(VerifyProgressPost<'a>),
 }

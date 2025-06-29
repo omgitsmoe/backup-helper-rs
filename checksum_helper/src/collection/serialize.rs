@@ -144,7 +144,7 @@ mod test {
             path_handle.clone(),
             None,
             None,
-            HashType::Blake2s,
+            HashType::Sha3_224,
             vec![0xab, 0xcd, 0xef, 0x09],
         );
 
@@ -152,7 +152,7 @@ mod test {
 
         let result = std::str::from_utf8(&buf).unwrap();
 
-        assert_eq!(result, ",,blake2s,abcdef09 bar/baz.txt\n",);
+        assert_eq!(result, ",,sha3_224,abcdef09 bar/baz.txt\n",);
     }
 
     #[test]

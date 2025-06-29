@@ -69,8 +69,11 @@ impl ChecksumHelper {
         self.file_tree.absolute_path(&self.file_tree.root())
     }
 
-    pub fn incremental(&mut self) -> &HashCollection {
-        // TODO progress callback
+    pub fn incremental<P>(&mut self, progress: P) -> Result<&HashCollection> 
+    where
+        P: Fn(IncrementalProgress)
+
+    {
         // prob best to gather files first then do the checksumming -> better progress indicator
         todo!();
     }
@@ -197,9 +200,13 @@ impl ChecksumHelper {
         todo!("verify files matching predicate include in self.root_dir")
     }
 
-    // TODO copy as well?
     fn move_collection() {
+        // should use copy_collection internally
         todo!("move a hash collection; relocating paths, but preserving mtime of the collection")
+    }
+
+    fn copy_collection() {
+        todo!("copy a hash collection; relocating paths, but preserving mtime of the collection")
     }
 
     pub fn move_path() {
@@ -346,6 +353,16 @@ pub struct CheckMissingResult {
     pub directories: Vec<path::PathBuf>,
     pub files: Vec<path::PathBuf>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug)]
+pub enum IncrementalProgress {
+    // TODO most_current progress (discovering hash files?)
+    DiscoverFiles, // num found, num ignored
+    PreRead,
+    Read,
+    PostRead,
+    Finished,
 }
 
 #[derive(Debug)]
