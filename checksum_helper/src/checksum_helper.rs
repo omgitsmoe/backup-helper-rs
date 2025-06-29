@@ -1,4 +1,4 @@
-use crate::collection::{HashCollection, HashCollectionError, VerifyProgress};
+use crate::collection::{HashCollection, HashCollectionError, VerifyProgress, HashCollectionWriter};
 use crate::file_tree::FileTree;
 use crate::gather::{gather, VisitType};
 use crate::pathmatcher::{PathMatcher, PathMatcherBuilder};
@@ -7,6 +7,8 @@ use std::cmp::{Eq, PartialEq};
 use std::error::Error;
 use std::fmt;
 use std::path;
+
+use chrono;
 
 type Result<T> = std::result::Result<T, ChecksumHelperError>;
 
@@ -82,10 +84,37 @@ impl ChecksumHelper {
         todo!("find files that don't have a checksum in most current yet and list them")
     }
 
-    pub fn update_most_current(&mut self) -> Result<()> {
-        let hash_files = self.discover_hash_files()?;
+    fn update_most_current(&mut self) -> Result<()> {
+        let discover_result = self.discover_hash_files()?;
+        let most_current_path = self.root().join(
+        self.most_current_filename());
+        let mut most_current = HashCollection::new(
+            Some(&most_current_path), None)
+            .expect("creating an empty hash file collection must succeed");
+
+        for hash_file_path in discover_result.hash_file_paths {
+            let hc = HashCollection::from_disk(
+                &hash_file_path, &mut self.file_tree)?;
+            most_current.merge(hc)?;
+        }
+
+        self.most_current = Some(most_current);
 
         Ok(())
+    }
+
+    pub fn build_most_current(&mut self) -> Result<()> {
+        if self.most_current.is_none() {
+            self.update_most_current()?;
+        }
+
+        if let Some(most_current) = &mut self.most_current {
+            let mut writer = HashCollectionWriter::new();
+            writer.write(most_current, &self.file_tree)?;
+            Ok(())
+        } else {
+            Err(ChecksumHelperError::InvalidMostCurrentHashFile)
+        }
     }
 
     pub fn verify<F, P>(&self, collection: &HashCollection, include: F, progress: P) -> Result<()>
@@ -115,6 +144,8 @@ impl ChecksumHelper {
         todo!("move files modifying their relative paths in disocovered collections, calling move_collection if it's a collection")
     }
 
+    // TODO extract extension/depth/etc matching into separate function and then
+    //      check early dir skipping based on that
     fn discover_hash_files(&self) -> Result<DiscoverResult> {
         let mut files = vec![];
         let root = self.root();
@@ -184,6 +215,16 @@ impl ChecksumHelper {
             errors: result.errors,
         })
     }
+
+    fn most_current_filename(&self) -> std::ffi::OsString {
+        let now = chrono::offset::Local::now();
+        let datetime = now.format("%Y-%m-%dT%H%M%S");
+        let root = self.root();
+        let default = std::ffi::OsString::from("most_current");
+        let base = root.file_name()
+            .unwrap_or(&default);
+        format!("{:?}_{}", base, datetime).into()
+    }
 }
 
 pub struct ChecksumHelperOptions {
@@ -241,6 +282,7 @@ impl Default for ChecksumHelperOptions {
 #[derive(Debug)]
 pub enum ChecksumHelperError {
     RootIsRelative(path::PathBuf),
+    InvalidMostCurrentHashFile,
     HashCollectionError(crate::collection::HashCollectionError),
     HashedFileError(crate::hashed_file::HashedFileError),
     // TODO error Trait
@@ -254,6 +296,9 @@ impl fmt::Display for ChecksumHelperError {
         match *self {
             ChecksumHelperError::RootIsRelative(ref p) => {
                 write!(f, "root must be absolute, got: {:?}", p)
+            }
+            ChecksumHelperError::InvalidMostCurrentHashFile => {
+                write!(f, "invalid most current hash file")
             }
             ChecksumHelperError::HashCollectionError(..) => write!(f, "hash collection error"),
             ChecksumHelperError::HashedFileError(..) => write!(f, "hashed file error"),

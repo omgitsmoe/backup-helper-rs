@@ -48,7 +48,7 @@ impl HashCollectionWriter {
     /// Does not modify the `collection`.
     ///
     /// Errors if the file exists.
-    pub fn write(&mut self, collection: &mut HashCollection, file_tree: &FileTree) -> Result<()> {
+    pub fn write(&mut self, collection: &HashCollection, file_tree: &FileTree) -> Result<()> {
         let full_path = collection.full_path()?;
         let file = fs::File::create_new(full_path)?;
 
@@ -56,6 +56,12 @@ impl HashCollectionWriter {
         collection.serialize(&mut buf_writer, file_tree).map(|_| {
             self.wrote_header = true;
         })
+    }
+}
+
+impl Default for HashCollectionWriter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
