@@ -232,6 +232,7 @@ impl FileRaw {
 // Instead we chose to use separate structs, one for wrapping a mut,
 // one for a non-mut reference. This reduces duplication, since
 // the mut wrapper can just return a non-mut one.
+#[derive(Debug)]
 pub struct File<'a> {
     file: &'a FileRaw,
     context: &'a FileTree,

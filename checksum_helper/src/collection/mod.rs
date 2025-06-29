@@ -1,5 +1,6 @@
 use crate::file_tree::{EntryHandle, ErrorKind, FileTree};
-use crate::hashed_file::{FileRaw, HashType, VerifyResult};
+use crate::hashed_file::{FileRaw, File, HashType, VerifyResult};
+use crate::alias::{Map, MapIter};
 
 use log::{debug, error, info, warn};
 
@@ -11,14 +12,6 @@ use std::fmt;
 use std::fs;
 use std::io::{BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::string::ToString;
-
-// for deterministic ordering in testing
-#[cfg(test)]
-use std::collections::BTreeMap as Map;
-
-#[cfg(not(test))]
-use std::collections::HashMap as Map;
 
 mod parser;
 mod serialize;
@@ -125,7 +118,18 @@ impl HashCollection {
         self.map.insert(path_handle, hashed_file);
     }
 
-    pub fn get(&mut self, path_handle: &EntryHandle) -> Option<&FileRaw> {
+    pub fn contains_path(&self, path: impl AsRef<Path>, file_tree: &FileTree) -> bool {
+        let path = path.as_ref();
+        assert!(path.is_relative(), "Only paths relative to file_tree allowed!");
+        let handle = file_tree.find(path);
+        if handle.is_none() {
+            return false;
+        }
+
+        self.get(&handle.unwrap()).is_some()
+    }
+
+    pub fn get(&self, path_handle: &EntryHandle) -> Option<&FileRaw> {
         self.map.get(path_handle)
     }
 
@@ -287,6 +291,13 @@ impl HashCollection {
 
         Ok(())
     }
+
+    pub fn iter_with_context<'a>(&'a self, file_tree: &'a FileTree) -> HashCollectionIter<'a> {
+        HashCollectionIter {
+            map_iter: self.map.iter(),
+            file_tree,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -328,6 +339,24 @@ fn is_path_above_hash_file(path: &str) -> bool {
     }
 
     depth < 0
+}
+
+pub struct HashCollectionIter<'a> {
+    map_iter: MapIter<'a, EntryHandle, FileRaw>,
+    file_tree: &'a FileTree,
+}
+
+impl<'a> Iterator for HashCollectionIter<'a> {
+    type Item = (PathBuf, File<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((handle, file_raw)) = self.map_iter.next() {
+            let path = self.file_tree.absolute_path(handle);
+            let file = File::from_raw(file_raw, self.file_tree);
+            return Some((path, file));
+        }
+        None
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -979,5 +1008,92 @@ abcdefff foo/xer.mp4
         .unwrap();
 
         assert!(idx % 2 == 0);
+    }
+
+    #[test]
+    fn not_contained_when_not_in_file_tree() {
+        let ft = FileTree::new("/foo/bar").unwrap();
+        let hc = HashCollection::new(None::<&&str>, None).unwrap();
+        assert!(!hc.contains_path("baz", &ft));
+        assert!(!hc.contains_path("baz/bar", &ft));
+        assert!(!hc.contains_path("foo/bar/baz", &ft));
+    }
+
+    #[test]
+    fn contains_path_when_in_file_tree() {
+        let mut ft = FileTree::new("/foo/bar").unwrap();
+        let eh1 = ft.add_file(Path::new("baz.txt")).unwrap();
+        let eh2 = ft.add_file(Path::new("baz/file.txt")).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        hc.update(
+            eh1.clone(),
+            FileRaw::new(
+                eh1.clone(),
+                None,
+                None,
+                HashType::Sha512,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+        hc.update(
+            eh2.clone(),
+            FileRaw::new(
+                eh2.clone(),
+                None,
+                None,
+                HashType::Sha512,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+
+        assert!(!hc.contains_path("baz", &ft));
+        assert!(!hc.contains_path("baz/bar", &ft));
+        assert!(!hc.contains_path("foo/bar/baz", &ft));
+        assert!(hc.contains_path("baz.txt", &ft));
+        assert!(hc.contains_path("baz/file.txt", &ft));
+    }
+
+    #[test]
+    fn collection_iter() {
+        let mut ft = FileTree::new("/foo/bar").unwrap();
+        let eh1 = ft.add_file(Path::new("baz.txt")).unwrap();
+        let eh2 = ft.add_file(Path::new("baz/file.txt")).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let f1 = FileRaw::new(
+            eh1.clone(),
+            None,
+            None,
+            HashType::Sha512,
+            vec![0xde, 0xad, 0xbe, 0xef],
+        );
+        hc.update(
+            eh1.clone(),
+            f1,
+        );
+        let f2 = FileRaw::new(
+            eh2.clone(),
+            None,
+            None,
+            HashType::Sha512,
+            vec![0xde, 0xad, 0xbe, 0xef],
+        );
+        hc.update(
+            eh2.clone(),
+            f2,
+        );
+
+        let mut iter = hc.iter_with_context(&ft);
+
+        let (path, file) = iter.next().unwrap();
+        let expected_path = PathBuf::from("/foo/bar/baz.txt");
+        assert_eq!(path, expected_path);
+        assert_eq!(file.raw(|f| f.absolute_path(&ft)), expected_path);
+
+        let (path, file) = iter.next().unwrap();
+        let expected_path = PathBuf::from("/foo/bar/baz/file.txt");
+        assert_eq!(path, expected_path);
+        assert_eq!(file.raw(|f| f.absolute_path(&ft)), expected_path);
+
+        assert!(iter.next().is_none());
     }
 }

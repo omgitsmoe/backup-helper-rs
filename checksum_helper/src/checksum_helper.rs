@@ -75,13 +75,75 @@ impl ChecksumHelper {
         todo!();
     }
 
-    pub fn fill_missing(&mut self) -> &HashCollection {
+    pub fn fill_missing(&mut self) -> Result<HashCollection> {
+        if self.most_current.is_none() {
+            self.update_most_current()?;
+        }
+
         todo!("find files that don't have a checksum in most current yet and generat them")
     }
 
-    pub fn check_missing(self) -> Result<path::PathBuf> {
-        // TODO optionally with filter?
-        todo!("find files that don't have a checksum in most current yet and list them")
+    // TODO optionally with filter?
+    pub fn check_missing(&mut self) -> Result<CheckMissingResult> {
+        if self.most_current.is_none() {
+            self.update_most_current()?;
+        }
+
+        let root = self.root();
+        // first find all directories that have at least one file and add all
+        // its parents,
+        // if we find a directory later that is not in this set,
+        // we can record it as missing entirely
+        let mut dirs_with_hashed_file = std::collections::HashSet::new();
+        dirs_with_hashed_file.insert(root.clone());
+
+        let most_current = self.most_current.as_ref()
+            .expect("checked above");
+        for (path, _) in most_current
+            .iter_with_context(&self.file_tree) {
+                let relative = path.strip_prefix(&root)
+                    .expect("paths in the file tree must be relative to the ChecksumHelper root");
+                let mut current = relative;
+                while let Some(path) = current.parent() {
+                    dirs_with_hashed_file.insert(path.to_owned());
+                    current = path;
+                }
+        }
+
+        let mut missing_directories = vec!();
+        let mut missing_files = vec!();
+        let gather_errors = gather(&root, |v| {
+            match v {
+                VisitType::Directory((_, e)) => {
+                    let path = e.path();
+                    let relative = path.strip_prefix(&root)
+                        .expect("paths under root must be relative to root");
+                    if dirs_with_hashed_file.contains(relative) {
+                        true
+                    } else {
+                        missing_directories.push(relative.to_owned());
+                        false
+                    }
+                },
+                VisitType::File((_, e)) => {
+                    let path = e.path();
+                    let relative = path.strip_prefix(&root)
+                        .expect("paths under root must be relative to root");
+                    if !most_current.contains_path(relative, &self.file_tree) {
+                        missing_files.push(relative.to_owned());
+                    }
+
+                    true
+                },
+                _ => true,
+            }
+        })?;
+
+        Ok(CheckMissingResult{
+            directories: missing_directories,
+            files: missing_files,
+            errors: gather_errors.errors,
+        })
     }
 
     fn update_most_current(&mut self) -> Result<()> {
@@ -279,6 +341,13 @@ impl Default for ChecksumHelperOptions {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct CheckMissingResult {
+    pub directories: Vec<path::PathBuf>,
+    pub files: Vec<path::PathBuf>,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum ChecksumHelperError {
     RootIsRelative(path::PathBuf),
@@ -322,6 +391,12 @@ impl Error for ChecksumHelperError {
 impl From<HashCollectionError> for ChecksumHelperError {
     fn from(value: HashCollectionError) -> Self {
         ChecksumHelperError::HashCollectionError(value)
+    }
+}
+
+impl From<crate::gather::Error> for ChecksumHelperError {
+    fn from(value: crate::gather::Error) -> Self {
+        ChecksumHelperError::GatherError(value)
     }
 }
 
@@ -457,6 +532,7 @@ file.rs",
             }
         );
 
+        // TODO extract hash files depth/ext/etc. logic and then test it separately
         // for manually testing debug output
         // panic!();
     }
@@ -496,5 +572,116 @@ file.rs",
 
         // for manually testing debug output
         // panic!();
+    }
+
+    fn setup_dir_check_missing() -> std::path::PathBuf {
+        let testdir = testdir!();
+        create_ftree(
+            &testdir,
+            "\
+foo/bar/baz/file.bin
+foo/bar/baz/file.txt
+foo/bar/bar.test
+foo/bar/bar.mp4
+foo/foo.txt
+foo/foo.bin
+bar/baz/baz_2025-06-28.foo
+bar/baz/save.sav
+bar/baz_2025-06-28.foo
+bar/other.txt
+root.mp4
+file.rs",
+        );
+        testdir
+    }
+
+    #[test]
+    fn check_missing_no_hashed_files() {
+        let testdir = setup_dir_check_missing();
+        let mut ch = ChecksumHelper::new(&testdir)
+            .unwrap();
+        let result = ch.check_missing().unwrap();
+        assert_eq!(
+            result,
+            CheckMissingResult{
+                directories: vec!{
+                    path::PathBuf::from("bar"),
+                    path::PathBuf::from("foo"),
+                },
+                files: vec!{
+                    path::PathBuf::from("file.rs"),
+                    path::PathBuf::from("root.mp4"),
+                },
+                errors: vec!{
+                },
+
+            }
+        );
+    }
+
+
+    #[test]
+    fn check_missing_with_hashed_files() {
+        let testdir = setup_dir_check_missing();
+        std::fs::write(testdir.join("test.md5"), "\
+e37276a93ac1e99188340e3f61e3673b  foo/bar/baz/file.bin
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.test
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.mp4
+e37276a93ac1e99188340e3f61e3673b  bar/baz_2025-06-28.foo
+e37276a93ac1e99188340e3f61e3673b  bar/other.txt
+e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
+
+        let mut ch = ChecksumHelper::new(&testdir)
+            .unwrap();
+        let result = ch.check_missing().unwrap();
+        assert_eq!(
+            result,
+            CheckMissingResult{
+                directories: vec!{
+                    path::PathBuf::from("bar").join("baz"),
+                },
+                files: vec!{
+                    path::PathBuf::from("root.mp4"),
+                    path::PathBuf::from("test.md5"),
+                    path::PathBuf::from("foo").join("foo.bin"),
+                    path::PathBuf::from("foo").join("foo.txt"),
+                    path::PathBuf::from("foo/bar/baz/file.txt"),
+                },
+                errors: vec!{
+                },
+
+            }
+        );
+    }
+
+    #[test]
+    fn check_missing_dir_missing_completely() {
+        let testdir = setup_dir_check_missing();
+        std::fs::write(testdir.join("test.md5"), "\
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.test
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.mp4
+e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
+
+        let mut ch = ChecksumHelper::new(&testdir)
+            .unwrap();
+        let result = ch.check_missing().unwrap();
+        assert_eq!(
+            result,
+            CheckMissingResult{
+                directories: vec!{
+                    path::PathBuf::from("bar"),
+                    path::PathBuf::from("foo").join("bar").join("baz"),
+                },
+                files: vec!{
+                    path::PathBuf::from("root.mp4"),
+                    path::PathBuf::from("test.md5"),
+                    path::PathBuf::from("foo").join("foo.bin"),
+                    path::PathBuf::from("foo").join("foo.txt"),
+                },
+                errors: vec!{
+                },
+
+            }
+        );
     }
 }

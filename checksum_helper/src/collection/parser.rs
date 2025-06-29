@@ -77,9 +77,13 @@ pub fn parse_single_hash<R: BufRead>(
     let prefix = ft_to_collection_root_prefix(&result, file_tree)?;
     for line in reader.lines() { match line {
             Ok(line) => {
-                let (hash_hex, file_path) = line.split_once(' ').ok_or_else(|| {
+                let (hash_hex, mut file_path) = line.split_once(' ').ok_or_else(|| {
                     HashCollectionError::InvalidSingleHashLine((line.to_string(), "".to_string()))
                 })?;
+                // strip ' ' (text mode) and '*' (binary mode) from GNU md5sum-style files
+                if file_path.starts_with(' ') || file_path.starts_with('*') {
+                    file_path = &file_path[1..];
+                }
                 let file_path = prefix.join(file_path);
                 let path_handle = file_tree
                     .add(&file_path, false)
@@ -516,8 +520,8 @@ mod test {
             Cursor::new(&format!(
                 "\
 {} {}
-abcdefff foo/bar/baz
-abcdefff foo/xer.mp4
+abcdefff  foo/bar/baz
+abcdefff *foo/xer.mp4
 \
         ",
                 hash_hex,
