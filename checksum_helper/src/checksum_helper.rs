@@ -69,9 +69,9 @@ impl ChecksumHelper {
         self.file_tree.absolute_path(&self.file_tree.root())
     }
 
-    pub fn incremental<P>(&mut self, progress: P) -> Result<&HashCollection> 
+    pub fn incremental<P>(&mut self, progress: P) -> Result<&HashCollection>
     where
-        P: Fn(IncrementalProgress)
+        P: FnMut(IncrementalProgress)
 
     {
         // TODO progress callback
@@ -81,7 +81,7 @@ impl ChecksumHelper {
 
     pub fn fill_missing(&mut self) -> Result<HashCollection> {
         if self.most_current.is_none() {
-            self.update_most_current()?;
+            self.update_most_current(|_| {})?;
         }
 
         todo!("find files that don't have a checksum in most current yet and generat them")
@@ -89,7 +89,7 @@ impl ChecksumHelper {
 
     pub fn check_missing(&mut self) -> Result<CheckMissingResult> {
         if self.most_current.is_none() {
-            self.update_most_current()?;
+            self.update_most_current(|_| {})?;
         }
 
         let root = self.root();
@@ -160,8 +160,11 @@ impl ChecksumHelper {
         })
     }
 
-    fn update_most_current(&mut self) -> Result<()> {
-        let discover_result = self.discover_hash_files()?;
+    fn update_most_current<P>(&mut self, progress: P) -> Result<()>
+    where
+        P: FnMut(MostCurrentProgress)
+    {
+        let discover_result = self.discover_hash_files(progress)?;
         let most_current_path = self.root().join(
         self.most_current_filename());
         let mut most_current = HashCollection::new(
@@ -179,9 +182,12 @@ impl ChecksumHelper {
         Ok(())
     }
 
-    pub fn build_most_current(&mut self) -> Result<()> {
+    pub fn build_most_current<P>(&mut self, progress: P) -> Result<()>
+    where
+        P: FnMut(MostCurrentProgress)
+    {
         if self.most_current.is_none() {
-            self.update_most_current()?;
+            self.update_most_current(progress)?;
         }
 
         if let Some(most_current) = &mut self.most_current {
@@ -226,7 +232,10 @@ impl ChecksumHelper {
 
     // TODO extract extension/depth/etc matching into separate function and then
     //      check early dir skipping based on that
-    fn discover_hash_files(&self) -> Result<DiscoverResult> {
+    fn discover_hash_files<P>(&self, mut progress: P) -> Result<DiscoverResult>
+    where
+        P: FnMut(MostCurrentProgress)
+    {
         let mut files = vec![];
         let root = self.root();
         let result = gather(&root, |visit_type| {
@@ -253,10 +262,14 @@ impl ChecksumHelper {
                         #[cfg(test)]
                         println!("Visiting f {:?}", relative_path);
 
-                        if self.options.hash_files_matcher.is_match(relative_path) {
+                        if self.options.hash_files_matcher.is_match(&relative_path) {
                             files.push(e.path());
+                            progress(MostCurrentProgress::FoundFile(
+                                relative_path.to_owned()));
                             true
                         } else {
+                            progress(MostCurrentProgress::IgnoredPath(
+                                relative_path.to_owned()));
                             false
                         }
                     }
@@ -279,7 +292,9 @@ impl ChecksumHelper {
                     #[cfg(test)]
                     println!("Visiting d {:?}", relative_path);
 
-                    if self.options.hash_files_matcher.is_excluded(relative_path) {
+                    if self.options.hash_files_matcher.is_excluded(&relative_path) {
+                        progress(MostCurrentProgress::IgnoredPath(
+                            relative_path.to_owned()));
                         return false;
                     }
 
@@ -367,12 +382,43 @@ pub struct CheckMissingResult {
 }
 
 #[derive(Debug)]
+pub enum MostCurrentProgress {
+    /// Found a hash file that will be included in the most current hash file.
+    FoundFile(path::PathBuf),
+    /// Ignored a file or directory path. Not used when pre-filtering known hash file
+    /// extensions.
+    IgnoredPath(path::PathBuf),
+    /// Load and merge hash file into most current.
+    MergeHashFile(path::PathBuf),
+}
+
+#[derive(Debug)]
 pub enum IncrementalProgress {
-    // TODO most_current progress (discovering hash files?)
-    DiscoverFiles, // num found, num ignored
-    PreRead,
-    Read,
-    PostRead,
+    BuildMostCurrent(MostCurrentProgress),
+    /// Found a file that will be included in check summing.
+    DiscoverFilesFound(usize),
+    /// Ignored a path (file or directory).
+    DiscoverFilesIgnored(path::PathBuf),
+    /// Finished discovering files to hash: number of files to hash, number of ignored files.
+    DiscoverFilesDone(usize, usize),
+    PreRead(path::PathBuf),
+    /// Read progress in bytes: read, total.
+    Read(u64, u64),
+    /// File matched the recorded hash.
+    FileMatch(path::PathBuf),
+    /// Skipped a file, which matched the recorded `mtime`.
+    /// Turn this behaviour on or off using `ChecksumHelperOptions::incremental_skip_unchanged`.
+    FileUnchangedSkipped(path::PathBuf),
+    /// File changed with a newer `mtime` compared to the recorded one or there
+    /// was no recorded `mtime`.
+    FileChanged(path::PathBuf),
+    /// File matched the recorded `mtime`, but the computed hash was different.
+    FileChangedCorrupted(path::PathBuf),
+    /// File changed, where the `mtime` of the file on disk is __older__ than the
+    /// recorded `mtime`.
+    FileChangedOlder(path::PathBuf),
+    FileNew(path::PathBuf),
+    FileRemoved(path::PathBuf),
     Finished,
 }
 
@@ -460,20 +506,35 @@ file.rs",
     fn discover_hash_files_all_hash_files_found() {
         let testdir = setup_dir_hash_files();
         let ch = ChecksumHelper::new(&testdir).unwrap();
-        let mut result = ch.discover_hash_files().unwrap();
+        let mut found_cb = vec!();
+        let mut result = ch.discover_hash_files(|p| {
+            if let MostCurrentProgress::FoundFile(p) = p {
+                found_cb.push(p);
+            } else {
+                unreachable!();
+            }
+        }).unwrap();
         assert!(result.errors.is_empty());
         result.hash_file_paths.sort();
+        let expected = vec! {
+            testdir.join("bar").join("baz").join("baz_2025-06-28.sha256"),
+            testdir.join("bar").join("baz_2025-06-28.cshd"),
+            testdir.join("foo").join("bar").join("bar.blake2b"),
+            testdir.join("foo").join("bar").join("baz").join("file.cshd"),
+            testdir.join("foo").join("bar").join("baz").join("file.md5"),
+            testdir.join("foo").join("foo.shake_128"),
+            testdir.join("root.sha3_384"),
+        };
         assert_eq!(
             result.hash_file_paths,
-            vec! {
-                testdir.join("bar").join("baz").join("baz_2025-06-28.sha256"),
-                testdir.join("bar").join("baz_2025-06-28.cshd"),
-                testdir.join("foo").join("bar").join("bar.blake2b"),
-                testdir.join("foo").join("bar").join("baz").join("file.cshd"),
-                testdir.join("foo").join("bar").join("baz").join("file.md5"),
-                testdir.join("foo").join("foo.shake_128"),
-                testdir.join("root.sha3_384"),
-            }
+            expected
+        );
+
+        found_cb.sort();
+        assert_eq!(
+            found_cb,
+            expected.iter().map(|p| p.strip_prefix(&testdir).unwrap())
+                .collect::<Vec<&path::Path>>(),
         );
     }
 
@@ -490,7 +551,7 @@ file.rs",
         };
 
         let ch = ChecksumHelper::with_options(&testdir, options).unwrap();
-        let mut result = ch.discover_hash_files().unwrap();
+        let mut result = ch.discover_hash_files(|_| {}).unwrap();
         assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
@@ -520,23 +581,52 @@ file.rs",
             hash_files_matcher: matcher,
             ..Default::default()
         };
-
         let ch = ChecksumHelper::with_options(&testdir, options).unwrap();
-        let mut result = ch.discover_hash_files().unwrap();
+
+        let mut found_cb = vec!();
+        let mut ignored_cb = vec!();
+        let mut result = ch.discover_hash_files(|p| {
+            match p {
+                MostCurrentProgress::FoundFile(p) => found_cb.push(p),
+                MostCurrentProgress::IgnoredPath(p) => ignored_cb.push(p),
+                _ => unreachable!(),
+            }
+        }).unwrap();
+
         assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
+        let expected = vec! {
+            testdir.join("bar").join("baz_2025-06-28.cshd"),
+            testdir.join("foo").join("bar").join("baz").join("file.cshd"),
+        };
         assert_eq!(
             result.hash_file_paths,
+            expected,
+        );
+
+        found_cb.sort();
+        assert_eq!(
+            found_cb,
+            expected.iter().map(|p| p.strip_prefix(&testdir).unwrap())
+                .collect::<Vec<&path::Path>>(),
+        );
+
+        ignored_cb.sort();
+        assert_eq!(
+            ignored_cb,
             vec! {
-                testdir.join("bar").join("baz_2025-06-28.cshd"),
-                testdir.join("foo").join("bar").join("baz").join("file.cshd"),
-            }
+                path::PathBuf::from("bar").join("baz").join("baz_2025-06-28.sha256"),
+                path::PathBuf::from("foo").join("bar").join("bar.blake2b"),
+                path::PathBuf::from("foo").join("bar").join("baz").join("file.md5"),
+                path::PathBuf::from("foo").join("foo.shake_128"),
+                path::PathBuf::from("root.sha3_384"),
+            },
         );
     }
 
     #[test]
-    fn discover_hash_files_skips_exluded_directories_early() {
+    fn discover_hash_files_skips_excluded_directories_early() {
         let testdir = setup_dir_hash_files();
         let matcher = PathMatcherBuilder::new()
             .block("foo/").unwrap()
@@ -549,20 +639,43 @@ file.rs",
         };
 
         let ch = ChecksumHelper::with_options(&testdir, options).unwrap();
-        let mut result = ch.discover_hash_files().unwrap();
+        let mut found_cb = vec!();
+        let mut ignored_cb = vec!();
+        let mut result = ch.discover_hash_files(|p| {
+            match p {
+                MostCurrentProgress::FoundFile(p) => found_cb.push(p),
+                MostCurrentProgress::IgnoredPath(p) => ignored_cb.push(p),
+                _ => unreachable!(),
+            }
+        }).unwrap();
         assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
+        let expected = vec! {
+            testdir.join("root.sha3_384"),
+        };
         assert_eq!(
             result.hash_file_paths,
-            vec! {
-                testdir.join("root.sha3_384"),
-            }
+            expected
         );
 
-        // TODO extract hash files depth/ext/etc. logic and then test it separately
-        // for manually testing debug output
-        // panic!();
+        found_cb.sort();
+        assert_eq!(
+            found_cb,
+            expected.iter().map(|p| p.strip_prefix(&testdir).unwrap())
+                .collect::<Vec<&path::Path>>(),
+        );
+
+        ignored_cb.sort();
+        assert_eq!(
+            ignored_cb,
+            vec! {
+                // excluded whole directory early and then no more ignore cbs
+                path::PathBuf::from("bar").join("baz"),
+                path::PathBuf::from("bar").join("baz_2025-06-28.cshd"),
+                path::PathBuf::from("foo"),
+            },
+        );
     }
 
     #[test]
@@ -584,22 +697,46 @@ file.rs",
         };
 
         let ch = ChecksumHelper::with_options(&testdir, options).unwrap();
-        let mut result = ch.discover_hash_files().unwrap();
+        let mut found_cb = vec!();
+        let mut ignored_cb = vec!();
+        let mut result = ch.discover_hash_files(|p| {
+            match p {
+                MostCurrentProgress::FoundFile(p) => found_cb.push(p),
+                MostCurrentProgress::IgnoredPath(p) => ignored_cb.push(p),
+                _ => unreachable!(),
+            }
+        }).unwrap();
         assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
+        let expected = vec! {
+            testdir.join("bar").join("baz").join("baz_2025-06-28.sha256"),
+            testdir.join("bar").join("baz_2025-06-28.cshd"),
+            testdir.join("foo").join("foo.shake_128"),
+            testdir.join("root.sha3_384"),
+        };
         assert_eq!(
             result.hash_file_paths,
-            vec! {
-                testdir.join("bar").join("baz").join("baz_2025-06-28.sha256"),
-                testdir.join("bar").join("baz_2025-06-28.cshd"),
-                testdir.join("foo").join("foo.shake_128"),
-                testdir.join("root.sha3_384"),
-            }
+            expected,
         );
 
-        // for manually testing debug output
-        // panic!();
+        found_cb.sort();
+        assert_eq!(
+            found_cb,
+            expected.iter().map(|p| p.strip_prefix(&testdir).unwrap())
+                .collect::<Vec<&path::Path>>(),
+        );
+
+        ignored_cb.sort();
+        // NOTE: no directory excluded early, still traversed all directories
+        assert_eq!(
+            ignored_cb,
+            vec! {
+                path::PathBuf::from("foo").join("bar").join("bar.blake2b"),
+                path::PathBuf::from("foo").join("bar").join("baz").join("file.cshd"),
+                path::PathBuf::from("foo").join("bar").join("baz").join("file.md5"),
+            },
+        );
     }
 
     fn setup_dir_check_missing() -> std::path::PathBuf {
