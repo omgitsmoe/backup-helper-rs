@@ -74,6 +74,7 @@ impl ChecksumHelper {
         P: Fn(IncrementalProgress)
 
     {
+        // TODO progress callback
         // prob best to gather files first then do the checksumming -> better progress indicator
         todo!();
     }
@@ -86,7 +87,6 @@ impl ChecksumHelper {
         todo!("find files that don't have a checksum in most current yet and generat them")
     }
 
-    // TODO optionally with filter?
     pub fn check_missing(&mut self) -> Result<CheckMissingResult> {
         if self.most_current.is_none() {
             self.update_most_current()?;
@@ -121,6 +121,12 @@ impl ChecksumHelper {
                     let path = e.path();
                     let relative = path.strip_prefix(&root)
                         .expect("paths under root must be relative to root");
+
+                    if self.options.all_files_matcher.is_excluded(relative) ||
+                        !self.options.all_files_matcher.is_match(relative) {
+                        return false;
+                    }
+
                     if dirs_with_hashed_file.contains(relative) {
                         true
                     } else {
@@ -132,6 +138,11 @@ impl ChecksumHelper {
                     let path = e.path();
                     let relative = path.strip_prefix(&root)
                         .expect("paths under root must be relative to root");
+
+                    if !self.options.all_files_matcher.is_match(relative) {
+                        return false;
+                    }
+
                     if !most_current.contains_path(relative, &self.file_tree) {
                         missing_files.push(relative.to_owned());
                     }
@@ -692,6 +703,44 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
                 files: vec!{
                     path::PathBuf::from("root.mp4"),
                     path::PathBuf::from("test.md5"),
+                    path::PathBuf::from("foo").join("foo.bin"),
+                    path::PathBuf::from("foo").join("foo.txt"),
+                },
+                errors: vec!{
+                },
+
+            }
+        );
+    }
+
+    #[test]
+    fn check_missing_respects_filters() {
+        let testdir = setup_dir_check_missing();
+        std::fs::write(testdir.join("test.md5"), "\
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.test
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.mp4
+e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
+
+        let matcher = PathMatcherBuilder::new()
+            .block("bar/").unwrap()
+            .block("**/*.md5").unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            all_files_matcher: matcher,
+            ..Default::default()
+        };
+
+        let mut ch = ChecksumHelper::with_options(&testdir, options).unwrap();
+        let result = ch.check_missing().unwrap();
+        assert_eq!(
+            result,
+            CheckMissingResult{
+                directories: vec!{
+                    path::PathBuf::from("foo").join("bar").join("baz"),
+                },
+                files: vec!{
+                    path::PathBuf::from("root.mp4"),
                     path::PathBuf::from("foo").join("foo.bin"),
                     path::PathBuf::from("foo").join("foo.txt"),
                 },
