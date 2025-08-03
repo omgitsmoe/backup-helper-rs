@@ -160,11 +160,11 @@ impl ChecksumHelper {
         })
     }
 
-    fn update_most_current<P>(&mut self, progress: P) -> Result<()>
+    fn update_most_current<P>(&mut self, mut progress: P) -> Result<()>
     where
         P: FnMut(MostCurrentProgress)
     {
-        let discover_result = self.discover_hash_files(progress)?;
+        let discover_result = self.discover_hash_files(&mut progress)?;
         let most_current_path = self.root().join(
         self.most_current_filename());
         let mut most_current = HashCollection::new(
@@ -172,6 +172,7 @@ impl ChecksumHelper {
             .expect("creating an empty hash file collection must succeed");
 
         for hash_file_path in discover_result.hash_file_paths {
+            progress(MostCurrentProgress::MergeHashFile(hash_file_path.clone()));
             let hc = HashCollection::from_disk(
                 &hash_file_path, &mut self.file_tree)?;
             most_current.merge(hc)?;
@@ -318,7 +319,9 @@ impl ChecksumHelper {
         let default = std::ffi::OsString::from("most_current");
         let base = root.file_name()
             .unwrap_or(&default);
-        format!("{:?}_{}", base, datetime).into()
+        let base = base.to_string_lossy(); // Cow<str>
+
+        format!("{}_{}.cshd", base, datetime).into()
     }
 }
 
@@ -364,6 +367,41 @@ impl ChecksumHelperOptions {
             all_files_matcher: PathMatcherBuilder::new()
                 .build()
                 .expect("An empty PathMatcher should always be valid"),
+        }
+    }
+
+    pub fn incremental_include_unchanged_files(self, value: bool) -> Self {
+        Self {
+            incremental_include_unchanged_files: value,
+            ..self
+        }
+    }
+
+    pub fn incremental_skip_unchanged(self, value: bool) -> Self {
+        Self {
+            incremental_skip_unchanged: value,
+            ..self
+        }
+    }
+
+    pub fn discover_hash_files_depth(self, value: Option<u32>) -> Self {
+        Self {
+            discover_hash_files_depth: value,
+            ..self
+        }
+    }
+
+    pub fn hash_files_matcher(self, value: PathMatcher) -> Self {
+        Self {
+            hash_files_matcher: value,
+            ..self
+        }
+    }
+
+    pub fn all_files_matcher(self, value: PathMatcher) -> Self {
+        Self {
+            all_files_matcher: value,
+            ..self
         }
     }
 }
