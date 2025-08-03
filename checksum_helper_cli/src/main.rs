@@ -47,8 +47,21 @@ fn main() {
     // }
     // let inc = ch.incremental();
     // inc.write(&Path::new("hash.cshd"));
-    let ser = std::fs::read_to_string("obsidian_2024-09-28.cshd").unwrap();
-    let sorted = checksum_helper::collection::sort_serialized(&ser).unwrap();
-    println!("{}", sorted);
-    std::hint::black_box(sorted);
+    // let ser = std::fs::read_to_string("obsidian_2024-09-28.cshd").unwrap();
+    // let sorted = checksum_helper::collection::sort_serialized(&ser).unwrap();
+    // println!("{}", sorted);
+    // std::hint::black_box(sorted);
+
+    // Get first CLI argument as the path
+    let arg_path = std::env::args().nth(1).expect("Usage: program <path>");
+    let abs_path = Path::new(&arg_path)
+        .canonicalize()
+        .unwrap();
+
+    let mut ch = checksum_helper::ChecksumHelper::new(&abs_path)
+        .expect("Failed to create ChecksumHelper");
+
+    ch.build_most_current(|p| {
+        println!("{:?}", p);
+    }).expect("Failed to build most current");
 }

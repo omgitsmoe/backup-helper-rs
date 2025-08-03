@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 #[derive(Clone, Debug)]
 pub struct FileTree {
     nodes: Vec<Entry>,
+    last_directory: Option<(PathBuf, EntryHandle)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,7 +59,7 @@ impl FileTree {
     /// system
     pub fn new(root: impl AsRef<Path>) -> Result<FileTree, ErrorKind> {
         let root = root.as_ref();
-        if !is_absolute(&root) {
+        if !is_absolute(root) {
             Err(ErrorKind::PathNotAbsolute)
         } else {
             Ok(FileTree {
@@ -68,6 +69,7 @@ impl FileTree {
                     parent: None,
                     children: vec!(),
                 }),
+                last_directory: None,
             })
         }
     }
@@ -86,43 +88,38 @@ impl FileTree {
 
     pub fn relative_path_to(&self, entry: &EntryHandle, base: impl AsRef<Path>) -> PathBuf {
         let absolute_path = self.absolute_path(entry);
-        assert!(absolute_path.starts_with(&base), "Base must be a subpath of the file tree");
+        debug_assert!(absolute_path.starts_with(&base), "Base must be a subpath of the file tree");
         pathdiff::diff_paths(&absolute_path, base)
             .expect("BUG: should always succeed, since base must be \
                           a subpath of the file tree")
     }
 
     fn path(&self, entry: &EntryHandle, is_absolute: bool) -> PathBuf {
-        let mut p = &self.nodes[entry.0];
-        // TODO store handles not pathbufs
-        let mut entries = vec!(&p.name);
-        while let Some(ph) = &p.parent {
-            let parent = &self.nodes[ph.0];
-            entries.push(&parent.name);
-            p = parent;
-        }
-
         let skip_num = if is_absolute { 0 } else { 1 };
-        entries.iter().rev().skip(skip_num).fold(PathBuf::new(), |acc, e| {
-            acc.join(e)
-        })
-
+        entry
+            .iter(self)
+            .collect::<Vec<EntryHandle>>()
+            .iter()
+            .rev()
+            .skip(skip_num)
+            .fold(PathBuf::new(), |acc, e| {
+                acc.join(self.nodes[e.0].name.clone())
+            })
     }
 
     /// Find the last existing node that is involved in `path`.
-    /// Returns None if `path` is not a subpath of the file tree's root
     // TODO: @Perf can be sped up by having some type of (LRU) cache
     fn find_last_existing(&self, path: impl AsRef<Path>) -> (EntryHandle, bool) {
         let path = path.as_ref();
-        assert!(path.is_relative(), "Only relative paths are allowed!");
+        debug_assert!(path.is_relative(), "Only relative paths are allowed!");
 
-        let mut current = 0 as usize;
+        let mut current = 0_usize;
         let mut full_match = true;
         for component_name in path.iter() {
             if component_name == "." {
                 continue
             }
-            assert!(component_name != "..", "Path must not contain pardir elements!");
+            debug_assert!(component_name != "..", "Path must not contain pardir elements!");
 
             let entry = &self.nodes[current];
             let mut found = false;
@@ -141,7 +138,14 @@ impl FileTree {
             }
         }
 
-        (EntryHandle{0: current}, full_match)
+        // if self.nodes[current].is_directory {
+        //     self.last_directory = Some((
+        //         self.relative_path(&EntryHandle(current)),
+        //         EntryHandle(current),
+        //     ));
+        // }
+
+        (EntryHandle(current), full_match)
     }
 
     pub fn find(&self, path: impl AsRef<Path>) -> Option<EntryHandle> {
@@ -163,20 +167,29 @@ impl FileTree {
     }
 
     pub fn add(&mut self, path: impl AsRef<Path>, is_directory: bool) -> Result<EntryHandle, ErrorKind> {
-        // NOTE: Path::strip_prefix can't deal with CurDir components, so remove them here
-        let path = path
-            .as_ref()
-            .components()
-            .filter(|c| c != &Component::CurDir)
-            .collect::<PathBuf>();
-        assert!(path.is_relative(), "Only relative paths are allowed!");
+        let path = path.as_ref();
+        debug_assert!(path.is_relative(), "Only relative paths are allowed!");
+        if let Some((last_path, last_handle)) = &self.last_directory {
+            if let Some(parent) = path.parent() {
+                if parent == last_path {
+                    // so the borrow doesn't continue when passing it to add_child
+                    let handle = last_handle.clone();
+                    return Ok(self.add_child(
+                        &handle,
+                        path.file_name()
+                            .expect("must have a filename"),
+                        is_directory
+                    ))
+                }
+            }
+        }
 
-        let (last_existing, _) = self.find_last_existing(&path);
-        let prefix = self.relative_path(&last_existing);
-        let remaining = path.strip_prefix(prefix)
-            .expect("BUG: path must be prefixed by the path of the last existing node");
-        let mut current_parent = last_existing;
-        for component_name in remaining {
+        let (last_existing, _) = self.find_last_existing(path);
+        let remaining = self.strip_prefix(last_existing.clone(), path);
+        let mut current_parent = last_existing.clone();
+        let mut last_parent = last_existing;
+        for component_name in &remaining {
+            last_parent = current_parent.clone();
             if component_name == "." {
                 continue
             } else if component_name == ".." {
@@ -194,7 +207,19 @@ impl FileTree {
 
             current_parent = EntryHandle(index);
         }
+        if is_directory {
+            self.last_directory = Some((
+                self.relative_path(&current_parent),
+                current_parent.clone(),
 
+            ));
+        } else {
+            self.last_directory = Some((
+                self.relative_path(&last_parent),
+                last_parent.clone(),
+
+            ));
+        }
         self.nodes[current_parent.0].is_directory = is_directory;
         Ok(current_parent)
     }
@@ -218,24 +243,45 @@ impl FileTree {
         });
         let index = self.nodes.len() - 1;
 
-        self.nodes[parent.0].children.push(EntryHandle{0: index});
+        self.nodes[parent.0].children.push(EntryHandle(index));
 
-        EntryHandle{0: index}
+        EntryHandle(index)
     }
 
     pub fn root(&self) -> EntryHandle {
-        EntryHandle{0: 0}
+        EntryHandle(0)
     }
 
     pub fn len(&self) -> usize { self.nodes.len() }
-    // TODO remove
-    pub fn cap(&self) -> usize { self.nodes.capacity() }
 
-    pub fn iter<'a>(&'a self) -> FileTreeIter<'a> {
+    pub fn iter(&self) -> FileTreeIter<'_> {
         FileTreeIter{
             file_tree: self,
-            stack: vec!((EntryHandle{0: 0}, 0)),
+            stack: vec!((EntryHandle(0), 0)),
         }
+    }
+
+    fn strip_prefix(&self, prefix: EntryHandle, path: impl AsRef<Path>) -> PathBuf {
+        let path = path.as_ref();
+        assert!(path.is_relative(), "path must be relative!");
+
+        let prefix_components = prefix.iter(self)
+            .collect::<Vec<EntryHandle>>();
+        let prefix_iter = prefix_components
+            .iter()
+            .rev()
+            .skip(1); // skip root
+        let mut path_iter = path
+            .components()
+            .skip_while(|c| *c == Component::CurDir);
+
+        for strip_component in prefix_iter {
+            let stripped = path_iter.next();
+            debug_assert!(stripped == Some(
+                        Component::Normal(self.nodes[strip_component.0].name.as_os_str())));
+        }
+
+        path_iter.collect()
     }
 }
 
@@ -274,7 +320,7 @@ impl Iterator for FileTreeIter<'_> {
 
             self.stack.push((curr.0, curr.1 + 1));
             if !child_entry.children.is_empty() {
-                assert!(child_entry.is_directory, "Has children, but is_directory is false");
+                debug_assert!(child_entry.is_directory, "Has children, but is_directory is false");
                 self.stack.push((child.clone(), 0));
             }
 
@@ -292,12 +338,36 @@ impl Iterator for FileTreeIter<'_> {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EntryHandle(usize);
 
+impl EntryHandle {
+    pub fn iter<'a>(&self, file_tree: &'a FileTree) -> EntryIter<'a> {
+        EntryIter {
+            file_tree,
+            next: Some(self.clone()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Entry {
     name: PathBuf,
     is_directory: bool,
     parent: Option<EntryHandle>,
     children: Vec<EntryHandle>,
+}
+
+pub struct EntryIter<'a> {
+    file_tree: &'a FileTree,
+    next: Option<EntryHandle>,
+}
+
+impl Iterator for EntryIter<'_> {
+    type Item = EntryHandle;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next.take().inspect(|current| {
+            self.next = self.file_tree.nodes[current.0].parent.clone();
+        })
+    }
 }
 
 #[cfg(test)]
@@ -307,22 +377,22 @@ mod test {
 
     #[test]
     fn test_is_valid() {
-        assert!(!is_valid(&Path::new("/tmp/../other")));
-        assert!(!is_valid(&Path::new("/tmp/./other")));
-        assert!(!is_valid(&Path::new("/tmp/other/../foo")));
+        assert!(!is_valid(Path::new("/tmp/../other")));
+        assert!(!is_valid(Path::new("/tmp/./other")));
+        assert!(!is_valid(Path::new("/tmp/other/../foo")));
 
         unsafe {
-            assert!(!is_valid(&OsStr::from_encoded_bytes_unchecked(b"\x80\xb8\xff")));
+            assert!(!is_valid(OsStr::from_encoded_bytes_unchecked(b"\x80\xb8\xff")));
         }
 
-        assert!(is_valid(&Path::new("/tmp/foo/bar/baz/file.txt")));
-        assert!(is_valid(&Path::new("/tmp/.hidden/other")));
-        assert!(is_valid(&Path::new("/tmp/..other/foo")));
-        assert!(is_valid(&Path::new(".")));
-        assert!(is_valid(&Path::new("./")));
-        assert!(is_valid(&Path::new("./tmp/other")));
-        assert!(is_valid(&Path::new(".\\")));
-        assert!(is_valid(&Path::new(".\\tmp\\other")));
+        assert!(is_valid(Path::new("/tmp/foo/bar/baz/file.txt")));
+        assert!(is_valid(Path::new("/tmp/.hidden/other")));
+        assert!(is_valid(Path::new("/tmp/..other/foo")));
+        assert!(is_valid(Path::new(".")));
+        assert!(is_valid(Path::new("./")));
+        assert!(is_valid(Path::new("./tmp/other")));
+        assert!(is_valid(Path::new(".\\")));
+        assert!(is_valid(Path::new(".\\tmp\\other")));
     }
 
     #[test]
@@ -534,5 +604,48 @@ mod test {
         assert_eq!(ft.relative_path_to(&fh, "/foo/foo"), Path::new("bar/baz/file.txt"));
         assert_eq!(ft.relative_path_to(&fh, "/foo/foo/bar"), Path::new("baz/file.txt"));
         assert_eq!(ft.relative_path_to(&fh, "/foo/foo/bar/baz"), Path::new("file.txt"));
+    }
+
+    #[test]
+    fn strip_prefix() {
+        let ft = FileTree {
+            nodes: vec!{
+                Entry{
+                    name: PathBuf::from("root"),
+                    is_directory: true,
+                    parent: None,
+                    children: vec!{ EntryHandle(1) },
+                },
+                Entry{
+                    name: PathBuf::from("foo"),
+                    is_directory: true,
+                    parent: Some(EntryHandle(0)),
+                    children: vec!{ EntryHandle(2) },
+                },
+                Entry{
+                    name: PathBuf::from("bar"),
+                    is_directory: true,
+                    parent: Some(EntryHandle(1)),
+                    children: vec!{ EntryHandle(3) },
+                },
+                Entry{
+                    name: PathBuf::from("baz"),
+                    is_directory: true,
+                    parent: Some(EntryHandle(2)),
+                    children: vec!{  },
+                },
+            },
+            last_directory: None,
+        };
+
+        let strip_handle = EntryHandle(3);
+        assert_eq!(
+            ft.strip_prefix(strip_handle.clone(), Path::new("foo/bar/baz/xer/moo/file.txt")),
+            Path::new("xer/moo/file.txt"),
+        );
+        assert_eq!(
+            ft.strip_prefix(strip_handle.clone(), Path::new("foo/bar/./baz/xer/moo/./file.txt")),
+            Path::new("xer/moo/file.txt"),
+        );
     }
 }
