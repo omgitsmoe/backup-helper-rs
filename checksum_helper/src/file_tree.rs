@@ -68,6 +68,7 @@ impl FileTree {
                     is_directory: true,
                     parent: None,
                     children: vec!(),
+                    child_map: std::collections::HashMap::new(),
                 }),
                 last_directory: None,
             })
@@ -122,17 +123,9 @@ impl FileTree {
             debug_assert!(component_name != "..", "Path must not contain pardir elements!");
 
             let entry = &self.nodes[current];
-            let mut found = false;
-            for child_handle in &entry.children {
-                let child = &self.nodes[child_handle.0];
-                if child.name == *component_name {
-                    current = child_handle.0;
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
+            if let Some(child_handle) = &entry.child_map.get(component_name) {
+                current = child_handle.0;
+            } else {
                 full_match = false;
                 break;
             }
@@ -166,6 +159,8 @@ impl FileTree {
         self.add(path, true)
     }
 
+    // NOTE: tested full LRU cache (at least for add, not for find_last_existing) and
+    //       there was no performance gain over just caching the last_directory
     pub fn add(&mut self, path: impl AsRef<Path>, is_directory: bool) -> Result<EntryHandle, ErrorKind> {
         let path = path.as_ref();
         debug_assert!(path.is_relative(), "Only relative paths are allowed!");
@@ -200,10 +195,11 @@ impl FileTree {
                 is_directory: true,
                 parent: Some(current_parent.clone()),
                 children: vec!(),
+                child_map: std::collections::HashMap::new(),
             });
             let index = self.nodes.len() - 1;
 
-            self.nodes[current_parent.0].children.push(EntryHandle(index));
+            self.nodes[current_parent.0].add_child(component_name, EntryHandle(index));
 
             current_parent = EntryHandle(index);
         }
@@ -227,11 +223,8 @@ impl FileTree {
     pub fn add_child(&mut self, parent: &EntryHandle, child_name: impl AsRef<OsStr>, is_directory: bool) -> EntryHandle {
         let child_name = child_name.as_ref();
 
-        for child_handle in &self.nodes[parent.0].children {
-            let entry = &self.nodes[child_handle.0];
-            if entry.name == child_name {
-                return child_handle.clone();
-            }
+        if let Some(existing_child_handle) = &self.nodes[parent.0].child_map.get(child_name) {
+            return (*existing_child_handle).clone();
         }
 
         // TODO child_name validation, must not contain path separators etc.
@@ -240,10 +233,11 @@ impl FileTree {
             is_directory,
             parent: Some(parent.clone()),
             children: vec!(),
+            child_map: std::collections::HashMap::new(),
         });
         let index = self.nodes.len() - 1;
 
-        self.nodes[parent.0].children.push(EntryHandle(index));
+        self.nodes[parent.0].add_child(child_name, EntryHandle(index));
 
         EntryHandle(index)
     }
@@ -352,7 +346,20 @@ pub struct Entry {
     name: PathBuf,
     is_directory: bool,
     parent: Option<EntryHandle>,
+    // TODO: remove children, only keep child_map
+    //       -> only problem should be iteration order, mb use BTreeMap instead then?
     children: Vec<EntryHandle>,
+    child_map: std::collections::HashMap<std::ffi::OsString, EntryHandle>
+}
+
+impl Entry {
+    pub fn add_child(&mut self, name: impl AsRef<Path>, child_handle: EntryHandle) {
+        self.children.push(child_handle.clone());
+
+        let key = name.as_ref().as_os_str().to_os_string();
+
+        self.child_map.insert(key, child_handle);
+    }
 }
 
 pub struct EntryIter<'a> {
@@ -615,24 +622,34 @@ mod test {
                     is_directory: true,
                     parent: None,
                     children: vec!{ EntryHandle(1) },
+                    child_map: vec![
+                        (std::ffi::OsString::from("foo"), EntryHandle(1)),
+                    ].into_iter().collect()
                 },
                 Entry{
                     name: PathBuf::from("foo"),
                     is_directory: true,
                     parent: Some(EntryHandle(0)),
                     children: vec!{ EntryHandle(2) },
+                    child_map: vec![
+                        (std::ffi::OsString::from("bar"), EntryHandle(2)),
+                    ].into_iter().collect()
                 },
                 Entry{
                     name: PathBuf::from("bar"),
                     is_directory: true,
                     parent: Some(EntryHandle(1)),
                     children: vec!{ EntryHandle(3) },
+                    child_map: vec![
+                        (std::ffi::OsString::from("baz"), EntryHandle(3)),
+                    ].into_iter().collect()
                 },
                 Entry{
                     name: PathBuf::from("baz"),
                     is_directory: true,
                     parent: Some(EntryHandle(2)),
                     children: vec!{  },
+                    child_map: std::collections::HashMap::new(),
                 },
             },
             last_directory: None,
