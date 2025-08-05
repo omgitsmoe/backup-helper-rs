@@ -68,7 +68,6 @@ impl FileTree {
                     is_directory: true,
                     parent: None,
                     children: vec!(),
-                    child_map: std::collections::HashMap::new(),
                 }),
                 last_directory: None,
             })
@@ -123,9 +122,16 @@ impl FileTree {
             debug_assert!(component_name != "..", "Path must not contain pardir elements!");
 
             let entry = &self.nodes[current];
-            if let Some(child_handle) = &entry.child_map.get(component_name) {
-                current = child_handle.0;
-            } else {
+            let mut found = false;
+            for (child_name, child_handle) in &entry.children {
+                if child_name == component_name {
+                    current = child_handle.0;
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
                 full_match = false;
                 break;
             }
@@ -195,7 +201,6 @@ impl FileTree {
                 is_directory: true,
                 parent: Some(current_parent.clone()),
                 children: vec!(),
-                child_map: std::collections::HashMap::new(),
             });
             let index = self.nodes.len() - 1;
 
@@ -223,8 +228,10 @@ impl FileTree {
     pub fn add_child(&mut self, parent: &EntryHandle, child_name: impl AsRef<OsStr>, is_directory: bool) -> EntryHandle {
         let child_name = child_name.as_ref();
 
-        if let Some(existing_child_handle) = &self.nodes[parent.0].child_map.get(child_name) {
-            return (*existing_child_handle).clone();
+        for (entry_name, child_handle) in &self.nodes[parent.0].children {
+            if entry_name == child_name {
+                return child_handle.clone();
+            }
         }
 
         // TODO child_name validation, must not contain path separators etc.
@@ -233,7 +240,6 @@ impl FileTree {
             is_directory,
             parent: Some(parent.clone()),
             children: vec!(),
-            child_map: std::collections::HashMap::new(),
         });
         let index = self.nodes.len() - 1;
 
@@ -309,7 +315,7 @@ impl Iterator for FileTreeIter<'_> {
                 continue;
             }
 
-            let child = entry.children[curr.1].clone();
+            let child = entry.children[curr.1].1.clone();
             let child_entry = &self.file_tree.nodes[child.0];
 
             self.stack.push((curr.0, curr.1 + 1));
@@ -348,17 +354,14 @@ pub struct Entry {
     parent: Option<EntryHandle>,
     // TODO: remove children, only keep child_map
     //       -> only problem should be iteration order, mb use BTreeMap instead then?
-    children: Vec<EntryHandle>,
-    child_map: std::collections::HashMap<std::ffi::OsString, EntryHandle>
+    children: Vec<(std::ffi::OsString, EntryHandle)>,
 }
 
 impl Entry {
     pub fn add_child(&mut self, name: impl AsRef<Path>, child_handle: EntryHandle) {
-        self.children.push(child_handle.clone());
-
         let key = name.as_ref().as_os_str().to_os_string();
+        self.children.push((key, child_handle.clone()));
 
-        self.child_map.insert(key, child_handle);
     }
 }
 
@@ -543,8 +546,8 @@ mod test {
         assert!(baz_entry.is_directory);
 
         assert_eq!(baz_entry.children.len(), 2);
-        assert!(baz_entry.children.contains(&txt));
-        assert!(baz_entry.children.contains(&foo));
+        assert!(baz_entry.children.contains(&(std::ffi::OsString::from("file.txt"), txt)));
+        assert!(baz_entry.children.contains(&(std::ffi::OsString::from("foo"), foo)));
 
         assert_eq!(txt_entry.parent, Some(baz.clone()));
         assert_eq!(foo_entry.parent, Some(baz.clone()));
@@ -621,35 +624,25 @@ mod test {
                     name: PathBuf::from("root"),
                     is_directory: true,
                     parent: None,
-                    children: vec!{ EntryHandle(1) },
-                    child_map: vec![
-                        (std::ffi::OsString::from("foo"), EntryHandle(1)),
-                    ].into_iter().collect()
+                    children: vec!{ (std::ffi::OsString::from("foo"), EntryHandle(1)) },
                 },
                 Entry{
                     name: PathBuf::from("foo"),
                     is_directory: true,
                     parent: Some(EntryHandle(0)),
-                    children: vec!{ EntryHandle(2) },
-                    child_map: vec![
-                        (std::ffi::OsString::from("bar"), EntryHandle(2)),
-                    ].into_iter().collect()
+                    children: vec!{ (std::ffi::OsString::from("bar"), EntryHandle(2)) },
                 },
                 Entry{
                     name: PathBuf::from("bar"),
                     is_directory: true,
                     parent: Some(EntryHandle(1)),
-                    children: vec!{ EntryHandle(3) },
-                    child_map: vec![
-                        (std::ffi::OsString::from("baz"), EntryHandle(3)),
-                    ].into_iter().collect()
+                    children: vec!{ (std::ffi::OsString::from("baz"), EntryHandle(3)) },
                 },
                 Entry{
                     name: PathBuf::from("baz"),
                     is_directory: true,
                     parent: Some(EntryHandle(2)),
                     children: vec!{  },
-                    child_map: std::collections::HashMap::new(),
                 },
             },
             last_directory: None,
