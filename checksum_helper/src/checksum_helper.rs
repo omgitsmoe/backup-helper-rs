@@ -7,6 +7,7 @@ use std::cmp::{Eq, PartialEq};
 use std::error::Error;
 use std::fmt;
 use std::path;
+use std::fs;
 
 use chrono;
 
@@ -69,11 +70,15 @@ impl ChecksumHelper {
         self.file_tree.absolute_path(&self.file_tree.root())
     }
 
-    pub fn incremental<P>(&mut self, progress: P) -> Result<&HashCollection>
+    pub fn incremental<P>(&mut self, mut progress: P) -> Result<&HashCollection>
     where
         P: FnMut(IncrementalProgress)
 
     {
+        if self.most_current.is_none() {
+            self.update_most_current(|p| progress(IncrementalProgress::BuildMostCurrent(p)))?;
+        }
+
         // TODO progress callback
         // prob best to gather files first then do the checksumming -> better progress indicator
         todo!();
@@ -231,8 +236,6 @@ impl ChecksumHelper {
         todo!("move files modifying their relative paths in disocovered collections, calling move_collection if it's a collection")
     }
 
-    // TODO extract extension/depth/etc matching into separate function and then
-    //      check early dir skipping based on that
     fn discover_hash_files<P>(&self, mut progress: P) -> Result<DiscoverResult>
     where
         P: FnMut(MostCurrentProgress)
@@ -241,65 +244,17 @@ impl ChecksumHelper {
         let root = self.root();
         let result = gather(&root, |visit_type| {
             match visit_type {
-                VisitType::File((_, e)) => match e.path().extension() {
-                    None => false,
-                    Some(file_ext) => {
-                        let mut include = false;
-                        for ext in HASH_FILE_EXTENSIONS {
-                            if *ext == file_ext {
-                                include = true;
-                                break;
-                            }
-                        }
-                        if !include {
-                            return false;
-                        }
+                VisitType::File((_, e)) => {
 
-                        let relative_path = pathdiff::diff_paths(
-                            e.path(), &root)
-                            .expect("discover_hash_files paths must alway be \
-                                relative to the ChecksumHelper root!");
-
-                        #[cfg(test)]
-                        println!("Visiting f {:?}", relative_path);
-
-                        if self.options.hash_files_matcher.is_match(&relative_path) {
-                            files.push(e.path());
-                            progress(MostCurrentProgress::FoundFile(
-                                relative_path.to_owned()));
-                            true
-                        } else {
-                            progress(MostCurrentProgress::IgnoredPath(
-                                relative_path.to_owned()));
-                            false
-                        }
+                    if self.include_hash_file(&root, &e.path(), &mut progress) {
+                        files.push(e.path());
+                        true
+                    } else {
+                        false
                     }
                 },
                 VisitType::Directory((depth, dirent)) => {
-                    if let Some(max_depth) = self.options.discover_hash_files_depth {
-                        // NOTE: since 0 -> same directory
-                        // 1 -> one directory down
-                        // and we decide if we want to enter here, so it needs to be >=
-                        if depth >= max_depth {
-                            return false;
-                        }
-                    }
-
-                    let relative_path = pathdiff::diff_paths(
-                        dirent.path(), &root)
-                        .expect("discover_hash_files paths must alway be \
-                            relative to the ChecksumHelper root!");
-
-                    #[cfg(test)]
-                    println!("Visiting d {:?}", relative_path);
-
-                    if self.options.hash_files_matcher.is_excluded(&relative_path) {
-                        progress(MostCurrentProgress::IgnoredPath(
-                            relative_path.to_owned()));
-                        return false;
-                    }
-
-                    true
+                    self.include_hash_file_dir(&root, depth, &dirent.path(), &mut progress)
                 }
                 _ => true,
             }
@@ -310,6 +265,75 @@ impl ChecksumHelper {
             hash_file_paths: files,
             errors: result.errors,
         })
+    }
+
+    fn include_hash_file<P>(&self, root: &path::Path, hash_file: &path::Path, progress: &mut P) -> bool
+    where
+        P: FnMut(MostCurrentProgress)
+    {
+        match hash_file.extension() {
+            None => false,
+            Some(file_ext) => {
+                let mut include = false;
+                for ext in HASH_FILE_EXTENSIONS {
+                    if *ext == file_ext {
+                        include = true;
+                        break;
+                    }
+                }
+                if !include {
+                    return false;
+                }
+
+                let relative_path = pathdiff::diff_paths(
+                    hash_file, root)
+                    .expect("discover_hash_files paths must alway be \
+                        relative to the ChecksumHelper root!");
+                assert!(
+                    !relative_path.starts_with(".."),
+                    "discover_hash_files path must always be a sub-path of the ChecksumHelper root!");
+
+                if self.options.hash_files_matcher.is_match(&relative_path) {
+                    progress(MostCurrentProgress::FoundFile(
+                        relative_path.to_owned()));
+                    true
+                } else {
+                    progress(MostCurrentProgress::IgnoredPath(
+                        relative_path.to_owned()));
+                    false
+                }
+            }
+        }
+    }
+
+    fn include_hash_file_dir<P>(&self, root: &path::Path, depth: u32, dir: &path::Path, progress: &mut P) -> bool
+    where
+        P: FnMut(MostCurrentProgress)
+    {
+        if let Some(max_depth) = self.options.discover_hash_files_depth {
+            // NOTE: since 0 -> same directory
+            // 1 -> one directory down
+            // and we decide if we want to enter here, so it needs to be >=
+            if depth >= max_depth {
+                return false;
+            }
+        }
+
+        let relative_path = pathdiff::diff_paths(
+            dir, root)
+            .expect("discover_hash_files paths must alway be \
+                relative to the ChecksumHelper root!");
+        assert!(
+            !relative_path.starts_with(".."),
+            "discover_hash_files path must always be a sub-path of the ChecksumHelper root!");
+
+        if self.options.hash_files_matcher.is_excluded(&relative_path) {
+            progress(MostCurrentProgress::IgnoredPath(
+                    relative_path.to_owned()));
+            return false;
+        }
+
+        true
     }
 
     fn most_current_filename(&self) -> std::ffi::OsString {
@@ -577,7 +601,7 @@ file.rs",
     }
 
     #[test]
-    fn discover_hash_files_respsects_hash_files_depth() {
+    fn discover_hash_files_respects_hash_files_depth() {
         // NOTE: decided this should be part of discover_hash_files
         //       since update_most_current has a different task
         //       harder to reuse discover_hash_files then, but
@@ -604,7 +628,7 @@ file.rs",
     }
 
     #[test]
-    fn discover_hash_files_respsects_hash_files_matcher() {
+    fn discover_hash_files_respects_hash_files_matcher() {
         // NOTE: decided this should be part of discover_hash_files
         //       since update_most_current has a different task
         //       harder to reuse discover_hash_files then, but
@@ -775,6 +799,165 @@ file.rs",
                 path::PathBuf::from("foo").join("bar").join("baz").join("file.md5"),
             },
         );
+    }
+
+    #[test]
+    #[should_panic]
+    fn include_hash_file_panics_on_path_outside_of_root() {
+        let ch = ChecksumHelper::new(path::Path::new("/foo")).unwrap();
+        ch.include_hash_file(
+            &ch.root(), path::Path::new("/home/bar/f.cshd"), &mut |_| {});
+    }
+
+    #[test]
+    fn include_hash_file_skips_non_hash_files() {
+        let ch = ChecksumHelper::new(path::Path::new("/")).unwrap();
+        for ext in HASH_FILE_EXTENSIONS {
+            assert!(
+                ch.include_hash_file(
+                    &ch.root(), path::Path::new(&format!("/opt/foo.{}", ext)), &mut |_| {})
+            );
+        }
+
+        for ext in vec!["txt", "bin", "iso", "rs"] {
+            assert!(
+                !ch.include_hash_file(
+                    &ch.root(), path::Path::new(&format!("/opt/foo.{}", ext)), &mut |_| {})
+            );
+        }
+    }
+
+    #[test]
+    fn include_hash_file_respects_hash_files_matcher() {
+        let matcher = PathMatcherBuilder::new()
+            .allow("**/*.cshd")
+            .unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            hash_files_matcher: matcher,
+            ..Default::default()
+        };
+        let ch = ChecksumHelper::with_options(
+            path::Path::new("/"), options).unwrap();
+
+        assert!(ch.include_hash_file(&ch.root(), path::Path::new("/foo.cshd"), &mut |_| {}));
+        assert!(!ch.include_hash_file(&ch.root(), path::Path::new("/foo.md5"), &mut |_| {}));
+    }
+
+    #[test]
+    fn include_hash_file_calls_the_progress_callback() {
+        let matcher = PathMatcherBuilder::new()
+            .allow("**/*.cshd")
+            .unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            hash_files_matcher: matcher,
+            ..Default::default()
+        };
+        let ch = ChecksumHelper::with_options(
+            path::Path::new("/"), options).unwrap();
+
+        let mut was_called = false;
+        assert!(ch.include_hash_file(&ch.root(), path::Path::new("/foo.cshd"), &mut |p| {
+            was_called = true;
+            assert!(matches!(
+                    p,
+                    MostCurrentProgress::FoundFile(ref f) if f == path::Path::new("foo.cshd")
+            ));
+        }));
+        assert!(was_called);
+
+        let mut was_called = false;
+        assert!(!ch.include_hash_file(&ch.root(), path::Path::new("/foo.md5"), &mut |p| {
+            was_called = true;
+            assert!(matches!(
+                    p,
+                    MostCurrentProgress::IgnoredPath(ref f) if f == path::Path::new("foo.md5")
+            ));
+        }));
+        assert!(was_called);
+    }
+
+    #[test]
+    #[should_panic]
+    fn include_hash_file_dir_panics_on_path_outside_of_root() {
+        let ch = ChecksumHelper::new(path::Path::new("/foo")).unwrap();
+        ch.include_hash_file_dir(
+            &ch.root(),  1, path::Path::new("/home/bar"), &mut |_| {});
+    }
+
+    #[test]
+    fn include_hash_file_dir_respects_disover_hash_files_depth() {
+        let options = ChecksumHelperOptions {
+            discover_hash_files_depth: Some(3),
+            ..Default::default()
+        };
+        let ch = ChecksumHelper::with_options(
+            &path::Path::new("/"), options).unwrap();
+        assert!(ch.include_hash_file_dir(&ch.root(), 0, path::Path::new("/foo"), &mut |_| {}));
+        assert!(ch.include_hash_file_dir(&ch.root(), 1, path::Path::new("/foo/bar"), &mut |_| {}));
+        assert!(ch.include_hash_file_dir(&ch.root(), 2, path::Path::new("/foo/bar/baz"), &mut |_| {}));
+        assert!(!ch.include_hash_file_dir(&ch.root(), 3, path::Path::new("/foo/bar/baz/qux"), &mut |_| {}));
+        assert!(!ch.include_hash_file_dir(&ch.root(), 4, path::Path::new("/foo/bar/baz/qux/xer"), &mut |_| {}));
+    }
+
+    #[test]
+    fn include_hash_file_dir_respects_hash_files_matcher() {
+        let matcher = PathMatcherBuilder::new()
+            .allow("**/*.*")
+            .unwrap()
+            .block("*/home/")
+            .unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            hash_files_matcher: matcher,
+            ..Default::default()
+        };
+        let ch = ChecksumHelper::with_options(
+            path::Path::new("/"), options).unwrap();
+
+        // TODO should include_hash_file_dir also check if the path could not match any
+        //      of the allowed paths?
+        //      would be annoying, since you'd have to split up the pattern into components
+        //      and match up to the current depth etc.
+        //      -> then
+        //      .allow("fo*b/**/*.*")
+        //      should only allow /foob/, not /foo/
+        assert!(ch.include_hash_file_dir(&ch.root(), 3, path::Path::new("/foo"), &mut |_| {}));
+        assert!(!ch.include_hash_file_dir(&ch.root(), 3, path::Path::new("/foob/home"), &mut |_| {}));
+    }
+
+    #[test]
+    fn include_hash_file_dir_calls_the_progress_callback() {
+        let matcher = PathMatcherBuilder::new()
+            .allow("**/*.*")
+            .unwrap()
+            .block("home/")
+            .unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            hash_files_matcher: matcher,
+            ..Default::default()
+        };
+        let ch = ChecksumHelper::with_options(
+            path::Path::new("/"), options).unwrap();
+
+        let mut was_called = false;
+        assert!(ch.include_hash_file_dir(&ch.root(), 3, path::Path::new("/foo"), &mut |p| {}));
+        assert!(!was_called);
+
+        assert!(!ch.include_hash_file_dir(&ch.root(), 3, path::Path::new("/home"), &mut |p| {
+            was_called = true;
+            assert!(matches!(
+                    p,
+                    MostCurrentProgress::IgnoredPath(ref f) if f == path::Path::new("home")
+            ));
+        }));
+        assert!(was_called);
     }
 
     fn setup_dir_check_missing() -> std::path::PathBuf {
