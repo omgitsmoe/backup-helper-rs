@@ -25,6 +25,18 @@ pub fn file_handles_to_file_list(ft: &FileTree, handles: &Vec<EntryHandle>) -> S
     result.join("\n")
 }
 
+pub fn cshd_str_paths_only_sorted(s: &str) -> String {
+    let mut paths: Vec<&str> = s
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(' ').map(|(_, path)| path))
+        .collect();
+
+    paths.sort();
+
+    paths.join("\n") + "\n"
+}
+
 pub fn create_ftree(root: &std::path::Path, file_list: &str) {
     file_list.split('\n').for_each(|line| {
         let relative_path = line.trim();

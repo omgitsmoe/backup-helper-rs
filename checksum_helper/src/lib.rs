@@ -12,6 +12,7 @@ mod file_tree;
 mod utils;
 mod alias;
 mod most_current;
+mod incremental;
 
 #[cfg(test)]
 pub mod test_utils;

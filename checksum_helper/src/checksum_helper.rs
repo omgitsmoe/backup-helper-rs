@@ -1,8 +1,10 @@
 use crate::collection::{HashCollection, HashCollectionError, VerifyProgress, HashCollectionWriter};
+use crate::hashed_file::{FileRaw, HashType};
 use crate::file_tree::FileTree;
-use crate::gather::{gather, VisitType};
+use crate::gather::{gather_filtered, VisitType};
 use crate::pathmatcher::{PathMatcher, PathMatcherBuilder};
 use crate::most_current::{update_most_current};
+use crate::incremental::Incremental;
 
 use std::cmp::{Eq, PartialEq};
 use std::error::Error;
@@ -10,6 +12,7 @@ use std::fmt;
 use std::path;
 
 pub use crate::most_current::MostCurrentProgress;
+pub use crate::incremental::IncrementalProgress;
 
 type Result<T> = std::result::Result<T, ChecksumHelperError>;
 
@@ -19,6 +22,7 @@ pub struct ChecksumHelper {
     most_current: Option<HashCollection>,
 }
 
+// TODO: need to give out &FileTree, otherwise no one can serialize a HashCollection
 impl ChecksumHelper {
     pub fn new(root: &path::Path) -> Result<ChecksumHelper> {
         if root.is_relative() {
@@ -47,7 +51,7 @@ impl ChecksumHelper {
         self.file_tree.absolute_path(&self.file_tree.root())
     }
 
-    pub fn incremental<P>(&mut self, mut progress: P) -> Result<&HashCollection>
+    pub fn incremental<P>(&mut self, mut progress: P) -> Result<HashCollection>
     where
         P: FnMut(IncrementalProgress)
 
@@ -57,29 +61,79 @@ impl ChecksumHelper {
             self.most_current = Some(update_most_current(&root, &mut self.file_tree, &self.options, |p| progress(IncrementalProgress::BuildMostCurrent(p)))?);
         }
 
-        // TODO progress callback
-        // prob best to gather files first then do the checksumming -> better progress indicator
-        todo!();
+        let inc = Incremental::new(
+            &root,
+            &mut self.file_tree,
+            &self.options,
+            self.most_current.take()
+                .expect("checked above"),
+        );
+
+        // NOTE: does not make sense to use this as new most_current, since only
+        //       new files might be contained etc.
+        inc.generate(progress)
     }
 
+    /// Generate a [`HashCollection`], which only contains the hashes of
+    /// files that do not have checksum in any matched hash file yet.
     pub fn fill_missing<P>(&mut self, mut progress: P) -> Result<HashCollection>
     where
         P: FnMut(IncrementalProgress)
     {
+        // NOTE: can't use check_missing's result, since the file list is incomplete
+        //       if there are directories missing!
         let root = self.root();
         if self.most_current.is_none() {
             self.most_current = Some(update_most_current(&root, &mut self.file_tree, &self.options, |p| progress(IncrementalProgress::BuildMostCurrent(p)))?);
         }
 
-        todo!("find files that don't have a checksum in most current yet and generat them")
+        let root = self.root();
+        let filename = default_filename(&root, "missing", "_missing_");
+        let mut hc = HashCollection::new(
+            Some(&root.join(filename)), None)?;
+        todo!("chagne this to an iterator or store the handles then iter over those")
+        let result = gather_filtered(&root, &self.options.all_files_matcher,
+        |relative, v| {
+            match v {
+                VisitType::File((_, e)) => {
+                    // TODO make it easier to create a hashed file
+                    let entry = self.file_tree.add_file(&relative)?;
+                    let mut file_raw = FileRaw::bare(
+                        entry.clone(),
+                        self.options.hash_type,
+                    );
+                    let mut file = file_raw.with_context_mut(&self.file_tree);
+                    progress(IncrementalProgress::PreRead(relative));
+                    file.update_size_and_mtime_from_disk()?;
+                    file.update_hash_from_disk(|(read, total)| {
+                        progress(IncrementalProgress::Read(read, total));
+                    })?;
+
+                    hc.update(entry, file_raw);
+
+                    true
+                },
+                _ => true,
+            }
+        })?;
+        for relative in missing_files.files {
+        }
+
+        Ok(hc)
     }
 
-    // TODO progress cb
-    pub fn check_missing(&mut self) -> Result<CheckMissingResult>
+    /// Returns a result object containing all individual files that do not have checksums
+    /// in `self.root` yet.
+    /// If a directory has files and is completely missing it will be listed
+    /// in `directories`.
+    /// Note: The files of that directory will not appear in the file list.
+    pub fn check_missing<P>(&mut self, mut progress: P) -> Result<CheckMissingResult>
+    where
+        P: FnMut(IncrementalProgress)
     {
         let root = self.root();
         if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(&root, &mut self.file_tree, &self.options, |_| {})?);
+            self.most_current = Some(update_most_current(&root, &mut self.file_tree, &self.options, |p| progress(IncrementalProgress::BuildMostCurrent(p)))?);
         }
 
         // first find all directories that have at least one file and add all
@@ -104,18 +158,9 @@ impl ChecksumHelper {
 
         let mut missing_directories = vec!();
         let mut missing_files = vec!();
-        let gather_errors = gather(&root, |v| {
+        let gather_errors = gather_filtered(&root, &self.options.all_files_matcher, |relative, v| {
             match v {
-                VisitType::Directory((_, e)) => {
-                    let path = e.path();
-                    let relative = path.strip_prefix(&root)
-                        .expect("paths under root must be relative to root");
-
-                    if self.options.all_files_matcher.is_excluded(relative) ||
-                        !self.options.all_files_matcher.is_match(relative) {
-                        return false;
-                    }
-
+                VisitType::Directory(_) => {
                     if dirs_with_hashed_file.contains(relative) {
                         true
                     } else {
@@ -123,15 +168,7 @@ impl ChecksumHelper {
                         false
                     }
                 },
-                VisitType::File((_, e)) => {
-                    let path = e.path();
-                    let relative = path.strip_prefix(&root)
-                        .expect("paths under root must be relative to root");
-
-                    if !self.options.all_files_matcher.is_match(relative) {
-                        return false;
-                    }
-
+                VisitType::File(_) => {
                     if !most_current.contains_path(relative, &self.file_tree) {
                         missing_files.push(relative.to_owned());
                     }
@@ -198,7 +235,24 @@ impl ChecksumHelper {
     }
 }
 
+pub(crate) fn default_filename(
+    root: impl AsRef<path::Path>, default: &str, infix: &str
+) -> std::ffi::OsString {
+    let now = chrono::offset::Local::now();
+    let datetime = now.format("%Y-%m-%dT%H%M%S");
+    let root = root.as_ref();
+    let default = std::ffi::OsString::from(default);
+    let base = root.file_name().unwrap_or(&default);
+    let base = base.to_string_lossy(); // Cow<str>
+
+    format!("{}_{}{}.cshd", base, infix, datetime).into()
+}
+
+
 pub struct ChecksumHelperOptions {
+    /// Which hash algorithm to use for generating new hashes.
+    pub hash_type: HashType,
+
     /// Whether to include files in the output, which did not change compared
     /// to the previous latest available hash found.
     pub incremental_include_unchanged_files: bool,
@@ -207,6 +261,10 @@ pub struct ChecksumHelperOptions {
     /// modification time as in the latest available hash found.
     pub incremental_skip_unchanged: bool,
 
+    /// If `true`, periodically flushes the incremental hash collection
+    /// to disk after the specified time interval.
+    pub incremental_periodic_write_interval: std::time::Duration,
+
     /// Up to which depth should the root and its subdirectories be searched
     /// for hash files (*.cshd, *.md5, *.sha512, etc.) to determine the
     /// current state of hashes.
@@ -214,6 +272,11 @@ pub struct ChecksumHelperOptions {
     /// One means at most one subdirectory will be allowed.
     /// None means no depth limit.
     pub discover_hash_files_depth: Option<u32>,
+
+    /// Whether the most_current hash file should filter out all files that are
+    /// not found on disk at the time of generation.
+    // TODO use this
+    pub most_current_filter_deleted: bool,
 
     /// Allow/block list like matching for hash files which will be used
     /// for building the most current state of hashes.
@@ -231,15 +294,25 @@ pub struct ChecksumHelperOptions {
 impl ChecksumHelperOptions {
     pub fn new() -> Self {
         ChecksumHelperOptions {
+            hash_type: HashType::Sha512,
             incremental_include_unchanged_files: true,
             incremental_skip_unchanged: false,
+            incremental_periodic_write_interval: std::time::Duration::from_secs(60),
             discover_hash_files_depth: None,
+            most_current_filter_deleted: true,
             hash_files_matcher: PathMatcherBuilder::new()
                 .build()
                 .expect("An empty PathMatcher should always be valid"),
             all_files_matcher: PathMatcherBuilder::new()
                 .build()
                 .expect("An empty PathMatcher should always be valid"),
+        }
+    }
+
+    pub fn hash_type(self, value: HashType) -> Self {
+        Self {
+            hash_type: value,
+            ..self
         }
     }
 
@@ -257,9 +330,23 @@ impl ChecksumHelperOptions {
         }
     }
 
+    pub fn incremental_periodic_write_interval(self, value: std::time::Duration) -> Self {
+        Self {
+            incremental_periodic_write_interval: value,
+            ..self
+        }
+    }
+
     pub fn discover_hash_files_depth(self, value: Option<u32>) -> Self {
         Self {
             discover_hash_files_depth: value,
+            ..self
+        }
+    }
+
+    pub fn most_current_filter_deleted(self, value: bool) -> Self {
+        Self {
+            most_current_filter_deleted: value,
             ..self
         }
     }
@@ -287,39 +374,15 @@ impl Default for ChecksumHelperOptions {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CheckMissingResult {
+    /// Directories containing matched files, but which are completely missing
+    /// from any hash collection.
+    /// Files from directories in that list will not be listed in `files`.
     pub directories: Vec<path::PathBuf>,
+    /// Matched files completely missing a hash. Does not contain files in
+    /// directories that are completely missing.
     pub files: Vec<path::PathBuf>,
+    /// Read errors and the like, which occurred during iteration.
     pub errors: Vec<String>,
-}
-
-#[derive(Debug)]
-pub enum IncrementalProgress {
-    BuildMostCurrent(MostCurrentProgress),
-    /// Found a file that will be included in check summing.
-    DiscoverFilesFound(usize),
-    /// Ignored a path (file or directory).
-    DiscoverFilesIgnored(path::PathBuf),
-    /// Finished discovering files to hash: number of files to hash, number of ignored files.
-    DiscoverFilesDone(usize, usize),
-    PreRead(path::PathBuf),
-    /// Read progress in bytes: read, total.
-    Read(u64, u64),
-    /// File matched the recorded hash.
-    FileMatch(path::PathBuf),
-    /// Skipped a file, which matched the recorded `mtime`.
-    /// Turn this behaviour on or off using `ChecksumHelperOptions::incremental_skip_unchanged`.
-    FileUnchangedSkipped(path::PathBuf),
-    /// File changed with a newer `mtime` compared to the recorded one or there
-    /// was no recorded `mtime`.
-    FileChanged(path::PathBuf),
-    /// File matched the recorded `mtime`, but the computed hash was different.
-    FileChangedCorrupted(path::PathBuf),
-    /// File changed, where the `mtime` of the file on disk is __older__ than the
-    /// recorded `mtime`.
-    FileChangedOlder(path::PathBuf),
-    FileNew(path::PathBuf),
-    FileRemoved(path::PathBuf),
-    Finished,
 }
 
 #[derive(Debug)]
@@ -374,6 +437,18 @@ impl From<crate::gather::Error> for ChecksumHelperError {
     }
 }
 
+impl From<crate::file_tree::ErrorKind> for ChecksumHelperError {
+    fn from(value: crate::file_tree::ErrorKind) -> Self {
+        ChecksumHelperError::FileTreeError(value)
+    }
+}
+
+impl From<crate::hashed_file::HashedFileError> for ChecksumHelperError {
+    fn from(value: crate::hashed_file::HashedFileError) -> Self {
+        ChecksumHelperError::HashedFileError(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,7 +481,7 @@ file.rs",
         let testdir = setup_dir_check_missing();
         let mut ch = ChecksumHelper::new(&testdir)
             .unwrap();
-        let result = ch.check_missing().unwrap();
+        let result = ch.check_missing(|_| {}).unwrap();
         assert_eq!(
             result,
             CheckMissingResult{
@@ -439,7 +514,7 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
 
         let mut ch = ChecksumHelper::new(&testdir)
             .unwrap();
-        let result = ch.check_missing().unwrap();
+        let result = ch.check_missing(|_| {}).unwrap();
         assert_eq!(
             result,
             CheckMissingResult{
@@ -470,7 +545,7 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
 
         let mut ch = ChecksumHelper::new(&testdir)
             .unwrap();
-        let result = ch.check_missing().unwrap();
+        let result = ch.check_missing(|_| {}).unwrap();
         assert_eq!(
             result,
             CheckMissingResult{
@@ -502,6 +577,7 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
         let matcher = PathMatcherBuilder::new()
             .block("bar/").unwrap()
             .block("**/*.md5").unwrap()
+            .allow("**/*.*").unwrap()
             .build()
             .unwrap();
         let options = ChecksumHelperOptions {
@@ -510,7 +586,7 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
         };
 
         let mut ch = ChecksumHelper::with_options(&testdir, options).unwrap();
-        let result = ch.check_missing().unwrap();
+        let result = ch.check_missing(|_| {}).unwrap();
         assert_eq!(
             result,
             CheckMissingResult{
@@ -527,5 +603,33 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
 
             }
         );
+    }
+
+    // TODO test fill_missing: callbacks, matchers respected
+    #[test]
+    fn fill_missing() {
+        let testdir = setup_dir_check_missing();
+        std::fs::write(testdir.join("test.md5"), "\
+e37276a93ac1e99188340e3f61e3673b  foo/bar/baz/file.bin
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.test
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.mp4
+e37276a93ac1e99188340e3f61e3673b  bar/baz_2025-06-28.foo
+e37276a93ac1e99188340e3f61e3673b  bar/other.txt
+e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
+
+        let mut ch = ChecksumHelper::new(&testdir)
+            .unwrap();
+        let hc = ch.fill_missing(|_| {}).unwrap();
+        assert_eq!(
+            cshd_str_paths_only_sorted(&hc.to_str(&ch.file_tree).unwrap()),
+            "\
+bar/baz/baz_2025-06-28.foo
+bar/baz/save.sav
+foo/bar/baz/file.txt
+foo/foo.bin
+foo/foo.txt
+root.mp4
+test.md5
+");
     }
 }

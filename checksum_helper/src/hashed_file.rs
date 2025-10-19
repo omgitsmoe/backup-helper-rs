@@ -182,7 +182,7 @@ impl FileRaw {
         self.mtime
     }
 
-    pub fn update_mtime(&mut self, mtime: Option<FileTime>) {
+    pub fn set_mtime(&mut self, mtime: Option<FileTime>) {
         self.mtime = mtime
     }
 
@@ -198,6 +198,7 @@ impl FileRaw {
             format!("{}", combined)
         })
     }
+
     pub fn size(&self) -> Option<u64> {
         self.size
     }
@@ -220,8 +221,8 @@ impl FileRaw {
     pub(crate) fn with_context_mut<'a>(
         &'a mut self,
         file_tree: &'a FileTree,
-    ) -> File<'a> {
-        File::from_raw(self, file_tree)
+    ) -> FileMut<'a> {
+        FileMut::from_raw(self, file_tree)
     }
 }
 
@@ -260,6 +261,34 @@ impl<'a> FileMut<'a> {
     pub fn as_file(&'a self) -> File<'a> {
         File { file: self.file, context: self.context }
     }
+
+    pub fn update_size_and_mtime_from_disk(&mut self) -> Result<()> {
+        let (size, mtime) = self.as_file().fetch_size_and_mtime()?;
+        self.file.set_mtime(Some(mtime));
+        self.file.size = Some(size);
+        Ok(())
+    }
+
+    pub fn update_mtime_from_disk(&mut self) -> Result<()> {
+        let (_, mtime) = self.as_file().fetch_size_and_mtime()?;
+        self.file.set_mtime(Some(mtime));
+        Ok(())
+    }
+
+    pub fn update_size_from_disk(&mut self) -> Result<()> {
+        let (size, _) = self.as_file().fetch_size_and_mtime()?;
+        self.file.size = Some(size);
+        Ok(())
+    }
+
+    pub fn update_hash_from_disk<P>(&mut self, progress: P) -> Result<()>
+    where
+        P: FnMut((u64, u64))
+    {
+        let hash_bytes = self.as_file().compute_hash(progress)?;
+        self.file.hash_bytes = hash_bytes;
+        Ok(())
+    }
 }
 
 impl<'a> File<'a> {
@@ -293,18 +322,12 @@ impl<'a> File<'a> {
         self.file.absolute_path(self.context)
     }
 
-    fn fetch_size(&self) -> Result<u64> {
+    fn fetch_size_and_mtime(&self) -> Result<(u64, FileTime)> {
+        // combined, so only one syscall
         let path = self.absolute_path();
         let metadata = std::fs::metadata(&path)
             .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
-        Ok(metadata.len())
-    }
-
-    fn fetch_mtime(&self) -> Result<FileTime> {
-        let path = self.absolute_path();
-        let metadata = std::fs::metadata(&path)
-            .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
-        Ok(FileTime::from_last_modification_time(&metadata))
+        Ok((metadata.len(), FileTime::from_last_modification_time(&metadata)))
     }
 
     fn mtime_to_disk(&self) -> Result<()> {
@@ -534,21 +557,15 @@ mod test {
     }
 
     #[test]
-    fn test_fetch_size() {
-        let (testdir, _, _, testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw, &ft);
-        assert_eq!(file.fetch_size().unwrap(), testcontent.len() as u64);
-    }
-
-    #[test]
-    fn test_fetch_mtime() {
-        let (testdir, _, testfile, _, ft, mut raw, _) = setup_testfile();
-
+    fn test_fetch_size_and_mtime() {
+        let (testdir, _, testfile, testcontent, ft, mut raw, _) = setup_testfile();
         let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
         filetime::set_file_mtime(&testfile, expected_mtime).unwrap();
 
         let file = File::from_raw(&mut raw, &ft);
-        assert_eq!(file.fetch_mtime().unwrap(), expected_mtime);
+        let size_and_mtime = file.fetch_size_and_mtime().unwrap();
+        assert_eq!(size_and_mtime.0, testcontent.len() as u64);
+        assert_eq!(size_and_mtime.1, expected_mtime);
     }
 
     #[test]
@@ -557,11 +574,11 @@ mod test {
         let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
         let mut file = FileMut::from_raw(&mut raw,  &ft);
 
-        file.raw(|raw| raw.update_mtime(Some(expected_mtime)));
+        file.raw(|raw| raw.set_mtime(Some(expected_mtime)));
 
         file.as_file().mtime_to_disk().unwrap();
 
-        assert_eq!(file.as_file().fetch_mtime().unwrap(), expected_mtime);
+        assert_eq!(file.as_file().fetch_size_and_mtime().unwrap().1, expected_mtime);
     }
 
     #[test]
@@ -657,8 +674,8 @@ mod test {
         let new_content = "foobaz";
         assert_eq!(testcontent.len(), new_content.len());
         std::fs::write(testfile_abs, new_content).unwrap();
-        let new_mtime = file.as_file().fetch_mtime().unwrap();
-        file.raw(|raw| raw.update_mtime(Some(new_mtime)));
+        let (_, new_mtime) = file.as_file().fetch_size_and_mtime().unwrap();
+        file.raw(|raw| raw.set_mtime(Some(new_mtime)));
 
         let result = file.as_file().verify(|_| {});
         assert!(matches!(result, Ok(VerifyResult::MismatchCorrupted)));
@@ -668,10 +685,10 @@ mod test {
     fn test_verify_mismatch_outdated() {
         let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
         let mut file = FileMut::from_raw(&mut raw,&ft);
-        let current_mtime = file.as_file().fetch_mtime().unwrap();
+        let (_, current_mtime) = file.as_file().fetch_size_and_mtime().unwrap();
         let outdated_mtime = filetime::FileTime::from_unix_time(
             current_mtime.seconds() - 5, current_mtime.nanoseconds());
-        file.raw(|raw| raw.update_mtime(Some(outdated_mtime)));
+        file.raw(|raw| raw.set_mtime(Some(outdated_mtime)));
 
         let new_content = "foobaz";
         assert_eq!(testcontent.len(), new_content.len());

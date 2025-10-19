@@ -1,4 +1,4 @@
-use crate::checksum_helper::{ChecksumHelperError, ChecksumHelperOptions};
+use crate::checksum_helper::{ChecksumHelperError, ChecksumHelperOptions, default_filename};
 use crate::collection::HashCollection;
 use crate::file_tree::FileTree;
 use crate::gather::{gather, VisitType};
@@ -29,7 +29,7 @@ where
 {
     let root = root.as_ref();
     let discover_result = discover_hash_files(root, options, &mut progress)?;
-    let most_current_path = root.join(most_current_filename(root));
+    let most_current_path = root.join(default_filename(root, "most_current", ""));
     let mut most_current = HashCollection::new(Some(&most_current_path), None)
         .expect("creating an empty hash file collection must succeed");
 
@@ -174,17 +174,6 @@ where
     }
 
     true
-}
-
-fn most_current_filename(root: impl AsRef<path::Path>) -> std::ffi::OsString {
-    let now = chrono::offset::Local::now();
-    let datetime = now.format("%Y-%m-%dT%H%M%S");
-    let root = root.as_ref();
-    let default = std::ffi::OsString::from("most_current");
-    let base = root.file_name().unwrap_or(&default);
-    let base = base.to_string_lossy(); // Cow<str>
-
-    format!("{}_{}.cshd", base, datetime).into()
 }
 
 #[cfg(test)]
