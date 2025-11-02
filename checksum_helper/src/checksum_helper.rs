@@ -1,7 +1,7 @@
 use crate::collection::{HashCollection, HashCollectionError, VerifyProgress, HashCollectionWriter};
 use crate::hashed_file::{FileRaw, HashType};
 use crate::file_tree::FileTree;
-use crate::gather::{gather_filtered, VisitType};
+use crate::gather::{filtered, VisitType};
 use crate::pathmatcher::{PathMatcher, PathMatcherBuilder};
 use crate::most_current::{update_most_current};
 use crate::incremental::Incremental;
@@ -10,6 +10,7 @@ use std::cmp::{Eq, PartialEq};
 use std::error::Error;
 use std::fmt;
 use std::path;
+use std::cell::RefCell;
 
 pub use crate::most_current::MostCurrentProgress;
 pub use crate::incremental::IncrementalProgress;
@@ -58,7 +59,12 @@ impl ChecksumHelper {
     {
         let root = self.root();
         if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(&root, &mut self.file_tree, &self.options, |p| progress(IncrementalProgress::BuildMostCurrent(p)))?);
+            self.most_current = Some(
+                update_most_current(
+                    &root, &mut self.file_tree, &self.options,
+                    |p| {
+                        progress(IncrementalProgress::BuildMostCurrent(p))
+                    })?);
         }
 
         let inc = Incremental::new(
@@ -84,39 +90,48 @@ impl ChecksumHelper {
         //       if there are directories missing!
         let root = self.root();
         if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(&root, &mut self.file_tree, &self.options, |p| progress(IncrementalProgress::BuildMostCurrent(p)))?);
+            self.most_current = Some(
+                update_most_current(
+                    &root, &mut self.file_tree, &self.options,
+                    |p| {
+                        progress(IncrementalProgress::BuildMostCurrent(p))
+                    })?);
         }
+        let most_current = self.most_current
+            .as_ref().expect("checked above");
 
         let root = self.root();
         let filename = default_filename(&root, "missing", "_missing_");
         let mut hc = HashCollection::new(
             Some(&root.join(filename)), None)?;
-        todo!("chagne this to an iterator or store the handles then iter over those")
-        let result = gather_filtered(&root, &self.options.all_files_matcher,
-        |relative, v| {
+        let iter = filtered(
+            &root, &self.options.all_files_matcher,
+            |_| true);
+        for v in iter {
+            let v = v?;
             match v {
-                VisitType::File((_, e)) => {
+                VisitType::File(v) => {
+                    if most_current.contains_path(&v.relative_to_root, &self.file_tree) {
+                        continue;
+                    }
+
                     // TODO make it easier to create a hashed file
-                    let entry = self.file_tree.add_file(&relative)?;
+                    let entry = self.file_tree.add_file(&v.relative_to_root)?;
                     let mut file_raw = FileRaw::bare(
                         entry.clone(),
                         self.options.hash_type,
                     );
                     let mut file = file_raw.with_context_mut(&self.file_tree);
-                    progress(IncrementalProgress::PreRead(relative));
+                    progress(IncrementalProgress::PreRead(v.relative_to_root.to_owned()));
                     file.update_size_and_mtime_from_disk()?;
                     file.update_hash_from_disk(|(read, total)| {
                         progress(IncrementalProgress::Read(read, total));
                     })?;
 
                     hc.update(entry, file_raw);
-
-                    true
                 },
-                _ => true,
+                _ => {},
             }
-        })?;
-        for relative in missing_files.files {
         }
 
         Ok(hc)
@@ -133,7 +148,12 @@ impl ChecksumHelper {
     {
         let root = self.root();
         if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(&root, &mut self.file_tree, &self.options, |p| progress(IncrementalProgress::BuildMostCurrent(p)))?);
+            self.most_current = Some(update_most_current(
+                &root,
+                &mut self.file_tree,
+                &self.options,
+                |p| progress(IncrementalProgress::BuildMostCurrent(p)),
+            )?);
         }
 
         // first find all directories that have at least one file and add all
@@ -156,33 +176,54 @@ impl ChecksumHelper {
                 }
         }
 
+        // dyanmic borrow checking needed, since we use it in the predicate closure
+        // as well as in our for loop while the closure is still alive
+        let progress = RefCell::new(progress);
         let mut missing_directories = vec!();
         let mut missing_files = vec!();
-        let gather_errors = gather_filtered(&root, &self.options.all_files_matcher, |relative, v| {
-            match v {
-                VisitType::Directory(_) => {
+        let iter = filtered(
+            &root, &self.options.all_files_matcher,
+            |e| {
+                if e.ignored {
+                    // TODO unify what kind of path is returned:
+                    //      absolute or relative to root
+                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(
+                        e.entry.dir_entry.path()));
+                    return false;
+                }
+
+                let relative = e.entry.relative_to_root;
+                if e.entry.is_directory {
                     if dirs_with_hashed_file.contains(relative) {
                         true
                     } else {
                         missing_directories.push(relative.to_owned());
                         false
                     }
-                },
-                VisitType::File(_) => {
-                    if !most_current.contains_path(relative, &self.file_tree) {
-                        missing_files.push(relative.to_owned());
-                    }
-
+                } else {
                     true
-                },
-                _ => true,
+                }
+        });
+
+        let mut found = 0u64;
+        for visit_result in iter {
+            let visit_result = visit_result?;
+            match visit_result {
+                VisitType::File(v) => {
+                    let relative = v.relative_to_root;
+                    found += 1;
+                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesFound(found));
+                    if !most_current.contains_path(&relative, &self.file_tree) {
+                        missing_files.push(relative);
+                    }
+                }
+                _ => {}
             }
-        })?;
+        }
 
         Ok(CheckMissingResult{
             directories: missing_directories,
             files: missing_files,
-            errors: gather_errors.errors,
         })
     }
 
@@ -381,8 +422,6 @@ pub struct CheckMissingResult {
     /// Matched files completely missing a hash. Does not contain files in
     /// directories that are completely missing.
     pub files: Vec<path::PathBuf>,
-    /// Read errors and the like, which occurred during iteration.
-    pub errors: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -391,7 +430,6 @@ pub enum ChecksumHelperError {
     InvalidMostCurrentHashFile,
     HashCollectionError(crate::collection::HashCollectionError),
     HashedFileError(crate::hashed_file::HashedFileError),
-    // TODO error Trait
     GatherError(crate::gather::Error),
     // TODO error Trait
     FileTreeError(crate::file_tree::ErrorKind),
@@ -420,6 +458,7 @@ impl Error for ChecksumHelperError {
         match *self {
             ChecksumHelperError::HashCollectionError(ref e) => Some(e),
             ChecksumHelperError::HashedFileError(ref e) => Some(e),
+            ChecksumHelperError::GatherError(ref e) => Some(e),
             _ => None,
         }
     }
@@ -493,9 +532,6 @@ file.rs",
                     path::PathBuf::from("file.rs"),
                     path::PathBuf::from("root.mp4"),
                 },
-                errors: vec!{
-                },
-
             }
         );
     }
@@ -528,9 +564,6 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
                     path::PathBuf::from("foo").join("foo.txt"),
                     path::PathBuf::from("foo/bar/baz/file.txt"),
                 },
-                errors: vec!{
-                },
-
             }
         );
     }
@@ -559,9 +592,6 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
                     path::PathBuf::from("foo").join("foo.bin"),
                     path::PathBuf::from("foo").join("foo.txt"),
                 },
-                errors: vec!{
-                },
-
             }
         );
     }
@@ -598,9 +628,70 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
                     path::PathBuf::from("foo").join("foo.bin"),
                     path::PathBuf::from("foo").join("foo.txt"),
                 },
-                errors: vec!{
-                },
+            }
+        );
+    }
 
+    #[test]
+    fn check_missing_calls_progress_callback() {
+        let testdir = setup_dir_check_missing();
+        std::fs::write(testdir.join("test.md5"), "\
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.test
+e37276a93ac1e99188340e3f61e3673b  foo/bar/bar.mp4
+e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
+
+        let matcher = PathMatcherBuilder::new()
+            .block("bar/").unwrap()
+            .block("**/*.md5").unwrap()
+            .allow("**/*.*").unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            all_files_matcher: matcher,
+            ..Default::default()
+        };
+
+        let mut ignored = vec![];
+        let mut found = vec![];
+        let mut has_most_current_cb = false;
+        let mut ch = ChecksumHelper::with_options(&testdir, options).unwrap();
+        let result = ch.check_missing(|p| {
+            match p {
+                IncrementalProgress::BuildMostCurrent(_) => has_most_current_cb = true,
+                IncrementalProgress::DiscoverFilesFound(n) => {
+                    found.push(n);
+                },
+                IncrementalProgress::DiscoverFilesIgnored(p) => {
+                    ignored.push(p);
+                },
+                _ => {},
+            }
+
+        }).unwrap();
+
+        assert!(has_most_current_cb);
+        assert_eq!(
+            found,
+            (1..=6).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ignored,
+            vec!{
+                testdir.join("bar"),
+                testdir.join("test.md5"),
+            },
+        );
+        assert_eq!(
+            result,
+            CheckMissingResult{
+                directories: vec!{
+                    path::PathBuf::from("foo").join("bar").join("baz"),
+                },
+                files: vec!{
+                    path::PathBuf::from("root.mp4"),
+                    path::PathBuf::from("foo").join("foo.bin"),
+                    path::PathBuf::from("foo").join("foo.txt"),
+                },
             }
         );
     }

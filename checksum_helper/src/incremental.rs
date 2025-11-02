@@ -12,7 +12,7 @@ type Result<T> = std::result::Result<T, ChecksumHelperError>;
 pub enum IncrementalProgress {
     BuildMostCurrent(MostCurrentProgress),
     /// Found a file that will be included in check summing.
-    DiscoverFilesFound(usize),
+    DiscoverFilesFound(u64),
     /// Ignored a path (file or directory).
     DiscoverFilesIgnored(path::PathBuf),
     /// Finished discovering files to hash: number of files to hash, number of ignored files.
