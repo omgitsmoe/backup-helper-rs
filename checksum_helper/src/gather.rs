@@ -229,10 +229,6 @@ where
     Ok(result_handles)
 }
 
-pub struct GatherFiltered<'a> {
-    wrapped_iter: Gather<Box<dyn FnMut(Entry) -> bool + 'a>>,
-}
-
 pub struct FilteredEntry<'a> {
     pub entry: Entry<'a>,
     /// Whether the entry was ignored by [`GatherFiltered::filter`].
@@ -240,55 +236,41 @@ pub struct FilteredEntry<'a> {
     pub ignored: bool,
 }
 
-impl<'a> GatherFiltered<'a>
+/// Create a filtered iterator using [`filter`], which walks directories
+/// recursively starting at [`start`].
+/// [`predicate`] is called for each file or directory, even
+/// if it was already filtered, to allow overriding the result
+/// or just for information.
+pub fn filtered<'a, P>(
+    start: impl AsRef<path::Path>,
+    filter: &'a PathMatcher,
+    mut predicate: P,
+) -> Gather<impl FnMut(Entry) -> bool + 'a>
+where
+    P: FnMut(FilteredEntry) -> bool + 'a,
 {
-    /// Create a filtered iterator using [`filter`], which walks directories
-    /// recursively starting at [`start`].
-    /// [`predicate`] is called for each file or directory, even
-    /// if it was already filtered, to allow overriding the result
-    /// or just for information.
-    pub fn new<P>(
-        start: impl AsRef<path::Path>,
-        filter: &'a PathMatcher,
-        mut predicate: P,
-    ) -> Self
-    where
-        P: FnMut(FilteredEntry) -> bool + 'a,
-    {
-        GatherFiltered {
-            wrapped_iter: Gather::new(start, Box::new(move |e| {
-                if e.is_directory {
-                    if filter.is_excluded(e.relative_to_root) {
-                        return predicate(FilteredEntry {
-                            entry: e,
-                            ignored: true,
-                        });
-                    }
-                } else {
-                    if !filter.is_match(e.relative_to_root) {
-                        return predicate(FilteredEntry {
-                            entry: e,
-                            ignored: true,
-                        });
-                    }
-                }
-
-                predicate(FilteredEntry {
+    Gather::new(start, move |e| {
+        if e.is_directory {
+            if filter.is_excluded(e.relative_to_root) {
+                return predicate(FilteredEntry {
                     entry: e,
-                    ignored: false,
-                })
-            })),
+                    ignored: true,
+                });
+            }
+        } else {
+            if !filter.is_match(e.relative_to_root) {
+                return predicate(FilteredEntry {
+                    entry: e,
+                    ignored: true,
+                });
+            }
         }
-    }
-}
 
-impl<'a> Iterator for GatherFiltered<'a>
-{
-    type Item = Result<VisitType, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.wrapped_iter.next()
-    }
+        predicate(FilteredEntry {
+            entry: e,
+            ignored: false,
+        })
+    })
 }
 
 #[cfg(test)]
@@ -554,7 +536,7 @@ vid.mp4"
             .unwrap();
 
         let mut visited = vec![];
-        let iter = GatherFiltered::new(&root, &filter, |e| {
+        let iter = filtered(&root, &filter, |e| {
             // NOTE: IMPRORTANT! need to return the reversed, since it's used
             //       to determine whether to descent into e.entry
             !e.ignored
@@ -594,7 +576,7 @@ vid.mp4"
         let filter = PathMatcherBuilder::new().build().unwrap();
 
         let mut visited = vec![];
-        let iter = GatherFiltered::new(&root, &filter, |e| {
+        let iter = filtered(&root, &filter, |e| {
             // NOTE: !IMPRORTANT! need to return the reversed, since it's used
             //       to determine whether to descent into e.entry
             if e.ignored {
@@ -653,7 +635,7 @@ vid.mp4"
 
         let mut visited = vec![];
         let mut at_least_one_ignored = false;
-        let iter = GatherFiltered::new(&root, &filter, |e| {
+        let iter = filtered(&root, &filter, |e| {
             if e.ignored {
                 at_least_one_ignored = true;
                 true
@@ -674,6 +656,9 @@ vid.mp4"
                 _ => {},
             }
         }
+
+        assert!(at_least_one_ignored);
+
         assert_eq!(
             visited,
             vec! {
