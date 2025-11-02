@@ -229,39 +229,34 @@ where
     Ok(result_handles)
 }
 
-pub struct GatherFiltered<Q> {
-    wrapped_iter: Gather<Q>,
-    root: path::PathBuf,
+pub struct GatherFiltered<'a> {
+    wrapped_iter: Gather<Box<dyn FnMut(Entry) -> bool + 'a>>,
 }
 
 pub struct FilteredEntry<'a> {
-    entry: Entry<'a>,
+    pub entry: Entry<'a>,
     /// Whether the entry was ignored by [`GatherFiltered::filter`].
-    /// Can be overriden, by e.g., returning `true`.
-    ignored: bool,
+    /// Can be overriden, by e.g., returning `true` from the predicate.
+    pub ignored: bool,
 }
 
-impl<Q> GatherFiltered<Q>
-where
-    Q: FnMut(Entry) -> bool,
+impl<'a> GatherFiltered<'a>
 {
     /// Create a filtered iterator using [`filter`], which walks directories
     /// recursively starting at [`start`].
     /// [`predicate`] is called for each file or directory, even
     /// if it was already filtered, to allow overriding the result
     /// or just for information.
-    pub fn new<'a, P>(
+    pub fn new<P>(
         start: impl AsRef<path::Path>,
         filter: &'a PathMatcher,
         mut predicate: P,
-    ) -> GatherFiltered<impl FnMut(Entry) -> bool + 'a>
+    ) -> Self
     where
         P: FnMut(FilteredEntry) -> bool + 'a,
     {
-        let root = start.as_ref().to_owned();
-        let root_self = root.clone();
         GatherFiltered {
-            wrapped_iter: Gather::new(start, move |e| {
+            wrapped_iter: Gather::new(start, Box::new(move |e| {
                 if e.is_directory {
                     if filter.is_excluded(e.relative_to_root) {
                         return predicate(FilteredEntry {
@@ -282,15 +277,12 @@ where
                     entry: e,
                     ignored: false,
                 })
-            }),
-            root: root_self,
+            })),
         }
     }
 }
 
-impl<Q> Iterator for GatherFiltered<Q>
-where
-    Q: FnMut(Entry) -> bool,
+impl<'a> Iterator for GatherFiltered<'a>
 {
     type Item = Result<VisitType, Error>;
 
@@ -527,110 +519,167 @@ vid.mp4"
         assert!(exists(test_path.join("subdir/nested/vid.mov")).unwrap());
     }
 
-    // fn setup_dir_gather_filtered() -> std::path::PathBuf {
-    //     let testdir = testdir!();
-    //     create_ftree(
-    //         &testdir,
-    //         "\
-    // foo/bar/baz/file.bin
-    // foo/bar/baz/file.txt
-    // foo/bar/bar.test
-    // foo/bar/bar.mp4
-    // foo/foo.txt
-    // foo/foo.bin
-    // bar/baz/baz_2025-06-28.foo
-    // bar/baz/save.sav
-    // bar/baz_2025-06-28.foo
-    // bar/other.txt
-    // root.mp4
-    // file.rs",
-    //     );
-    //     testdir
-    // }
+    fn setup_dir_gather_filtered() -> std::path::PathBuf {
+        let testdir = testdir!();
+        create_ftree(
+            &testdir,
+            "\
+    foo/bar/baz/file.bin
+    foo/bar/baz/file.txt
+    foo/bar/bar.test
+    foo/bar/bar.mp4
+    foo/foo.txt
+    foo/foo.bin
+    bar/baz/baz_2025-06-28.foo
+    bar/baz/save.sav
+    bar/baz_2025-06-28.foo
+    bar/other.txt
+    root.mp4
+    file.rs",
+        );
+        testdir
+    }
 
-    // #[test]
-    // fn gather_filtered_respects_filter() {
-    //     let root = setup_dir_gather_filtered();
-    //     let filter = PathMatcherBuilder::new()
-    //         .block("bar/baz/")
-    //         .unwrap()
-    //         .allow("**/*.foo")
-    //         .unwrap()
-    //         .allow("**/*.txt")
-    //         .unwrap()
-    //         .build()
-    //         .unwrap();
+    #[test]
+    fn gather_filtered_respects_filter() {
+        let root = setup_dir_gather_filtered();
+        let filter = PathMatcherBuilder::new()
+            .block("bar/baz/")
+            .unwrap()
+            .allow("**/*.foo")
+            .unwrap()
+            .allow("**/*.txt")
+            .unwrap()
+            .build()
+            .unwrap();
 
-    //     let mut visited = vec![];
-    //     let errors = gather_filtered(&root, &filter, |r, v| {
-    //         match v {
-    //             VisitType::Directory((_, e)) => {
-    //                 visited.push((r.to_owned(), e.path()));
-    //             }
-    //             VisitType::File((_, e)) => {
-    //                 visited.push((r.to_owned(), e.path()));
-    //             }
-    //             _ => {}
-    //         };
-    //         true
-    //     })
-    //     .unwrap();
+        let mut visited = vec![];
+        let iter = GatherFiltered::new(&root, &filter, |e| {
+            // NOTE: IMPRORTANT! need to return the reversed, since it's used
+            //       to determine whether to descent into e.entry
+            !e.ignored
+        });
 
-    //     assert!(errors.errors.is_empty());
+        for v in iter {
+            match v {
+                Ok(VisitType::File(v)) => {
+                    visited.push((v.relative_to_root, v.entry.path()));
+                },
+                Ok(VisitType::Directory(v)) => {
+                    visited.push((v.relative_to_root, v.entry.path()));
+                },
+                Err(_) => assert!(false),
+                _ => {},
+            }
+        }
+        assert_eq!(
+            visited,
+            vec! {
+                (path::PathBuf::from("bar"), root.join("bar")),
+                (path::PathBuf::from("foo"), root.join("foo")),
+                (path::PathBuf::from("foo/bar"), root.join("foo/bar")),
+                (path::PathBuf::from("foo/foo.txt"), root.join("foo/foo.txt")),
+                (path::PathBuf::from("foo/bar/baz"), root.join("foo/bar/baz")),
+                (path::PathBuf::from("foo/bar/baz/file.txt"), root.join("foo/bar/baz/file.txt")),
+                (path::PathBuf::from("bar/baz_2025-06-28.foo"), root.join("bar/baz_2025-06-28.foo")),
+                (path::PathBuf::from("bar/other.txt"), root.join("bar/other.txt")),
 
-    //     assert_eq!(
-    //         visited,
-    //         vec! {
-    //             (path::PathBuf::from("bar"), root.join("bar")),
-    //             (path::PathBuf::from("foo"), root.join("foo")),
-    //             (path::PathBuf::from("foo/bar"), root.join("foo/bar")),
-    //             (path::PathBuf::from("foo/foo.txt"), root.join("foo/foo.txt")),
-    //             (path::PathBuf::from("foo/bar/baz"), root.join("foo/bar/baz")),
-    //             (path::PathBuf::from("foo/bar/baz/file.txt"), root.join("foo/bar/baz/file.txt")),
-    //             (path::PathBuf::from("bar/baz_2025-06-28.foo"), root.join("bar/baz_2025-06-28.foo")),
-    //             (path::PathBuf::from("bar/other.txt"), root.join("bar/other.txt")),
+            }
+        );
+    }
 
-    //         }
-    //     );
-    // }
+    #[test]
+    fn gather_filtered_respects_dirs_ignored_by_visit_func() {
+        let root = setup_dir_gather_filtered();
+        let filter = PathMatcherBuilder::new().build().unwrap();
 
-    // #[test]
-    // fn gather_filtered_respects_dirs_ignored_by_visit_func() {
-    //     let root = setup_dir_gather_filtered();
-    //     let filter = PathMatcherBuilder::new().build().unwrap();
+        let mut visited = vec![];
+        let iter = GatherFiltered::new(&root, &filter, |e| {
+            // NOTE: !IMPRORTANT! need to return the reversed, since it's used
+            //       to determine whether to descent into e.entry
+            if e.ignored {
+                return false;
+            }
 
-    //     let mut visited = vec![];
-    //     let errors = gather_filtered(&root, &filter, |r, v| {
-    //         match v {
-    //             VisitType::Directory((_, e)) => {
-    //                 visited.push((r.to_owned(), e.path()));
+            println!("visit {:?}", e.entry.relative_to_root);
+            if e.entry.is_directory {
+                // only "./bar" is descended into
+                e.entry.relative_to_root == path::Path::new("bar")
+            } else {
+                true
+            }
+        });
 
-    //                 // only "./bar" is descended into
-    //                 r == path::Path::new("bar")
-    //             }
-    //             VisitType::File((_, e)) => {
-    //                 visited.push((r.to_owned(), e.path()));
-    //                 true
-    //             }
-    //             _ => true,
-    //         }
-    //     })
-    //     .unwrap();
+        for v in iter {
+            match v {
+                Ok(VisitType::File(v)) => {
+                    visited.push((v.relative_to_root, v.entry.path()));
+                },
+                Ok(VisitType::Directory(v)) => {
+                    visited.push((v.relative_to_root, v.entry.path()));
+                },
+                Err(_) => assert!(false),
+                _ => {},
+            }
+        }
 
-    //     assert!(errors.errors.is_empty());
+        assert_eq!(
+            visited,
+            // NOTE: dirs foo, bar/baz are visited by the predicate, but
+            //       not returned by the iterator, since they're ignored
+            vec! {
+                (path::PathBuf::from("bar"), root.join("bar")),
+                (path::PathBuf::from("file.rs"), root.join("file.rs")),
+                (path::PathBuf::from("root.mp4"), root.join("root.mp4")),
+                (path::PathBuf::from("bar/baz_2025-06-28.foo"), root.join("bar/baz_2025-06-28.foo")),
+                (path::PathBuf::from("bar/other.txt"), root.join("bar/other.txt")),
 
-    //     assert_eq!(
-    //         visited,
-    //         vec! {
-    //             (path::PathBuf::from("bar"), root.join("bar")),
-    //             (path::PathBuf::from("file.rs"), root.join("file.rs")),
-    //             (path::PathBuf::from("foo"), root.join("foo")),
-    //             (path::PathBuf::from("root.mp4"), root.join("root.mp4")),
-    //             (path::PathBuf::from("bar/baz"), root.join("bar/baz")),
-    //             (path::PathBuf::from("bar/baz_2025-06-28.foo"), root.join("bar/baz_2025-06-28.foo")),
-    //             (path::PathBuf::from("bar/other.txt"), root.join("bar/other.txt")),
+            }
+        );
+    }
 
-    //         }
-    //     );
-    // }
+    #[test]
+    fn gather_filtered_respects_predicate_override() {
+        let root = setup_dir_gather_filtered();
+        let filter = PathMatcherBuilder::new()
+            .block("bar/baz/")
+            .unwrap()
+            .allow("**/*.foo")
+            .unwrap()
+            .allow("**/*.txt")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut visited = vec![];
+        let mut at_least_one_ignored = false;
+        let iter = GatherFiltered::new(&root, &filter, |e| {
+            if e.ignored {
+                at_least_one_ignored = true;
+                true
+            } else {
+                false
+            }
+        });
+
+        for v in iter {
+            match v {
+                Ok(VisitType::File(v)) => {
+                    visited.push((v.relative_to_root, v.entry.path()));
+                },
+                Ok(VisitType::Directory(v)) => {
+                    visited.push((v.relative_to_root, v.entry.path()));
+                },
+                Err(_) => assert!(false),
+                _ => {},
+            }
+        }
+        assert_eq!(
+            visited,
+            vec! {
+                (path::PathBuf::from("file.rs"), root.join("file.rs")),
+                (path::PathBuf::from("root.mp4"), root.join("root.mp4")),
+            }
+        );
+    }
 }
