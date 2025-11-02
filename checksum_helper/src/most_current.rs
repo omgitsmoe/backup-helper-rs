@@ -1,7 +1,7 @@
 use crate::checksum_helper::{ChecksumHelperError, ChecksumHelperOptions, default_filename};
 use crate::collection::HashCollection;
 use crate::file_tree::FileTree;
-use crate::gather::{gather, VisitType};
+use crate::gather::{Gather, VisitType};
 
 use std::path;
 
@@ -44,7 +44,6 @@ where
 
 struct DiscoverResult {
     pub hash_file_paths: Vec<path::PathBuf>,
-    pub errors: Vec<String>,
 }
 
 const HASH_FILE_EXTENSIONS: &[&str] = &[
@@ -75,25 +74,22 @@ where
 {
     let mut files = vec![];
     let root = root.as_ref();
-    let result = gather(&root, |visit_type| match visit_type {
-        VisitType::File((_, e)) => {
-            if include_hash_file(&root, options, &e.path(), &mut progress) {
-                files.push(e.path());
-                true
-            } else {
-                false
-            }
+    let iter = Gather::new(root, |e| {
+        if e.is_directory {
+            include_hash_file_dir(root, options, e.depth, &e.dir_entry.path(), &mut progress)
+        } else {
+            include_hash_file(root, options, &e.dir_entry.path(), &mut progress)
         }
-        VisitType::Directory((depth, dirent)) => {
-            include_hash_file_dir(&root, options, depth, &dirent.path(), &mut progress)
+    });
+    for entry_result in iter {
+        let visit_data = entry_result?;
+        if let VisitType::File(v) = visit_data {
+            files.push(v.entry.path());
         }
-        _ => true,
-    })
-    .map_err(ChecksumHelperError::GatherError)?;
+    };
 
     Ok(DiscoverResult {
         hash_file_paths: files,
-        errors: result.errors,
     })
 }
 
@@ -219,7 +215,6 @@ file.rs",
             }
         })
         .unwrap();
-        assert!(result.errors.is_empty());
         result.hash_file_paths.sort();
         let expected = vec![
             testdir
@@ -262,7 +257,6 @@ file.rs",
         };
 
         let mut result = discover_hash_files(&testdir, &options, |_| {}).unwrap();
-        assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
         assert_eq!(
@@ -300,8 +294,6 @@ file.rs",
             _ => unreachable!(),
         })
         .unwrap();
-
-        assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
         let expected = vec![
@@ -359,7 +351,6 @@ file.rs",
             _ => unreachable!(),
         })
         .unwrap();
-        assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
         let expected = vec![testdir.join("root.sha3_384")];
@@ -415,7 +406,6 @@ file.rs",
             _ => unreachable!(),
         })
         .unwrap();
-        assert!(result.errors.is_empty());
 
         result.hash_file_paths.sort();
         let expected = vec![
