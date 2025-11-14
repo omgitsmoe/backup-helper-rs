@@ -106,7 +106,7 @@ impl ChecksumHelper {
             Some(&root.join(filename)), None)?;
         let iter = filtered(
             &root, &self.options.all_files_matcher,
-            |_| true);
+            |e| !e.ignored);
         for v in iter {
             let v = v?;
             match v {
@@ -696,7 +696,6 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
         );
     }
 
-    // TODO test fill_missing: callbacks, matchers respected
     #[test]
     fn fill_missing() {
         let testdir = setup_dir_check_missing();
@@ -722,5 +721,89 @@ foo/foo.txt
 root.mp4
 test.md5
 ");
+    }
+
+    #[test]
+    fn fill_missing_respects_filters() {
+        let testdir = setup_dir_check_missing();
+        std::fs::write(testdir.join("test.md5"), "\
+e37276a93ac1e99188340e3f61e3673b  bar/baz_2025-06-28.foo
+e37276a93ac1e99188340e3f61e3673b  bar/other.txt
+e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
+
+        let matcher = PathMatcherBuilder::new()
+            .block("foo/bar/").unwrap()
+            .block("**/*.md5").unwrap()
+            .block("**/*.bin").unwrap()
+            .allow("**/*.md5").unwrap()
+            .allow("**/*.bin").unwrap()
+            .allow("**/*.foo").unwrap()
+            .allow("**/*.txt").unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            all_files_matcher: matcher,
+            ..Default::default()
+        };
+        let mut ch = ChecksumHelper::with_options(&testdir, options).unwrap();
+        let hc = ch.fill_missing(|_| {}).unwrap();
+        assert_eq!(
+            cshd_str_paths_only_sorted(&hc.to_str(&ch.file_tree).unwrap()),
+            "\
+bar/baz/baz_2025-06-28.foo
+foo/foo.txt
+");
+    }
+
+    #[test]
+    fn fill_missing_calls_progress_callback() {
+        let testdir = setup_dir_check_missing();
+        std::fs::write(testdir.join("test.md5"), "\
+e37276a93ac1e99188340e3f61e3673b  bar/baz_2025-06-28.foo
+e37276a93ac1e99188340e3f61e3673b  bar/other.txt
+e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
+
+        let matcher = PathMatcherBuilder::new()
+            .block("foo/bar/").unwrap()
+            .block("**/*.md5").unwrap()
+            .block("**/*.bin").unwrap()
+            .allow("**/*.md5").unwrap()
+            .allow("**/*.bin").unwrap()
+            .allow("**/*.foo").unwrap()
+            .allow("**/*.txt").unwrap()
+            .build()
+            .unwrap();
+        let options = ChecksumHelperOptions {
+            all_files_matcher: matcher,
+            ..Default::default()
+        };
+        let mut ch = ChecksumHelper::with_options(&testdir, options).unwrap();
+        let mut progress_recieved = vec!{};
+        let _ = ch.fill_missing(|p| progress_recieved.push(p))
+            .unwrap();
+        assert_eq!(
+            progress_recieved,
+            vec!{
+                IncrementalProgress::BuildMostCurrent(
+                    MostCurrentProgress::FoundFile(
+                        path::PathBuf::from("test.md5"),
+                    ),
+                ),
+                IncrementalProgress::BuildMostCurrent(
+                    MostCurrentProgress::MergeHashFile(
+                        testdir.join("test.md5"),
+                    ),
+                ),
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from("foo/foo.txt"),
+                ),
+                IncrementalProgress::Read(11, 11),
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from("bar/baz/baz_2025-06-28.foo"),
+                ),
+                IncrementalProgress::Read(26, 26),
+            }
+        );
+
     }
 }

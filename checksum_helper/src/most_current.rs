@@ -7,7 +7,7 @@ use std::path;
 
 type Result<T> = std::result::Result<T, ChecksumHelperError>;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MostCurrentProgress {
     /// Found a hash file that will be included in the most current hash file.
     FoundFile(path::PathBuf),

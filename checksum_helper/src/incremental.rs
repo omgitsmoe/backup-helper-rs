@@ -8,7 +8,7 @@ use std::path;
 type Result<T> = std::result::Result<T, ChecksumHelperError>;
 
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum IncrementalProgress {
     BuildMostCurrent(MostCurrentProgress),
     /// Found a file that will be included in check summing.
