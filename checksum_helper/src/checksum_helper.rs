@@ -303,7 +303,7 @@ pub struct ChecksumHelperOptions {
     pub incremental_skip_unchanged: bool,
 
     /// If `true`, periodically flushes the incremental hash collection
-    /// to disk after the specified time interval.
+    /// to disk upon the next modification after the specified time interval.
     pub incremental_periodic_write_interval: std::time::Duration,
 
     /// Up to which depth should the root and its subdirectories be searched
