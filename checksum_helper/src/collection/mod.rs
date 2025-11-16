@@ -298,8 +298,12 @@ impl HashCollection {
             // NOTE: Only errors that need to stop the verification progress can come from
             //       verify, so it's fine to use `?` here. For everything else a corresponding
             //       VerifyResult is used.
-            // TODO: pass along
-            let result = file.verify(|_| {})?;
+            let result = file.verify(|p| {
+                progress(VerifyProgress::During(HashProgress{
+                    bytes_read: p.0,
+                    bytes_total: p.1,
+                }));
+            })?;
             size_processed_bytes += file.raw(|f| f.size().unwrap_or(0));
 
             progress(VerifyProgress::Post(VerifyProgressPost {
@@ -311,7 +315,7 @@ impl HashCollection {
                     size_processed_bytes,
                     size_total_bytes,
                 },
-                result: &result,
+                result,
             }));
         }
 
@@ -326,14 +330,20 @@ impl HashCollection {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashProgress {
+    bytes_read: u64,
+    bytes_total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyProgress<'a> {
-    // TODO: Read updating bytes read/total
     Pre(VerifyProgressCommon<'a>),
+    During(HashProgress),
     Post(VerifyProgressPost<'a>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyProgressCommon<'a> {
     tree_root: &'a Path,
     relative_path: &'a Path,
@@ -343,10 +353,10 @@ pub struct VerifyProgressCommon<'a> {
     size_total_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyProgressPost<'a> {
     progress: VerifyProgressCommon<'a>,
-    result: &'a VerifyResult,
+    result: VerifyResult,
 }
 
 fn is_path_above_hash_file(path: &str) -> bool {
@@ -961,81 +971,87 @@ abcdefff foo/xer.mp4
         );
         fs::write(testdir.join("foo/bar/baz3.txt"), "0123456789").unwrap();
 
-        let mut idx = 0u64;
+        let expected_progress = [
+            VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: &testdir,
+                relative_path: Path::new("foo/bar/baz.txt"),
+                file_number_processed: 0,
+                file_number_total: 3,
+                size_processed_bytes: 0,
+                size_total_bytes: 1350,
+            }),
+            // NOTE: no during, since no read due to MismatchSize
+            VerifyProgress::Post(VerifyProgressPost{
+                progress: VerifyProgressCommon{
+                    tree_root: &testdir,
+                    relative_path: Path::new("foo/bar/baz.txt"),
+                    file_number_processed: 1,
+                    file_number_total: 3,
+                    size_processed_bytes: 1337,
+                    size_total_bytes: 1350,
+                },
+                result: VerifyResult::MismatchSize,
+            }),
+            VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: &testdir,
+                relative_path: Path::new("foo/bar/baz2.txt"),
+                file_number_processed: 1,
+                file_number_total: 3,
+                size_processed_bytes: 1337,
+                size_total_bytes: 1350,
+            }),
+            VerifyProgress::During(HashProgress{
+                bytes_read: 3,
+                bytes_total: 3,
+            }),
+            VerifyProgress::Post(VerifyProgressPost{
+                progress: VerifyProgressCommon{
+                    tree_root: &testdir,
+                    relative_path: Path::new("foo/bar/baz2.txt"),
+                    file_number_processed: 2,
+                    file_number_total: 3,
+                    size_processed_bytes: 1340,
+                    size_total_bytes: 1350,
+                },
+                result: VerifyResult::Ok,
+            }),
+            VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: &testdir,
+                relative_path: Path::new("foo/bar/baz3.txt"),
+                file_number_processed: 2,
+                file_number_total: 3,
+                size_processed_bytes: 1340,
+                size_total_bytes: 1350,
+            }),
+            VerifyProgress::During(HashProgress{
+                bytes_read: 10,
+                bytes_total: 10,
+            }),
+            VerifyProgress::Post(VerifyProgressPost{
+                progress: VerifyProgressCommon{
+                    tree_root: &testdir,
+                    relative_path: Path::new("foo/bar/baz3.txt"),
+                    file_number_processed: 3,
+                    file_number_total: 3,
+                    size_processed_bytes: 1350,
+                    size_total_bytes: 1350,
+                },
+                result: VerifyResult::MismatchOutdatedHash,
+            })
+        ];
+        let mut index = 0usize;
         hc.verify(
             &ft,
             |_| true,
             |p| {
-                match (idx, p) {
-                    (0, VerifyProgress::Pre(p)) => {
-                        assert_eq!(p.tree_root, testdir);
-                        assert_eq!(p.relative_path, Path::new("foo/bar/baz.txt"));
-                        assert_eq!(p.file_number_processed, 0);
-                        assert_eq!(p.file_number_total, 3);
-                        assert_eq!(p.size_processed_bytes, 0);
-                        assert_eq!(p.size_total_bytes, 1350);
-                    }
-                    (1, VerifyProgress::Post(p)) => {
-                        assert_eq!(p.progress.tree_root, testdir);
-                        assert_eq!(p.progress.relative_path, Path::new("foo/bar/baz.txt"));
-                        assert_eq!(p.progress.file_number_processed, 1);
-                        assert_eq!(p.progress.file_number_total, 3);
-                        assert_eq!(p.progress.size_processed_bytes, 1337);
-                        assert_eq!(p.progress.size_total_bytes, 1350);
-                        assert_eq!(
-                            p.result,
-                            &VerifyResult::MismatchSize,
-                        );
-                    }
-                    (2, VerifyProgress::Pre(p)) => {
-                        assert_eq!(p.tree_root, testdir);
-                        assert_eq!(p.relative_path, Path::new("foo/bar/baz2.txt"));
-                        assert_eq!(p.file_number_processed, 1);
-                        assert_eq!(p.file_number_total, 3);
-                        assert_eq!(p.size_processed_bytes, 1337);
-                        assert_eq!(p.size_total_bytes, 1350);
-                    }
-                    (3, VerifyProgress::Post(p)) => {
-                        assert_eq!(p.progress.tree_root, testdir);
-                        assert_eq!(p.progress.relative_path, Path::new("foo/bar/baz2.txt"));
-                        assert_eq!(p.progress.file_number_processed, 2);
-                        assert_eq!(p.progress.file_number_total, 3);
-                        assert_eq!(p.progress.size_processed_bytes, 1340);
-                        assert_eq!(p.progress.size_total_bytes, 1350);
-                        assert_eq!(
-                            p.result,
-                            &VerifyResult::Ok
-                        );
-                    }
-                    (4, VerifyProgress::Pre(p)) => {
-                        assert_eq!(p.tree_root, testdir);
-                        assert_eq!(p.relative_path, Path::new("foo/bar/baz3.txt"));
-                        assert_eq!(p.file_number_processed, 2);
-                        assert_eq!(p.file_number_total, 3);
-                        assert_eq!(p.size_processed_bytes, 1340);
-                        assert_eq!(p.size_total_bytes, 1350);
-                    }
-                    (5, VerifyProgress::Post(p)) => {
-                        assert_eq!(p.progress.tree_root, testdir);
-                        assert_eq!(p.progress.relative_path, Path::new("foo/bar/baz3.txt"));
-                        assert_eq!(p.progress.file_number_processed, 3);
-                        assert_eq!(p.progress.file_number_total, 3);
-                        assert_eq!(p.progress.size_processed_bytes, 1350);
-                        assert_eq!(p.progress.size_total_bytes, 1350);
-                        assert_eq!(
-                            p.result,
-                            &VerifyResult::MismatchOutdatedHash
-                        );
-                    }
-                    _ => unreachable!(),
-                }
-
-                idx += 1;
+                let expected = expected_progress[index];
+                dbg!(index);
+                assert_eq!(p, expected);
+                index += 1;
             },
         )
         .unwrap();
 
-        assert!(idx % 2 == 0);
     }
 
     #[test]

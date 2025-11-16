@@ -329,7 +329,7 @@ impl<'a> File<'a> {
 
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyResult {
     /// The hashes matched.
     Ok,
