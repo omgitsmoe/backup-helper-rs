@@ -98,6 +98,10 @@ impl HashCollection {
         self.map.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn filter_missing(&mut self) -> Result<()> {
         todo!("filter out all files that do no longer exist")
     }

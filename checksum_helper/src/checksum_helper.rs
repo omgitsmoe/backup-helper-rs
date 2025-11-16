@@ -111,29 +111,26 @@ impl ChecksumHelper {
             |e| !e.ignored);
         for v in iter {
             let v = v?;
-            match v {
-                VisitType::File(v) => {
-                    if most_current.contains_path(&v.relative_to_root, &self.file_tree) {
-                        continue;
-                    }
+            if let VisitType::File(v) = v {
+                if most_current.contains_path(&v.relative_to_root, &self.file_tree) {
+                    continue;
+                }
 
-                    // TODO make it easier to create a hashed file
-                    let entry = self.file_tree.add_file(&v.relative_to_root)?;
-                    let mut file_raw = FileRaw::bare(
-                        entry.clone(),
-                        self.options.hash_type,
-                    );
-                    let mut file = file_raw.with_context_mut(&self.file_tree);
+                // TODO make it easier to create a hashed file
+                let entry = self.file_tree.add_file(&v.relative_to_root)?;
+                let mut file_raw = FileRaw::bare(
+                    entry.clone(),
+                    self.options.hash_type,
+                );
+                let mut file = file_raw.with_context_mut(&self.file_tree);
 
-                    progress(IncrementalProgress::PreRead(v.relative_to_root.to_owned()));
-                    file.update_size_and_mtime_from_disk()?;
-                    file.update_hash_from_disk(|(read, total)| {
-                        progress(IncrementalProgress::Read(read, total));
-                    })?;
+                progress(IncrementalProgress::PreRead(v.relative_to_root.to_owned()));
+                file.update_size_and_mtime_from_disk()?;
+                file.update_hash_from_disk(|(read, total)| {
+                    progress(IncrementalProgress::Read(read, total));
+                })?;
 
-                    hc.update(entry, file_raw);
-                },
-                _ => {},
+                hc.update(entry, file_raw);
             }
         }
 
@@ -211,16 +208,13 @@ impl ChecksumHelper {
         let mut found = 0u64;
         for visit_result in iter {
             let visit_result = visit_result?;
-            match visit_result {
-                VisitType::File(v) => {
-                    let relative = v.relative_to_root;
-                    found += 1;
-                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesFound(found));
-                    if !most_current.contains_path(&relative, &self.file_tree) {
-                        missing_files.push(relative);
-                    }
+            if let VisitType::File(v) = visit_result {
+                let relative = v.relative_to_root;
+                found += 1;
+                progress.borrow_mut()(IncrementalProgress::DiscoverFilesFound(found));
+                if !most_current.contains_path(&relative, &self.file_tree) {
+                    missing_files.push(relative);
                 }
-                _ => {}
             }
         }
 

@@ -126,15 +126,12 @@ impl<'a> Incremental<'a> {
 
         for entry in iter {
             let entry = entry?;
-            match entry {
-                VisitType::File(v) => {
-                    let handle = self.file_tree.add_file(v.relative_to_root)?;
-                    self.files_to_checksum.push(handle);
-                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesFound(
-                        self.files_to_checksum.len() as u64,
-                    ));
-                }
-                _ => {}
+            if let VisitType::File(v) = entry {
+                let handle = self.file_tree.add_file(v.relative_to_root)?;
+                self.files_to_checksum.push(handle);
+                progress.borrow_mut()(IncrementalProgress::DiscoverFilesFound(
+                    self.files_to_checksum.len() as u64,
+                ));
             }
         }
 
@@ -169,33 +166,30 @@ impl<'a> Incremental<'a> {
                 handle.clone(),
                 self.options.hash_type,
             );
-            let mut file = file_raw.with_context_mut(&self.file_tree);
+            let mut file = file_raw.with_context_mut(self.file_tree);
 
             let previous = self.most_current.get(&handle);
 
             progress(IncrementalProgress::PreRead(relative_path.to_owned()));
             file.update_size_and_mtime_from_disk()?;
-            match (self.options.incremental_skip_unchanged, previous) {
-                (true, Some(p)) => {
-                    if p.mtime().is_some() && file.raw(|r| r.mtime()) == p.mtime() {
-                        // we skip checking the hash on disk, since mtime is unchanged
-                        // and the user set incremental_skip_unchanged
-                        if self.options.incremental_include_unchanged_files {
-                            result.update(
-                                handle.clone(),
-                                self.most_current
-                                    .remove(&handle)
-                                    .expect("checked that we have an entry for it above"),
-                            );
-                        }
-
-                        progress(IncrementalProgress::FileUnchangedSkipped(
-                            relative_path.to_owned()));
-                        self.most_current.remove(&handle);
-                        continue;
+            if let (true, Some(p)) = (self.options.incremental_skip_unchanged, previous) {
+                if p.mtime().is_some() && file.raw(|r| r.mtime()) == p.mtime() {
+                    // we skip checking the hash on disk, since mtime is unchanged
+                    // and the user set incremental_skip_unchanged
+                    if self.options.incremental_include_unchanged_files {
+                        result.update(
+                            handle.clone(),
+                            self.most_current
+                                .remove(&handle)
+                                .expect("checked that we have an entry for it above"),
+                        );
                     }
-                },
-                _ => {},
+
+                    progress(IncrementalProgress::FileUnchangedSkipped(
+                        relative_path.to_owned()));
+                    self.most_current.remove(&handle);
+                    continue;
+                }
             }
 
             file.update_hash_from_disk(|(read, total)| {
@@ -215,9 +209,9 @@ impl<'a> Incremental<'a> {
             }
         }
 
-        for missing in self.most_current.iter_with_context(&self.file_tree) {
+        for missing in self.most_current.iter_with_context(self.file_tree) {
             let (path_absolute, _) = missing;
-            let path_relative = path_absolute.strip_prefix(&self.root)
+            let path_relative = path_absolute.strip_prefix(self.root)
                 .expect("Incremental root and FileTree root must match!");
             progress(IncrementalProgress::FileRemoved(path_relative.to_owned()));
         }

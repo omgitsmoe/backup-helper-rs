@@ -7,21 +7,21 @@ use std::path;
 
 #[derive(Debug)]
 pub enum Error {
-    ReadDirectoryError((path::PathBuf, String, std::io::ErrorKind)),
-    ReadFileInfoError((path::PathBuf, String, std::io::ErrorKind)),
-    IterationError(String, std::io::ErrorKind),
+    ReadDirectory((path::PathBuf, String, std::io::ErrorKind)),
+    ReadFileInfo((path::PathBuf, String, std::io::ErrorKind)),
+    Iteration(String, std::io::ErrorKind),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::ReadDirectoryError((p, e, _)) => {
+            Error::ReadDirectory((p, e, _)) => {
                 write!(f, "failed to read directory at '{:?}': {:?}", p, e)
             }
-            Error::ReadFileInfoError((p, e, _)) => {
+            Error::ReadFileInfo((p, e, _)) => {
                 write!(f, "failed to read file information at '{:?}': {:?}", p, e)
             }
-            Error::IterationError(e, _) => {
+            Error::Iteration(e, _) => {
                 write!(f, "failed to iterate directory: {:?}", e)
             }
         }
@@ -132,13 +132,13 @@ where
                             }))
                         }
                     }
-                    Err(err) => Err(Error::ReadFileInfoError((
+                    Err(err) => Err(Error::ReadFileInfo((
                         e.path(),
                         format!("{:?}", err),
                         err.kind(),
                     ))),
                 },
-                Some(Err(e)) => Err(Error::IterationError(format!("{:?}", e), e.kind())),
+                Some(Err(e)) => Err(Error::Iteration(format!("{:?}", e), e.kind())),
                 None => {
                     self.current_dir_iter = None;
                     Ok(VisitType::ListDirStop(self.current_depth))
@@ -170,7 +170,7 @@ where
                 Ok(iter) => iter,
                 Err(e) => {
                     self.has_fatal_error = true;
-                    return Some(Err(Error::ReadDirectoryError((
+                    return Some(Err(Error::ReadDirectory((
                         directory.clone(),
                         format!("{}", e),
                         e.kind(),
@@ -215,13 +215,11 @@ where
                     ignored: true,
                 });
             }
-        } else {
-            if !filter.is_match(e.relative_to_root) {
-                return predicate(FilteredEntry {
-                    entry: e,
-                    ignored: true,
-                });
-            }
+        } else if !filter.is_match(e.relative_to_root) {
+            return predicate(FilteredEntry {
+                entry: e,
+                ignored: true,
+            });
         }
 
         predicate(FilteredEntry {

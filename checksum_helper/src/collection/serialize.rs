@@ -61,7 +61,7 @@ fn serialize_entry<W: Write>(
     let hash_type = hashed_file.hash_type().to_string();
     let hash_hex = hex::encode(hashed_file.hash_bytes());
 
-    write!(writer, "{mtime},{size},{hash_type},{hash_hex} {path}\n")?;
+    writeln!(writer, "{mtime},{size},{hash_type},{hash_hex} {path}")?;
 
     Ok(())
 }
@@ -70,12 +70,12 @@ fn serialize_entry<W: Write>(
 ///          header!
 pub fn sort_serialized(serialized: &str) -> Option<String> {
     let mut header = Vec::new();
-    let mut iter = serialized.lines();
+    let iter = serialized.lines();
     let mut lines = Vec::new();
 
     // Collect header lines manually, ensuring the first non-header line is not consumed
     let mut in_header = true;
-    while let Some(line) = iter.next() {
+    for line in iter {
         let is_comment = line.starts_with('#');
         if in_header {
             if !is_comment {

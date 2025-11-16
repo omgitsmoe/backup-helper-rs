@@ -21,7 +21,7 @@ pub fn parse<R: BufRead>(reader: R, collection_path: impl AsRef<Path>, file_tree
     let prefix = ft_to_collection_root_prefix(&result, file_tree)?;
     let version = match &lines.next() {
         Some(Ok(line)) => {
-            let (found, version) = parse_version_header(&line)?;
+            let (found, version) = parse_version_header(line)?;
             if !found {
                 // no header line found, parse the line
                 parse_line(

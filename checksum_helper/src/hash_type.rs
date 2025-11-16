@@ -73,14 +73,14 @@ impl TryFrom<&std::ffi::OsStr> for HashType {
     }
 }
 
-impl Into<&'static str> for HashType {
-    fn into(self) -> &'static str {
-        self.to_str()
+impl From<HashType> for &'static str {
+    fn from(val: HashType) -> Self {
+        val.to_str()
     }
 }
 
-impl ToString for HashType {
-    fn to_string(&self) -> String {
-        self.to_str().to_owned()
+impl std::fmt::Display for HashType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_str())
     }
 }

@@ -38,9 +38,7 @@ impl fmt::Display for HashedFileError {
 impl Error for HashedFileError {
     // return the source for this error, e.g. std::io::Eror if we wrapped it
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match *self {
-            _ => None,
-        }
+        None
     }
 }
 
@@ -109,7 +107,7 @@ impl FileRaw {
             let nanosecs = m.nanoseconds();
             const SECS_PER_NS: f64 = 1.0 / 1_000_000_000.0;
             let fract = (nanosecs as f64) * SECS_PER_NS;
-            let combined = (usecs as f64) + fract;
+            let combined = usecs + fract;
             format!("{}", combined)
         })
     }

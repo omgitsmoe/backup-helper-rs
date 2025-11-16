@@ -96,9 +96,7 @@ impl fmt::Display for PathMatcherError {
 
 impl Error for PathMatcherError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match *self {
-            _ => None,
-        }
+        None
     }
 }
 
