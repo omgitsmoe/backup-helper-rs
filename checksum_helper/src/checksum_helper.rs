@@ -14,6 +14,7 @@ use std::error::Error;
 use std::fmt;
 use std::path;
 use std::cell::RefCell;
+use std::io::Write;
 
 pub use crate::most_current::MostCurrentProgress;
 pub use crate::incremental::IncrementalProgress;
@@ -243,6 +244,21 @@ impl ChecksumHelper {
 
     pub fn iter_collection<'a>(&'a self, collection: &'a HashCollection) -> HashCollectionIter<'a> {
         collection.iter_with_context(&self.file_tree)
+    }
+
+    pub fn write_collection(
+        &self,
+        collection: &HashCollection,
+    ) -> Result<()> {
+        collection.write_to_disk(&self.file_tree)?;
+
+        Ok(())
+    }
+
+    pub fn write_into<W: Write>(&self, collection: &HashCollection, writer: &mut W) -> Result<()> {
+        collection.serialize(writer, &self.file_tree)?;
+
+        Ok(())
     }
 
     /// Verify all files matching predicated `include` in the `HashCollection`

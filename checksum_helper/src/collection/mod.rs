@@ -208,6 +208,11 @@ impl HashCollection {
         serialize::serialize(self, writer, file_tree, true)
     }
 
+    pub(crate) fn write_to_disk(&self, file_tree: &FileTree) -> Result<()> {
+        let mut file = std::fs::File::create_new(self.full_path()?)?;
+        self.serialize(&mut file, file_tree)
+    }
+
     pub(crate) fn to_str(&self, file_tree: &FileTree) -> Result<String> {
         let mut buf = vec![];
         self.serialize(&mut buf, file_tree)?;
@@ -363,6 +368,8 @@ fn is_path_above_hash_file(path: &str) -> bool {
     depth < 0
 }
 
+/// Provides an iterator over all items in a [`HashCollection`].
+/// The absolute path and [`File`] instance will be provided.
 pub struct HashCollectionIter<'a> {
     map_iter: MapIter<'a, EntryHandle, FileRaw>,
     file_tree: &'a FileTree,

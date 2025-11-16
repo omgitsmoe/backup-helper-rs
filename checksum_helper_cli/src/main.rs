@@ -64,4 +64,6 @@ fn main() {
     let inc = ch.incremental(|p| {
         println!("{:?}", p);
     }).unwrap();
+
+    ch.write_collection(&inc).unwrap();
 }
