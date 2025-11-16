@@ -115,12 +115,6 @@ impl<'a> Incremental<'a> {
                     return false;
                 }
 
-                if let Some(d) = self.options.discover_hash_files_depth {
-                    if e.entry.depth > d {
-                        return false;
-                    }
-                }
-
                 true
             });
 
@@ -336,42 +330,6 @@ vid.mp4",
         );
 
         assert_eq!(inc.files_to_checksum.len(), 10);
-    }
-
-    #[test]
-    fn discover_files_respects_hash_files_depth() {
-        let test_path = setup_ftree();
-        let mut ft = FileTree::new(&test_path).unwrap();
-        let options = ChecksumHelperOptions{
-            discover_hash_files_depth: Some(1),
-            ..Default::default()
-        };
-        let hc = HashCollection::new(None::<&&str>, None).unwrap();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
-
-        inc.discover_files(|_| {}).unwrap();
-
-        assert_eq!(
-            "FileTree{
-  file.txt
-  vid.mp4
-  subdir/chksum.md5
-  subdir/foo.txt
-}",
-            to_file_list(&inc.file_tree)
-        );
-
-        assert_eq!(
-            "\
-file.txt
-subdir/chksum.md5
-subdir/foo.txt
-vid.mp4",
-            file_handles_to_file_list(&inc.file_tree, &inc.files_to_checksum)
-        );
-
-        assert_eq!(inc.files_to_checksum.len(), 4);
     }
 
     #[test]
