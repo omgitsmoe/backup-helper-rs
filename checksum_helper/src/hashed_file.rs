@@ -79,6 +79,9 @@ impl FileRaw {
         }
     }
 
+    // NOTE: relative to the file tree, not to root of the collection the file is in
+    //       -> should not be a problem, since all paths are relative to
+    //          the ChecksumHelper root anyway and it's the same as the FileTree root
     pub fn relative_path(&self, file_tree: &FileTree) -> path::PathBuf {
         file_tree.relative_path(&self.path)
     }
@@ -209,9 +212,6 @@ impl<'a> FileMut<'a> {
 }
 
 impl<'a> File<'a> {
-    // TODO this should probably return the path relative to the collection root, not
-    //      to the file tree
-    //      or only provide an absolute path?
     fn relative_path(&self) -> path::PathBuf {
         self.file.relative_path(self.context)
     }
