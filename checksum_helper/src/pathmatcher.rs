@@ -1,4 +1,4 @@
-use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use std::error::Error;
 use std::fmt;

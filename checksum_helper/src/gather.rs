@@ -1,4 +1,3 @@
-use crate::file_tree::{EntryHandle, FileTree};
 use crate::pathmatcher::PathMatcher;
 
 use std::fmt;
@@ -188,47 +187,6 @@ where
     }
 }
 
-pub fn gather_into_file_tree<F>(
-    start: &path::Path,
-    file_tree: &mut FileTree,
-    include_fn: F,
-) -> Result<Vec<EntryHandle>, Error>
-where
-    F: FnMut(Entry) -> bool,
-{
-    // in case the file_tree wasn't empty we need a way to just iterate the files
-    // that were gathered into the file_tree, without the previously existing ones
-    let mut result_handles = vec![];
-
-    let mut directories = vec![file_tree.root()];
-    let mut handle = file_tree.root();
-    let iter = Gather::new(start, include_fn);
-
-    for visit_type in iter {
-        match visit_type {
-            Ok(VisitType::ListDirStart(_)) => {
-                handle = directories
-                    .pop()
-                    .expect("there should be a directory queued");
-            }
-            Ok(VisitType::Directory(v)) => {
-                let new_handle = file_tree.add_child(
-                    &handle, v.entry.file_name(), true);
-                directories.push(new_handle);
-            }
-            Ok(VisitType::File(v)) => {
-                let handle = file_tree.add_child(
-                    &handle, v.entry.file_name(), false);
-                result_handles.push(handle);
-            }
-            Err(e) => return Err(e),
-            _ => {}
-        }
-    }
-
-    Ok(result_handles)
-}
-
 pub struct FilteredEntry<'a> {
     pub entry: Entry<'a>,
     /// Whether the entry was ignored by [`GatherFiltered::filter`].
@@ -278,6 +236,48 @@ mod test {
     use super::*;
     use crate::{pathmatcher::PathMatcherBuilder, test_utils::*};
     use pretty_assertions::assert_eq;
+    use crate::file_tree::{EntryHandle, FileTree};
+
+    fn gather_into_file_tree<F>(
+        start: &path::Path,
+        file_tree: &mut FileTree,
+        include_fn: F,
+    ) -> Result<Vec<EntryHandle>, Error>
+    where
+        F: FnMut(Entry) -> bool,
+    {
+        // in case the file_tree wasn't empty we need a way to just iterate the files
+        // that were gathered into the file_tree, without the previously existing ones
+        let mut result_handles = vec![];
+
+        let mut directories = vec![file_tree.root()];
+        let mut handle = file_tree.root();
+        let iter = Gather::new(start, include_fn);
+
+        for visit_type in iter {
+            match visit_type {
+                Ok(VisitType::ListDirStart(_)) => {
+                    handle = directories
+                        .pop()
+                        .expect("there should be a directory queued");
+                }
+                Ok(VisitType::Directory(v)) => {
+                    let new_handle = file_tree.add_child(
+                        &handle, v.entry.file_name(), true);
+                    directories.push(new_handle);
+                }
+                Ok(VisitType::File(v)) => {
+                    let handle = file_tree.add_child(
+                        &handle, v.entry.file_name(), false);
+                    result_handles.push(handle);
+                }
+                Err(e) => return Err(e),
+                _ => {}
+            }
+        }
+
+        Ok(result_handles)
+    }
 
     #[test]
     fn gather_visit_no_filter() {

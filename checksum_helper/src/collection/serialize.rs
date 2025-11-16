@@ -1,7 +1,6 @@
 use super::{HashCollection, HashCollectionError, Result};
 
 use crate::file_tree::{EntryHandle, FileTree};
-use crate::hash_type::HashType;
 use crate::hashed_file::FileRaw;
 
 use pathdiff::diff_paths;
@@ -113,6 +112,7 @@ mod test {
     use super::super::test::setup_minimal_hc;
     use pretty_assertions::assert_eq;
     use std::path::Path;
+    use crate::hash_type::HashType;
 
     #[test]
     fn test_serialize_entry() {

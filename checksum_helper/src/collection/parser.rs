@@ -8,7 +8,7 @@ use hex;
 use pathdiff::diff_paths;
 use log::{error, warn};
 
-use std::io::{BufRead, Cursor};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 // TODO separate parser that just has a feed/feed_line method -> more flexible?
@@ -289,6 +289,7 @@ fn parse_hash(str: &str) -> Result<(HashType, Vec<u8>, &str)> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::io::Cursor;
     use crate::test_utils::*;
     use filetime::FileTime;
     use pretty_assertions::assert_eq;

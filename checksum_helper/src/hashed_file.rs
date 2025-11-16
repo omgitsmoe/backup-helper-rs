@@ -491,7 +491,7 @@ mod test {
 
     #[test]
     fn test_fetch_size_and_mtime() {
-        let (testdir, _, testfile, testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _, testfile, testcontent, ft, mut raw, _) = setup_testfile();
         let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
         filetime::set_file_mtime(&testfile, expected_mtime).unwrap();
 
@@ -503,7 +503,7 @@ mod test {
 
     #[test]
     fn test_mtime_to_disk() {
-        let (testdir, _, _, _, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _, _, _, ft, mut raw, _) = setup_testfile();
         let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
         let mut file = FileMut::from_raw(&mut raw,  &ft);
 
@@ -516,7 +516,7 @@ mod test {
 
     #[test]
     fn test_compute_hash() {
-        let (testdir, _testfile_name, _testfile_abs, testcontent, ft, mut raw, expected_hex) =
+        let (_testdir, _testfile_name, _testfile_abs, testcontent, ft, mut raw, expected_hex) =
             setup_testfile();
         let mut file = File::from_raw(&mut raw, &ft);
 
@@ -539,7 +539,7 @@ mod test {
 
     #[test]
     fn test_verify_ok() {
-        let (testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
+        let (_testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
             setup_testfile();
         let file = File::from_raw(&mut raw, &ft);
 
@@ -551,7 +551,7 @@ mod test {
 
     #[test]
     fn test_verify_missing_hash() {
-        let (testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
+        let (_testdir, _testfile_name, _testfile_abs, _testcontent, ft, mut raw, _) =
             setup_testfile();
         let mut file = FileMut::from_raw(&mut raw, &ft);
 
@@ -566,7 +566,7 @@ mod test {
 
     #[test]
     fn test_verify_missing_file() {
-        let (testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
         let file = File::from_raw(&mut raw,&ft);
 
         std::fs::remove_file(testfile_abs).unwrap();
@@ -577,7 +577,7 @@ mod test {
 
     #[test]
     fn test_verify_mismatch_size() {
-        let (testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
         let file = File::from_raw(&mut raw,&ft);
 
         std::fs::write(testfile_abs, "newsize1234").unwrap();
@@ -588,7 +588,7 @@ mod test {
 
     #[test]
     fn test_verify_mismatch() {
-        let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
         let file = File::from_raw(&mut raw,&ft);
 
         let new_content = "foobaz";
@@ -601,7 +601,7 @@ mod test {
 
     #[test]
     fn test_verify_mismatch_corrupted() {
-        let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
         let mut file = FileMut::from_raw(&mut raw, &ft);
 
         let new_content = "foobaz";
@@ -616,7 +616,7 @@ mod test {
 
     #[test]
     fn test_verify_mismatch_outdated() {
-        let (testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
         let mut file = FileMut::from_raw(&mut raw,&ft);
         let (_, current_mtime) = file.as_file().fetch_size_and_mtime().unwrap();
         let outdated_mtime = filetime::FileTime::from_unix_time(

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf, Component, StripPrefixError};
+use std::path::{Path, PathBuf, Component};
 use std::fmt::Display;
 use std::ffi::OsStr;
 
@@ -14,20 +14,6 @@ pub enum ErrorKind {
     PathNotAbsolute,
     NotASubpathOfFileTreeRoot,
     NonCanoncialPath,
-}
-
-fn is_valid(path: impl AsRef<Path>) -> bool {
-    // NOTE: Path.iter()/components() does some normalization itself
-    //       -> need to use the OsStr directly
-    if let Some(path) = path.as_ref().to_str() {
-        path.split(|c: char| c == '/' || c == '\\')
-            .enumerate()
-            // allow . as the first path component
-            .all(|(i, p)| (i == 0 || p != ".") && p != ".." )
-    } else {
-        // not valid unicode
-        false
-    }
 }
 
 /// Considers a path as "absolute" as soon as it's not considered relative to
@@ -383,27 +369,6 @@ impl Iterator for EntryIter<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::ffi::OsStr;
-
-    #[test]
-    fn test_is_valid() {
-        assert!(!is_valid(Path::new("/tmp/../other")));
-        assert!(!is_valid(Path::new("/tmp/./other")));
-        assert!(!is_valid(Path::new("/tmp/other/../foo")));
-
-        unsafe {
-            assert!(!is_valid(OsStr::from_encoded_bytes_unchecked(b"\x80\xb8\xff")));
-        }
-
-        assert!(is_valid(Path::new("/tmp/foo/bar/baz/file.txt")));
-        assert!(is_valid(Path::new("/tmp/.hidden/other")));
-        assert!(is_valid(Path::new("/tmp/..other/foo")));
-        assert!(is_valid(Path::new(".")));
-        assert!(is_valid(Path::new("./")));
-        assert!(is_valid(Path::new("./tmp/other")));
-        assert!(is_valid(Path::new(".\\")));
-        assert!(is_valid(Path::new(".\\tmp\\other")));
-    }
 
     #[test]
     fn test_is_absolute() {
@@ -565,7 +530,7 @@ mod test {
 
     #[test]
     fn path_for_tree_root() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let ft = FileTree::new(Path::new("/foo")).unwrap();
         assert_eq!(
             ft.relative_path(&ft.root()),
             Path::new(""),

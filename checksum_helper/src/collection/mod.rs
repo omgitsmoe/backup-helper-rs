@@ -234,7 +234,7 @@ impl HashCollection {
         };
         for (path_handle, theirs) in other.map {
             match self.map.get_mut(&path_handle) {
-                Some(ours) => {
+                Some(_) => {
                     if !keep_ours {
                         self.map.insert(path_handle, theirs);
                     }
@@ -485,7 +485,6 @@ pub mod test {
     use super::*;
     use crate::hash_type::HashType;
     use crate::test_utils::*;
-    use hashes::sha2::sha512;
     use pretty_assertions::assert_eq;
 
     #[test]

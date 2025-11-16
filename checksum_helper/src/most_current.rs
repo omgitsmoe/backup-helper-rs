@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::pathmatcher::*;
     use crate::test_utils::*;
-    use crate::{ChecksumHelper, ChecksumHelperOptions};
+    use crate::ChecksumHelperOptions;
     use pretty_assertions::assert_eq;
 
     fn setup_dir_hash_files() -> std::path::PathBuf {
@@ -665,7 +665,7 @@ file.rs",
             &options,
             3,
             path::Path::new("/foo"),
-            &mut |p| {}
+            &mut |_| {}
         ));
         assert!(!was_called);
 

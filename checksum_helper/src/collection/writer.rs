@@ -1,4 +1,4 @@
-use super::{serialize, HashCollection, HashCollectionError, Result};
+use super::{serialize, HashCollection, Result};
 
 use crate::file_tree::FileTree;
 
@@ -71,6 +71,7 @@ mod test {
     use super::super::test::setup_minimal_hc;
     use super::*;
     use crate::test_utils::*;
+    use crate::collection::HashCollectionError;
 
     use std::ffi::OsString;
 
@@ -97,7 +98,7 @@ mod test {
     fn test_write() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
-        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc(&testdir);
+        let (mut hc, ft, expected_serialization) = setup_minimal_hc(&testdir);
         hc.relocate(&testdir);
         hc.rename(&OsString::from("foo.cshd"));
 
@@ -115,7 +116,7 @@ mod test {
     fn test_flush() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
-        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc(&testdir);
+        let (mut hc, ft, expected_serialization) = setup_minimal_hc(&testdir);
         hc.relocate(&testdir);
         hc.rename(&OsString::from("foo.cshd"));
 
@@ -135,7 +136,7 @@ mod test {
     fn test_flush_only_writes_header_once() {
         let testdir = testdir!();
         let path = testdir.join("foo.cshd");
-        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc(&testdir);
+        let (mut hc, ft, expected_serialization) = setup_minimal_hc(&testdir);
         hc.relocate(&testdir);
         hc.rename(&OsString::from("foo.cshd"));
 
@@ -153,8 +154,7 @@ mod test {
     #[test]
     fn test_flush_clears_entries() {
         let testdir = testdir!();
-        let path = testdir.join("foo.cshd");
-        let (mut hc, mut ft, expected_serialization) = setup_minimal_hc(&testdir);
+        let (mut hc, ft, _expected_serialization) = setup_minimal_hc(&testdir);
         hc.relocate(&testdir);
         hc.rename(&OsString::from("foo.cshd"));
 
