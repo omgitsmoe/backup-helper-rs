@@ -39,6 +39,9 @@ where
         most_current.merge(hc)?;
     }
 
+    // TODO filter out files that are no longer on disk
+    // + callback?
+
     Ok(most_current)
 }
 

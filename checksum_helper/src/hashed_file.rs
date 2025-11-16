@@ -43,7 +43,7 @@ impl Error for HashedFileError {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct FileRaw {
     path: EntryHandle,
     mtime: Option<FileTime>,

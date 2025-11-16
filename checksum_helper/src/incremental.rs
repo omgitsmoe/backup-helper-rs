@@ -1,8 +1,10 @@
 use crate::collection::HashCollection;
+use crate::hashed_file::{FileRaw, File};
 use crate::file_tree::{FileTree, EntryHandle};
 use crate::gather::{filtered, VisitType};
 use crate::most_current::MostCurrentProgress;
 use crate::{ChecksumHelperError, ChecksumHelperOptions};
+use crate::checksum_helper::default_filename;
 
 use std::path;
 
@@ -74,6 +76,8 @@ impl<'a> Incremental<'a> {
         options: &'a ChecksumHelperOptions,
         most_current: HashCollection,
     ) -> Self {
+        assert_eq!(root, file_tree.absolute_path(&file_tree.root()),
+                   "Incremental root and the file tree root must match!");
         Incremental {
             root,
             file_tree,
@@ -150,31 +154,146 @@ impl<'a> Incremental<'a> {
         //      self.options.incremental_periodic_write_interval
         // Build a new collection and remove processed
         // entries from self.most_current (Python version does this, without removal)
-        todo!()
+        let mut result = HashCollection::new(
+            Some(&self.root.join(default_filename(self.root, "incremental", ""))),
+            None,
+        )?;
+
+        let files_to_checksum = std::mem::take(&mut self.files_to_checksum);
+        for handle in files_to_checksum {
+            let path = self.file_tree.absolute_path(&handle);
+            let relative_path = path.strip_prefix(self.root)
+                .expect("Incremental root and FileTree root must match!");
+
+            let mut file_raw = FileRaw::bare(
+                handle.clone(),
+                self.options.hash_type,
+            );
+            let mut file = file_raw.with_context_mut(&self.file_tree);
+
+            let previous = self.most_current.get(&handle);
+
+            progress(IncrementalProgress::PreRead(relative_path.to_owned()));
+            file.update_size_and_mtime_from_disk()?;
+            match (self.options.incremental_skip_unchanged, previous) {
+                (true, Some(p)) => {
+                    if p.mtime().is_some() && file.raw(|r| r.mtime()) == p.mtime() {
+                        // we skip checking the hash on disk, since mtime is unchanged
+                        // and the user set incremental_skip_unchanged
+                        if self.options.incremental_include_unchanged_files {
+                            result.update(
+                                handle.clone(),
+                                self.most_current
+                                    .remove(&handle)
+                                    .expect("checked that we have an entry for it above"),
+                            );
+                        }
+
+                        progress(IncrementalProgress::FileUnchangedSkipped(
+                            relative_path.to_owned()));
+                        self.most_current.remove(&handle);
+                        continue;
+                    }
+                },
+                _ => {},
+            }
+
+            file.update_hash_from_disk(|(read, total)| {
+                progress(IncrementalProgress::Read(read, total));
+            })?;
+            let mut include = true;
+            if let Some(p) = previous {
+                include =
+                    self.compare_files_and_include(&file_raw, p, relative_path, &mut progress);
+                self.most_current.remove(&handle);
+            } else {
+                progress(IncrementalProgress::FileNew(relative_path.to_owned()));
+            }
+
+            if include {
+                result.update(handle, file_raw);
+            }
+        }
+
+        for missing in self.most_current.iter_with_context(&self.file_tree) {
+            let (path_absolute, _) = missing;
+            let path_relative = path_absolute.strip_prefix(&self.root)
+                .expect("Incremental root and FileTree root must match!");
+            progress(IncrementalProgress::FileRemoved(path_relative.to_owned()));
+        }
+
+        progress(IncrementalProgress::Finished);
+        Ok(result)
+    }
+
+    fn compare_files_and_include<P>(
+        &self,
+        on_disk: &FileRaw,
+        previous: &FileRaw,
+        relative_path: &path::Path,
+        progress: &mut P,
+    ) -> bool
+    where
+        P: FnMut(IncrementalProgress),
+    {
+        // TODO hash types might be different
+        if on_disk.hash_bytes() == previous.hash_bytes() {
+            progress(IncrementalProgress::FileMatch(relative_path.to_owned()));
+            return self.options.incremental_include_unchanged_files;
+        }
+
+        match (previous.mtime(), on_disk.mtime()) {
+            (None, _) => {
+                progress(IncrementalProgress::FileChanged(relative_path.to_owned()));
+            }
+            (Some(prev_mtime), Some(mtime)) if mtime > prev_mtime => {
+                progress(IncrementalProgress::FileChanged(relative_path.to_owned()));
+            }
+            (Some(prev_mtime), Some(mtime)) if mtime == prev_mtime => {
+                progress(IncrementalProgress::FileChangedCorrupted(
+                    relative_path.to_owned(),
+                ));
+            }
+            (Some(prev_mtime), Some(mtime)) if mtime < prev_mtime => {
+                progress(IncrementalProgress::FileChangedOlder(
+                    relative_path.to_owned(),
+                ));
+            }
+            _ => unreachable!("uncreachable, since we'd error upon a missing mtime"),
+        }
+
+        true
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::hashed_file::HashType;
     use crate::{pathmatcher::PathMatcherBuilder, test_utils::*};
     use crate::file_tree::FileTree;
     use pretty_assertions::assert_eq;
+
+    fn ftree_all_files() -> Vec<&'static str> {
+        return vec![
+            "file.txt",
+            "vid.mp4",
+            "subdir/foo.txt",
+            "subdir/chksum.md5",
+            "subdir/nested/bar.txt",
+            "subdir/nested/vid.mov",
+            "subdir/nested/nested/chksum.md5",
+            "subdir/nested/nested/cgi.bin",
+            "subdir/other/chksms.md5",
+            "subdir/other/file.txt",
+        ];
+    }
 
     fn setup_ftree() -> path::PathBuf {
         let test_path = testdir!();
         create_ftree(
             test_path.as_ref(),
-            "file.txt
-            vid.mp4
-            subdir/foo.txt
-            subdir/chksum.md5
-            subdir/nested/bar.txt
-            subdir/nested/vid.mov
-            subdir/nested/nested/chksum.md5
-            subdir/nested/nested/cgi.bin
-            subdir/other/chksms.md5
-            subdir/other/file.txt",
+            &ftree_all_files().join("\n"),
         );
 
         test_path
@@ -351,4 +470,334 @@ subdir/other/file.txt",
         );
 
     }
+
+    #[test]
+    fn checksum_files_visits_all_files() {
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let options = ChecksumHelperOptions::default();
+        let hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+        inc.discover_files(|_| {}).unwrap();
+        let new = inc.checksum_files(|_| {}).unwrap();
+        let cshd_str = new.to_str(inc.file_tree).unwrap();
+
+        assert_eq!(
+            "file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+            cshd_str_paths_only_sorted(&cshd_str),
+        );
+
+        assert_eq!(new.len(), 10);
+        assert_eq!(inc.most_current.len(), 0);
+        assert_eq!(inc.files_to_checksum, vec![]);
+    }
+
+    #[test]
+    fn checksum_files_respects_options_hash_type() {
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let expected = crate::hashed_file::HashType::Sha3_224;
+        let options = ChecksumHelperOptions{
+            hash_type: expected,
+            ..Default::default()
+        };
+        let hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+        let handle = inc.file_tree.add_file("vid.mp4").unwrap();
+        inc.files_to_checksum.push(handle.clone());
+
+        let new = inc.checksum_files(|_| {}).unwrap();
+        assert_eq!(expected, new.get(&handle).unwrap().hash_type());
+        assert_eq!(new.len(), 1);
+    }
+
+    fn most_current_all() -> &'static str {
+        return "# version 1
+1763239693.8727274,8,sha512,98dfdd998999f4e05f71e500559bd366e67c2039b8b2da3215ea80a16fa92033d2e471fa02aca7f232572d41913a912e5dd8f241bcd889b1482b1967f93e353a file.txt
+1763239693.8732224,7,sha512,d0fa60060582bca8845761653d41a4e60f13d00c458c745adc7b16e4c05afbc873fcce18fa37338d6ad65bbd6c4f4bd98f8fbfc8d9065237a7f739314ec1585d vid.mp4
+1763239693.8742228,17,sha512,16240544f3fe5b23107522f59a68814267dca8faa51acc37bb56031f8d431bd6ab8466fed0c5dc6322c83be4032b67f5cc1b87d9391f18a850f093f508c44c4f subdir/chksum.md5
+1763239693.873623,14,sha512,f05dcb8a07c2cbcd2dcee5a35d06efe95962e2d5d3e6f04452da2a7109d5082138c32ddde5bded2ea5796865721852beda24bf7eea901d4fa8aae62cc34e9b04 subdir/foo.txt
+1763239693.8771043,23,sha512,16da0970840dd6cc2e854709c10484ce2911ce260629e5ca584c728b2a6c03268403c8714f90564396bba5f2ac401566e139ce6f4b137865b1f0a23090bfa0a5 subdir/other/chksms.md5
+1763239693.8777964,21,sha512,10d2cfc0c6e314115f99cc95a31489c8c9d1934bc0e96f012d47f9c1a3be0e9f2550198efd8a06b972653db3cfeaf2214c3b6f344aa22bca6e57e864fcfc9f63 subdir/other/file.txt
+1763239693.8747134,21,sha512,3b62a1e6bf057a53e1d3e61486d5b9ba4bade9193700ab0ec65015cef91274aae08bd16422115183ef5922f15f01a1863accd0abe204b8917bf9c05b0d0686d5 subdir/nested/bar.txt
+1763239693.8753488,21,sha512,e374a8bbbfeaa038ddf2fcd8b62f2971607fd2c1d2e091c30410c73ad199ae8c8e0e319d33455f7547b246ee9792571dfb82821a8c8637caf6732ba2c9079108 subdir/nested/vid.mov
+1763239693.8765886,28,sha512,5045ee6bd5128311600b8807ea40a1f17feadbf14a10b30c815b5371d6fb45ed99e96c55f925dbb69aed8a9b01a4b658fd35e21a6e39e7ae84a85d3138ee21e4 subdir/nested/nested/cgi.bin
+1763239693.875868,31,sha512,879a1635ab8e8079238cb2471ed2c9c034430055482f93945f6a18a2340583a670e785df21477f35e02b8762f8d070a17365b0378f4345056c293dc41d044162 subdir/nested/nested/chksum.md5";
+    }
+
+    fn file_from_disk(
+        file_tree: &mut FileTree,
+        path: impl AsRef<path::Path>,
+        hash_type: HashType,
+    ) -> (EntryHandle, FileRaw) {
+        let handle = file_tree.add_file(path).unwrap();
+        let mut file_raw = FileRaw::bare(
+            handle.clone(),
+            hash_type,
+        );
+        let mut file = file_raw.with_context_mut(&file_tree);
+        file.update_size_and_mtime_from_disk().unwrap();
+        file.update_hash_from_disk(|_| {}).unwrap();
+
+        (handle, file_raw)
+    }
+
+    #[test]
+    fn checksum_files_respects_include_unchanged() {
+        let combinations = vec![
+            (true, "file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+"),
+            (false, "subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+"),
+        ];
+
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+
+        for (include_unchanged, expected) in combinations {
+            let options = ChecksumHelperOptions{
+                incremental_include_unchanged_files: include_unchanged,
+                ..Default::default()
+            };
+
+            let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+            let file_txt = file_from_disk(&mut ft, "file.txt", HashType::Sha512);
+            hc.update(file_txt.0, file_txt.1);
+            let subdir_nested_nested_cgi_bin =
+                file_from_disk(&mut ft, "subdir/nested/nested/cgi.bin", HashType::Sha512);
+            hc.update(subdir_nested_nested_cgi_bin.0, subdir_nested_nested_cgi_bin.1);
+
+            let mut inc = Incremental::new(
+                &test_path, &mut ft, &options, hc);
+
+            inc.discover_files(|_| {}).unwrap();
+            let new = inc.checksum_files(|_| {}).unwrap();
+            let cshd_str = new.to_str(inc.file_tree).unwrap();
+
+            assert_eq!(
+                expected,
+                cshd_str_paths_only_sorted(&cshd_str),
+            );
+        }
+    }
+
+    #[test]
+    fn checksum_files_respects_skip_unchanged() {
+        let combinations = vec![
+            (
+                true,
+                vec![
+                    IncrementalProgress::FileUnchangedSkipped(path::PathBuf::from("file.txt")),
+                    IncrementalProgress::FileUnchangedSkipped(path::PathBuf::from(
+                        "subdir/nested/nested/cgi.bin",
+                    )),
+                ],
+            ),
+            (false, vec![]),
+        ];
+
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+
+        for (skip_unchanged, expected) in combinations {
+            let options = ChecksumHelperOptions{
+                incremental_include_unchanged_files: true,
+                incremental_skip_unchanged: skip_unchanged,
+                ..Default::default()
+            };
+
+            let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+            let file_txt = file_from_disk(&mut ft, "file.txt", HashType::Sha512);
+            hc.update(file_txt.0, file_txt.1);
+            let subdir_nested_nested_cgi_bin =
+                file_from_disk(&mut ft, "subdir/nested/nested/cgi.bin", HashType::Sha512);
+            hc.update(subdir_nested_nested_cgi_bin.0, subdir_nested_nested_cgi_bin.1);
+
+            let mut inc = Incremental::new(
+                &test_path, &mut ft, &options, hc);
+
+            inc.discover_files(|_| {}).unwrap();
+            let mut skipped_callbacks = vec![];
+            let new = inc.checksum_files(|p| {
+                if let IncrementalProgress::FileUnchangedSkipped(_) = p {
+                    skipped_callbacks.push(p);
+                }
+            }).unwrap();
+            let cshd_str = new.to_str(inc.file_tree).unwrap();
+
+            assert_eq!(
+                expected,
+                skipped_callbacks);
+
+            assert_eq!(
+                "file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+                cshd_str_paths_only_sorted(&cshd_str),
+            );
+        }
+    }
+
+    #[test]
+    fn checksum_files_respects_skip_unchanged_and_incremental_unchanged() {
+        struct Combination{
+            skip_unchanged: bool,
+            include_unchanged: bool,
+            skipped_callbacks: Vec<IncrementalProgress>,
+            expected_files: &'static str,
+        }
+        let combinations = vec![
+            Combination {
+                skip_unchanged: true,
+                include_unchanged: true,
+                skipped_callbacks: vec![
+                    IncrementalProgress::FileUnchangedSkipped(path::PathBuf::from("file.txt")),
+                    IncrementalProgress::FileUnchangedSkipped(path::PathBuf::from(
+                        "subdir/nested/nested/cgi.bin",
+                    )),
+                ],
+                expected_files: "file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+            },
+            Combination {
+                skip_unchanged: true,
+                include_unchanged: false,
+                skipped_callbacks: vec![
+                    IncrementalProgress::FileUnchangedSkipped(path::PathBuf::from("file.txt")),
+                    IncrementalProgress::FileUnchangedSkipped(path::PathBuf::from(
+                        "subdir/nested/nested/cgi.bin",
+                    )),
+                ],
+                expected_files: "subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+            },
+            Combination {
+                skip_unchanged: false,
+                include_unchanged: true,
+                skipped_callbacks: vec![
+                ],
+                expected_files: "file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+            },
+            Combination {
+                skip_unchanged: false,
+                include_unchanged: false,
+                skipped_callbacks: vec![
+                ],
+                expected_files: "subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+            },
+        ];
+
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+
+        for expected in combinations {
+            let options = ChecksumHelperOptions{
+                incremental_include_unchanged_files: expected.include_unchanged,
+                incremental_skip_unchanged: expected.skip_unchanged,
+                ..Default::default()
+            };
+
+            let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+            let file_txt = file_from_disk(&mut ft, "file.txt", HashType::Sha512);
+            hc.update(file_txt.0, file_txt.1);
+            let subdir_nested_nested_cgi_bin =
+                file_from_disk(&mut ft, "subdir/nested/nested/cgi.bin", HashType::Sha512);
+            hc.update(subdir_nested_nested_cgi_bin.0, subdir_nested_nested_cgi_bin.1);
+
+            let mut inc = Incremental::new(
+                &test_path, &mut ft, &options, hc);
+
+            inc.discover_files(|_| {}).unwrap();
+            let mut skipped_callbacks = vec![];
+            let new = inc.checksum_files(|p| {
+                if let IncrementalProgress::FileUnchangedSkipped(_) = p {
+                    skipped_callbacks.push(p);
+                }
+            }).unwrap();
+            let cshd_str = new.to_str(inc.file_tree).unwrap();
+
+            assert_eq!(
+                expected.skipped_callbacks,
+                skipped_callbacks);
+
+            assert_eq!(
+                expected.expected_files,
+                cshd_str_paths_only_sorted(&cshd_str),
+            );
+        }
+    }
+
+    // TODO leftoff more checksum_files tests
 }

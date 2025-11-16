@@ -122,6 +122,7 @@ impl ChecksumHelper {
                         self.options.hash_type,
                     );
                     let mut file = file_raw.with_context_mut(&self.file_tree);
+
                     progress(IncrementalProgress::PreRead(v.relative_to_root.to_owned()));
                     file.update_size_and_mtime_from_disk()?;
                     file.update_hash_from_disk(|(read, total)| {

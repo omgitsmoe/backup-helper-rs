@@ -63,11 +63,19 @@ impl HashCollection {
         })
     }
 
+    pub fn root(&self) -> Option<&PathBuf> {
+        self.root_dir.as_ref()
+    }
+
     /// Set the root_dir of the HashCollection.
-    /// Note that this will not move any files. Instead it will change the relative
+    /// Note that this will not move any files. Instead, it will change the relative
     /// paths, which are serialized.
     pub fn relocate(&mut self, root_dir: impl AsRef<Path>) {
         self.root_dir = Some(root_dir.as_ref().to_path_buf());
+    }
+
+    pub fn name(&self) -> Option<&OsString> {
+        self.name.as_ref()
     }
 
     pub fn rename(&mut self, name: &OsStr) {
@@ -133,8 +141,16 @@ impl HashCollection {
         self.map.get(path_handle)
     }
 
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
     pub fn get_mut(&mut self, path_handle: &EntryHandle) -> Option<&mut FileRaw> {
         self.map.get_mut(path_handle)
+    }
+
+    pub fn remove(&mut self, path_handle: &EntryHandle) -> Option<FileRaw> {
+        self.map.remove(path_handle)
     }
 
     pub fn filter_missing(&mut self) -> Result<()> {
