@@ -1,5 +1,5 @@
 use crate::collection::HashCollection;
-use crate::hashed_file::FileRaw;
+use crate::hashed_file::{FileRaw, FileMut};
 use crate::file_tree::{FileTree, EntryHandle};
 use crate::gather::{filtered, VisitType};
 use crate::most_current::MostCurrentProgress;
@@ -192,7 +192,7 @@ impl<'a> Incremental<'a> {
             let mut include = true;
             if let Some(p) = previous {
                 include =
-                    self.compare_files_and_include(&file_raw, p, relative_path, &mut progress);
+                    self.compare_files_and_include(&file, p, relative_path, &mut progress)?;
                 self.most_current.remove(&handle);
             } else {
                 progress(IncrementalProgress::FileNew(relative_path.to_owned()));
@@ -216,18 +216,28 @@ impl<'a> Incremental<'a> {
 
     fn compare_files_and_include<P>(
         &self,
-        on_disk: &FileRaw,
+        on_disk: &FileMut,
         previous: &FileRaw,
         relative_path: &path::Path,
         progress: &mut P,
-    ) -> bool
+    ) -> Result<bool>
     where
         P: FnMut(IncrementalProgress),
     {
-        // TODO hash types might be different
-        if on_disk.hash_bytes() == previous.hash_bytes() {
+        let on_disk = on_disk.as_file();
+        let is_match = if on_disk.hash_type() != previous.hash_type() {
+            let on_disk_hash = on_disk.compute_hash_with(previous.hash_type(), |p| {
+                progress(IncrementalProgress::Read(p.0, p.1));
+            })?;
+
+            on_disk_hash == previous.hash_bytes()
+        } else {
+            on_disk.hash_bytes() == previous.hash_bytes()
+        };
+
+        if is_match {
             progress(IncrementalProgress::FileMatch(relative_path.to_owned()));
-            return self.options.incremental_include_unchanged_files;
+            return Ok(self.options.incremental_include_unchanged_files);
         }
 
         match (previous.mtime(), on_disk.mtime()) {
@@ -250,7 +260,7 @@ impl<'a> Incremental<'a> {
             _ => unreachable!("uncreachable, since we'd error upon a missing mtime"),
         }
 
-        true
+        Ok(true)
     }
 }
 
@@ -285,6 +295,23 @@ mod test {
         );
 
         test_path
+    }
+
+    fn setup_ftree_minimal() -> (path::PathBuf, String, filetime::FileTime) {
+        let test_path = testdir!();
+        let path_relative = "subdir/nested/nested/cgi.bin";
+        create_ftree(
+            test_path.as_ref(),
+            path_relative,
+        );
+
+        let filetime_cig_bin = filetime::FileTime::from_unix_time(69420, 3_300_000);
+        filetime::set_file_times(
+            &test_path.join(path_relative),
+            filetime_cig_bin,
+            filetime_cig_bin).unwrap();
+
+        (test_path, path_relative.to_owned(), filetime_cig_bin)
     }
 
     #[test]
@@ -607,6 +634,7 @@ vid.mp4
             }).unwrap();
             let cshd_str = new.to_str(inc.file_tree).unwrap();
 
+            assert!(inc.most_current.is_empty());
             assert_eq!(
                 expected,
                 skipped_callbacks);
@@ -740,6 +768,7 @@ vid.mp4
             }).unwrap();
             let cshd_str = new.to_str(inc.file_tree).unwrap();
 
+            assert!(inc.most_current.is_empty());
             assert_eq!(
                 expected.skipped_callbacks,
                 skipped_callbacks);
@@ -751,5 +780,416 @@ vid.mp4
         }
     }
 
-    // TODO leftoff more checksum_files tests
+    #[test]
+    fn checksum_files_file_match() {
+        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        let options = ChecksumHelperOptions::default();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+69420.0033,28,sha512,5045ee6bd5128311600b8807ea40a1f17feadbf14a10b30c815b5371d6fb45ed99e96c55f925dbb69aed8a9b01a4b658fd35e21a6e39e7ae84a85d3138ee21e4 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    28,
+                    28,
+                ),
+                IncrementalProgress::FileMatch(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_new() {
+        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let hc = HashCollection::new(None::<&&str>, None).unwrap();
+
+        let options = ChecksumHelperOptions::default();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+69420.0033,28,sha512,5045ee6bd5128311600b8807ea40a1f17feadbf14a10b30c815b5371d6fb45ed99e96c55f925dbb69aed8a9b01a4b658fd35e21a6e39e7ae84a85d3138ee21e4 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    28,
+                    28,
+                ),
+                IncrementalProgress::FileNew(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_removed() {
+        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        std::fs::remove_file(test_path.join(&path_cgi_bin)).unwrap();
+
+        let options = ChecksumHelperOptions::default();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+        assert!(new.is_empty());
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::FileRemoved(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_changed_no_mtime() {
+        let (test_path, path_cgi_bin, filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let mut cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        cgi_bin.1.set_mtime(None);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        let path = test_path.join(&path_cgi_bin);
+        std::fs::write(&path, "foo").unwrap();
+        filetime::set_file_times(&path, filetime_cig_bin, filetime_cig_bin).unwrap();
+
+        let options = ChecksumHelperOptions::default();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+69420.0033,3,sha512,f7fbba6e0636f890e56fbbf3283e524c6fa3204ae298382d624741d0dc6638326e282c41be5e4254d8820772c5518a2c5a8c0c7f7eda19594a7eb539453e1ed7 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    3,
+                    3,
+                ),
+                IncrementalProgress::FileChanged(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_changed_with_mtime() {
+        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        let path = test_path.join(&path_cgi_bin);
+        let newer_filetime = filetime::FileTime::from_unix_time(
+            133337, 1_330_000);
+        std::fs::write(&path, "foo").unwrap();
+        filetime::set_file_times(&path, newer_filetime, newer_filetime).unwrap();
+
+        let options = ChecksumHelperOptions::default();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+133337.00133,3,sha512,f7fbba6e0636f890e56fbbf3283e524c6fa3204ae298382d624741d0dc6638326e282c41be5e4254d8820772c5518a2c5a8c0c7f7eda19594a7eb539453e1ed7 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    3,
+                    3,
+                ),
+                IncrementalProgress::FileChanged(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_changed_older() {
+        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        let path = test_path.join(&path_cgi_bin);
+        let older_filetime = filetime::FileTime::from_unix_time(
+            1337, 1_330_000);
+        std::fs::write(&path, "foo").unwrap();
+        filetime::set_file_times(&path, older_filetime, older_filetime).unwrap();
+
+        let options = ChecksumHelperOptions::default();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+1337.00133,3,sha512,f7fbba6e0636f890e56fbbf3283e524c6fa3204ae298382d624741d0dc6638326e282c41be5e4254d8820772c5518a2c5a8c0c7f7eda19594a7eb539453e1ed7 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    3,
+                    3,
+                ),
+                IncrementalProgress::FileChangedOlder(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_changed_corrupted() {
+        let (test_path, path_cgi_bin, filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        let path = test_path.join(&path_cgi_bin);
+        std::fs::write(&path, "foo").unwrap();
+        filetime::set_file_times(&path, filetime_cig_bin, filetime_cig_bin).unwrap();
+
+        let options = ChecksumHelperOptions::default();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+69420.0033,3,sha512,f7fbba6e0636f890e56fbbf3283e524c6fa3204ae298382d624741d0dc6638326e282c41be5e4254d8820772c5518a2c5a8c0c7f7eda19594a7eb539453e1ed7 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    3,
+                    3,
+                ),
+                IncrementalProgress::FileChangedCorrupted(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_changed_different_hash_type() {
+        let (test_path, path_cgi_bin, filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Md5);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        let path = test_path.join(&path_cgi_bin);
+        std::fs::write(&path, "foo").unwrap();
+        filetime::set_file_times(&path, filetime_cig_bin, filetime_cig_bin).unwrap();
+
+        let options = ChecksumHelperOptions::default();
+        assert_ne!(options.hash_type, HashType::Md5);
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+69420.0033,3,sha512,f7fbba6e0636f890e56fbbf3283e524c6fa3204ae298382d624741d0dc6638326e282c41be5e4254d8820772c5518a2c5a8c0c7f7eda19594a7eb539453e1ed7 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    3,
+                    3,
+                ),
+                // second read due to different hash type -> recompute
+                IncrementalProgress::Read(
+                    3,
+                    3,
+                ),
+                IncrementalProgress::FileChangedCorrupted(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
+
+    #[test]
+    fn checksum_files_file_match_different_hash_type() {
+        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Md5);
+        hc.update(cgi_bin.0, cgi_bin.1);
+
+        let options = ChecksumHelperOptions::default();
+        assert_ne!(options.hash_type, HashType::Md5);
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+
+        inc.discover_files(|_| {}).unwrap();
+        let mut callbacks = vec![];
+        let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+
+        assert_eq!(
+            new.to_str(inc.file_tree).unwrap(),
+            "\
+# version 1
+69420.0033,28,sha512,5045ee6bd5128311600b8807ea40a1f17feadbf14a10b30c815b5371d6fb45ed99e96c55f925dbb69aed8a9b01a4b658fd35e21a6e39e7ae84a85d3138ee21e4 subdir/nested/nested/cgi.bin
+",
+        );
+
+        assert_eq!(
+            callbacks,
+            vec![
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Read(
+                    28,
+                    28,
+                ),
+                // second read due to different hash type -> recompute
+                IncrementalProgress::Read(
+                    28,
+                    28,
+                ),
+                IncrementalProgress::FileMatch(
+                    path::PathBuf::from(&path_cgi_bin),
+                ),
+                IncrementalProgress::Finished,
+            ],
+        );
+    }
 }

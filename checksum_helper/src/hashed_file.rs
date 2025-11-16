@@ -101,15 +101,19 @@ impl FileRaw {
 
     pub fn mtime_str(&self) -> Option<String> {
         self.mtime.map(|m| {
-            // NOTE: to_string returns the string with the OS' epoch
-            //       so we need to do our own conversion that is portable
-            let usecs = m.unix_seconds() as f64;
-            let nanosecs = m.nanoseconds();
-            const SECS_PER_NS: f64 = 1.0 / 1_000_000_000.0;
-            let fract = (nanosecs as f64) * SECS_PER_NS;
-            let combined = usecs + fract;
-            format!("{}", combined)
+            Self::file_time_to_unix_time_float(m)
         })
+    }
+
+    pub(crate) fn file_time_to_unix_time_float(time: filetime::FileTime) -> String {
+        // NOTE: to_string returns the string with the OS' epoch
+        //       so we need to do our own conversion that is portable
+        let usecs = time.unix_seconds() as f64;
+        let nanosecs = time.nanoseconds();
+        const SECS_PER_NS: f64 = 1.0 / 1_000_000_000.0;
+        let fract = (nanosecs as f64) * SECS_PER_NS;
+        let combined = usecs + fract;
+        format!("{}", combined)
     }
 
     pub fn size(&self) -> Option<u64> {
@@ -485,6 +489,23 @@ mod test {
             raw,
             expected_hex,
         )
+    }
+
+    #[test]
+    fn file_time_to_unix_time_float() {
+        assert_eq!(
+            FileRaw::file_time_to_unix_time_float(
+                FileTime::from_unix_time(1337, 1_330_000)),
+            "1337.00133");
+        assert_eq!(
+            FileRaw::file_time_to_unix_time_float(
+                FileTime::from_unix_time(1, 0)),
+            "1");
+        // rounds due to floating point precision
+        assert_eq!(
+            FileRaw::file_time_to_unix_time_float(
+                FileTime::from_unix_time(694201337, 694_201_337)),
+            "694201337.6942014");
     }
 
     #[test]
