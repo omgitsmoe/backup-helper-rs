@@ -1,8 +1,10 @@
 use crate::file_tree::{EntryHandle, ErrorKind, FileTree};
-use crate::hashed_file::{FileRaw, File, HashType, VerifyResult};
+use crate::hash_type::HashType;
+use crate::hashed_file::{FileRaw, File, VerifyResult};
 use crate::alias::{Map, MapIter};
 
-use log::{debug, error, info, warn};
+// TODO logging
+// use log::{debug, error, info, warn};
 
 use std::cmp::{Eq, PartialEq};
 use std::convert::TryFrom;
@@ -28,41 +30,11 @@ pub struct HashCollection {
     name: Option<OsString>,
     map: Map<EntryHandle, FileRaw>,
     mtime: Option<filetime::FileTime>,
-    // TODO provide restore_mtime method, so afer relocate + write
-    //      one can reset it when nothing else has changed
 }
 
 // TODO: add datetime/mtime of the collection itself to the file, then we don't have to
 //       rely on mtime for cshd >=v1 files
 impl HashCollection {
-    pub fn new(
-        path: Option<&impl AsRef<Path>>,
-        mtime: Option<filetime::FileTime>,
-    ) -> Result<HashCollection> {
-        Ok(HashCollection {
-            map: Map::new(),
-            name: match path {
-                Some(p) => Some(
-                    p.as_ref()
-                        .file_name()
-                        .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
-                        .to_owned(),
-                ),
-                None => None,
-            },
-            root_dir: match path {
-                Some(p) => Some(
-                    p.as_ref()
-                        .parent()
-                        .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
-                        .to_owned(),
-                ),
-                None => None,
-            },
-            mtime,
-        })
-    }
-
     pub fn root(&self) -> Option<&PathBuf> {
         self.root_dir.as_ref()
     }
@@ -122,11 +94,47 @@ impl HashCollection {
         }
     }
 
-    pub fn update(&mut self, path_handle: EntryHandle, hashed_file: FileRaw) {
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn filter_missing(&mut self) -> Result<()> {
+        todo!("filter out all files that do no longer exist")
+    }
+
+    pub(crate) fn new(
+        path: Option<&impl AsRef<Path>>,
+        mtime: Option<filetime::FileTime>,
+    ) -> Result<HashCollection> {
+        Ok(HashCollection {
+            map: Map::new(),
+            name: match path {
+                Some(p) => Some(
+                    p.as_ref()
+                        .file_name()
+                        .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
+                        .to_owned(),
+                ),
+                None => None,
+            },
+            root_dir: match path {
+                Some(p) => Some(
+                    p.as_ref()
+                        .parent()
+                        .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
+                        .to_owned(),
+                ),
+                None => None,
+            },
+            mtime,
+        })
+    }
+
+    pub(crate) fn update(&mut self, path_handle: EntryHandle, hashed_file: FileRaw) {
         self.map.insert(path_handle, hashed_file);
     }
 
-    pub fn contains_path(&self, path: impl AsRef<Path>, file_tree: &FileTree) -> bool {
+    pub(crate) fn contains_path(&self, path: impl AsRef<Path>, file_tree: &FileTree) -> bool {
         let path = path.as_ref();
         assert!(path.is_relative(), "Only paths relative to file_tree allowed!");
         let handle = file_tree.find(path);
@@ -137,27 +145,19 @@ impl HashCollection {
         self.get(&handle.unwrap()).is_some()
     }
 
-    pub fn get(&self, path_handle: &EntryHandle) -> Option<&FileRaw> {
+    pub(crate) fn get(&self, path_handle: &EntryHandle) -> Option<&FileRaw> {
         self.map.get(path_handle)
     }
 
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    pub fn get_mut(&mut self, path_handle: &EntryHandle) -> Option<&mut FileRaw> {
+    pub(crate) fn get_mut(&mut self, path_handle: &EntryHandle) -> Option<&mut FileRaw> {
         self.map.get_mut(path_handle)
     }
 
-    pub fn remove(&mut self, path_handle: &EntryHandle) -> Option<FileRaw> {
+    pub(crate) fn remove(&mut self, path_handle: &EntryHandle) -> Option<FileRaw> {
         self.map.remove(path_handle)
     }
 
-    pub fn filter_missing(&mut self) -> Result<()> {
-        todo!("filter out all files that do no longer exist")
-    }
-
-    pub fn from_str(
+    pub(crate) fn from_str(
         str: &str,
         collection_path: impl AsRef<Path>,
         file_tree: &mut FileTree,
@@ -166,7 +166,7 @@ impl HashCollection {
     }
 
     // TODO separate into Reader?
-    pub fn from_disk(path: &Path, file_tree: &mut FileTree) -> Result<HashCollection> {
+    pub(crate) fn from_disk(path: &Path, file_tree: &mut FileTree) -> Result<HashCollection> {
         let file = fs::File::open(path)?;
         let mtime = filetime::FileTime::from_last_modification_time(&file.metadata()?);
         let root = path
@@ -200,11 +200,11 @@ impl HashCollection {
         }
     }
 
-    pub fn serialize<W: Write>(&self, writer: &mut W, file_tree: &FileTree) -> Result<()> {
+    pub(crate) fn serialize<W: Write>(&self, writer: &mut W, file_tree: &FileTree) -> Result<()> {
         serialize::serialize(self, writer, file_tree, true)
     }
 
-    pub fn to_str(&self, file_tree: &FileTree) -> Result<String> {
+    pub(crate) fn to_str(&self, file_tree: &FileTree) -> Result<String> {
         let mut buf = vec![];
         self.serialize(&mut buf, file_tree)?;
         String::from_utf8(buf).map_err(|e| HashCollectionError::InvalidUtf8(e.into_bytes()))
@@ -257,8 +257,8 @@ impl HashCollection {
     ///            Path passed to it in verification. The path is relative
     ///            to the `file_tree.root()`.
     /// `progress`: Progress callback that receives a `VerifyProgress`
-    ///             before and after procressing the file.
-    pub fn verify<F, P>(&self, file_tree: &FileTree, include: F, mut progress: P) -> Result<()>
+    ///             before and after processing the file.
+    pub(crate) fn verify<F, P>(&self, file_tree: &FileTree, include: F, mut progress: P) -> Result<()>
     where
         F: Fn(&Path) -> bool,
         P: FnMut(VerifyProgress),
@@ -309,7 +309,7 @@ impl HashCollection {
         Ok(())
     }
 
-    pub fn iter_with_context<'a>(&'a self, file_tree: &'a FileTree) -> HashCollectionIter<'a> {
+    pub(crate) fn iter_with_context<'a>(&'a self, file_tree: &'a FileTree) -> HashCollectionIter<'a> {
         HashCollectionIter {
             map_iter: self.map.iter(),
             file_tree,
@@ -483,7 +483,7 @@ impl From<crate::hashed_file::HashedFileError> for HashCollectionError {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::hashed_file::HashType;
+    use crate::hash_type::HashType;
     use crate::test_utils::*;
     use hashes::sha2::sha512;
     use pretty_assertions::assert_eq;

@@ -61,7 +61,7 @@ fn main() {
     let mut ch = checksum_helper::ChecksumHelper::new(&abs_path)
         .expect("Failed to create ChecksumHelper");
 
-    ch.build_most_current(|p| {
+    let inc = ch.incremental(|p| {
         println!("{:?}", p);
-    }).expect("Failed to build most current");
+    }).unwrap();
 }

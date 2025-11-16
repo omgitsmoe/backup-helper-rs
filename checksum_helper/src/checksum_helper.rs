@@ -1,5 +1,8 @@
-use crate::collection::{HashCollection, HashCollectionError, VerifyProgress, HashCollectionWriter};
-use crate::hashed_file::{FileRaw, HashType};
+use crate::collection::{
+    HashCollection, HashCollectionError, HashCollectionIter, HashCollectionWriter, VerifyProgress,
+};
+use crate::hash_type::HashType;
+use crate::hashed_file::FileRaw;
 use crate::file_tree::FileTree;
 use crate::gather::{filtered, VisitType};
 use crate::pathmatcher::{PathMatcher, PathMatcherBuilder};
@@ -23,7 +26,6 @@ pub struct ChecksumHelper {
     most_current: Option<HashCollection>,
 }
 
-// TODO: need to give out &FileTree, otherwise no one can serialize a HashCollection
 impl ChecksumHelper {
     pub fn new(root: &path::Path) -> Result<ChecksumHelper> {
         if root.is_relative() {
@@ -245,6 +247,20 @@ impl ChecksumHelper {
         }
     }
 
+    pub fn iter_collection<'a>(&'a self, collection: &'a HashCollection) -> HashCollectionIter<'a> {
+        collection.iter_with_context(&self.file_tree)
+    }
+
+    /// Verify all files matching predicated `include` in the `HashCollection`
+    ///
+    /// Warning: The passed `file_tree` has to match the file_tree used for the
+    ///          added files in the `HashCollection`.
+    ///
+    /// `include`: Predicate function which determines whether to include the
+    ///            Path passed to it in verification. The path is relative
+    ///            to the `file_tree.root()`.
+    /// `progress`: Progress callback that receives a `VerifyProgress`
+    ///             before and after processing the file.
     pub fn verify<F, P>(&self, collection: &HashCollection, include: F, progress: P) -> Result<()>
     where
         F: Fn(&path::Path) -> bool,

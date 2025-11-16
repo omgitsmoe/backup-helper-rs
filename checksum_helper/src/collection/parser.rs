@@ -1,7 +1,8 @@
 use super::{is_path_above_hash_file, HashCollection, HashCollectionError, Result};
 
 use crate::file_tree::{is_absolute, FileTree};
-use crate::hashed_file::{FileRaw, HashType};
+use crate::hash_type::HashType;
+use crate::hashed_file::FileRaw;
 
 use hex;
 use pathdiff::diff_paths;

@@ -1,5 +1,5 @@
 use crate::collection::HashCollection;
-use crate::hashed_file::{FileRaw, File};
+use crate::hashed_file::FileRaw;
 use crate::file_tree::{FileTree, EntryHandle};
 use crate::gather::{filtered, VisitType};
 use crate::most_current::MostCurrentProgress;
@@ -269,7 +269,7 @@ impl<'a> Incremental<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::hashed_file::HashType;
+    use crate::hash_type::HashType;
     use crate::{pathmatcher::PathMatcherBuilder, test_utils::*};
     use crate::file_tree::FileTree;
     use pretty_assertions::assert_eq;
@@ -508,7 +508,7 @@ vid.mp4
     fn checksum_files_respects_options_hash_type() {
         let test_path = setup_ftree();
         let mut ft = FileTree::new(&test_path).unwrap();
-        let expected = crate::hashed_file::HashType::Sha3_224;
+        let expected = HashType::Sha3_224;
         let options = ChecksumHelperOptions{
             hash_type: expected,
             ..Default::default()

@@ -1,4 +1,5 @@
 use crate::file_tree::{EntryHandle, FileTree};
+use crate::hash_type::{HashType};
 
 use filetime::FileTime;
 use sha2::Digest;
@@ -43,100 +44,14 @@ impl Error for HashedFileError {
     }
 }
 
+
 #[derive(Debug, PartialEq, Clone)]
-pub struct FileRaw {
+pub(crate) struct FileRaw {
     path: EntryHandle,
     mtime: Option<FileTime>,
     size: Option<u64>,
     hash_type: HashType,
     hash_bytes: Vec<u8>,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum HashType {
-    Md5,
-    Sha1,
-    Sha224,
-    Sha256,
-    Sha384,
-    Sha512,
-    Sha3_224,
-    Sha3_256,
-    Sha3_384,
-    Sha3_512,
-    // NOTE: these require more attention due to having varying output sizes
-    // Shake128,
-    // Shake256,
-    // Blake2s,
-    // Blake2b,
-}
-
-impl HashType {
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            Self::Sha3_224 => "sha3_224",
-            Self::Md5 => "md5",
-            // Self::Shake128 => "shake_128",
-            // Self::Shake256 => "shake_256",
-            // Self::Blake2s => "blake2s",
-            // Self::Blake2b => "blake2b",
-            Self::Sha3_512 => "sha3_512",
-            Self::Sha1 => "sha1",
-            Self::Sha224 => "sha224",
-            Self::Sha3_256 => "sha3_256",
-            Self::Sha256 => "sha256",
-            Self::Sha512 => "sha512",
-            Self::Sha3_384 => "sha3_384",
-            Self::Sha384 => "sha384",
-        }
-    }
-}
-
-impl TryFrom<&str> for HashType {
-    type Error = String;
-
-    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
-        match value {
-            "sha3_224" => Ok(Self::Sha3_224),
-            "md5" => Ok(Self::Md5),
-            // "shake_128" => Ok(Self::Shake128),
-            // "shake_256" => Ok(Self::Shake256),
-            // "blake2s" => Ok(Self::Blake2s),
-            // "blake2b" => Ok(Self::Blake2b),
-            "sha3_512" => Ok(Self::Sha3_512),
-            "sha1" => Ok(Self::Sha1),
-            "sha224" => Ok(Self::Sha224),
-            "sha3_256" => Ok(Self::Sha3_256),
-            "sha256" => Ok(Self::Sha256),
-            "sha512" => Ok(Self::Sha512),
-            "sha3_384" => Ok(Self::Sha3_384),
-            "sha384" => Ok(Self::Sha384),
-            _ => Err(format!("Unsupported hash type: {}", value)),
-        }
-    }
-}
-
-impl TryFrom<&std::ffi::OsStr> for HashType {
-    type Error = String;
-
-    fn try_from(value: &std::ffi::OsStr) -> std::result::Result<Self, Self::Error> {
-        let Some(str) = value.to_str() else {
-            return Err(format!("Unsupported hash type: {:?}", value));
-        };
-        Self::try_from(str)
-    }
-}
-
-impl Into<&'static str> for HashType {
-    fn into(self) -> &'static str {
-        self.to_str()
-    }
-}
-
-impl ToString for HashType {
-    fn to_string(&self) -> String {
-        self.to_str().to_owned()
-    }
 }
 
 impl FileRaw {
@@ -240,7 +155,7 @@ pub struct File<'a> {
     context: &'a FileTree,
 }
 
-pub struct FileMut<'a> {
+pub(crate) struct FileMut<'a> {
     file: &'a mut FileRaw,
     context: &'a FileTree,
 }
@@ -292,34 +207,32 @@ impl<'a> FileMut<'a> {
 }
 
 impl<'a> File<'a> {
-    pub fn from_raw(file: &'a FileRaw, file_tree: &'a FileTree) -> File<'a> {
-        File { file, context: file_tree }
-    }
-
-    // NOTE: Use a closure here so we don't run into borrow/lifetime issues
-    pub fn raw_mut<C, R>(&mut self, func: C) -> R
-    where
-        C: FnOnce(&FileRaw) -> R,
-    {
-        func(self.file)
-    }
-
-    pub fn raw<C, R>(&self, func: C) -> R
-    where
-        C: FnOnce(&FileRaw) -> R,
-    {
-        func(self.file)
-    }
-
     // TODO this should probably return the path relative to the collection root, not
     //      to the file tree
-    //      or just return an absolute path?
+    //      or only provide an absolute path?
     fn relative_path(&self) -> path::PathBuf {
         self.file.relative_path(self.context)
     }
 
     fn absolute_path(&self) -> path::PathBuf {
         self.file.absolute_path(self.context)
+    }
+
+    // NOTE: need to expose `FileRaw` fields again, since only `File` is public
+    pub fn mtime(&self) -> Option<FileTime> {
+        self.file.mtime()
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.file.size()
+    }
+
+    pub fn hash_type(&self) -> HashType {
+        self.file.hash_type()
+    }
+
+    pub fn hash_bytes(&self) -> &[u8] {
+        self.file.hash_bytes()
     }
 
     fn fetch_size_and_mtime(&self) -> Result<(u64, FileTime)> {
@@ -396,6 +309,26 @@ impl<'a> File<'a> {
             progress((bytes_read, bytes_total));
         })
     }
+
+    pub(crate) fn from_raw(file: &'a FileRaw, file_tree: &'a FileTree) -> File<'a> {
+        File { file, context: file_tree }
+    }
+
+    // NOTE: Use a closure here so we don't run into borrow/lifetime issues
+    pub(crate) fn raw_mut<C, R>(&mut self, func: C) -> R
+    where
+        C: FnOnce(&FileRaw) -> R,
+    {
+        func(self.file)
+    }
+
+    pub(crate) fn raw<C, R>(&self, func: C) -> R
+    where
+        C: FnOnce(&FileRaw) -> R,
+    {
+        func(self.file)
+    }
+
 }
 
 #[derive(Debug, PartialEq)]
