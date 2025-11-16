@@ -20,7 +20,7 @@ mod serialize;
 mod writer;
 
 pub use serialize::sort_serialized;
-pub use writer::HashCollectionWriter;
+pub(crate) use writer::HashCollectionWriter;
 
 type Result<T> = std::result::Result<T, HashCollectionError>;
 

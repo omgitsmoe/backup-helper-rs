@@ -107,9 +107,25 @@ impl ChecksumHelper {
         let filename = default_filename(&root, "missing", "_missing_");
         let mut hc = HashCollection::new(
             Some(&root.join(filename)), None)?;
+        // dyanmic borrow checking needed, since we use it in the predicate closure
+        // as well as in our for loop while the closure is still alive
+        let progress = std::cell::RefCell::new(progress);
+        let mut ignored_num = 0usize;
+        // NOTE: does currently not follow the same pattern of discover first,
+        //       then checksum files after like in `incremental`
         let iter = filtered(
             &root, &self.options.all_files_matcher,
-            |e| !e.ignored);
+            |e| {
+                if e.ignored {
+                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(
+                        e.entry.relative_to_root.to_owned()));
+                    ignored_num += 1;
+
+                    return false;
+                }
+
+                true
+            });
         for v in iter {
             let v = v?;
             if let VisitType::File(v) = v {
@@ -119,21 +135,21 @@ impl ChecksumHelper {
 
                 // TODO make it easier to create a hashed file
                 let entry = self.file_tree.add_file(&v.relative_to_root)?;
-                let mut file_raw = FileRaw::bare(
-                    entry.clone(),
-                    self.options.hash_type,
-                );
+                let mut file_raw = FileRaw::bare(entry.clone(), self.options.hash_type);
                 let mut file = file_raw.with_context_mut(&self.file_tree);
 
-                progress(IncrementalProgress::PreRead(v.relative_to_root.to_owned()));
+                progress.borrow_mut()(IncrementalProgress::PreRead(v.relative_to_root.to_owned()));
                 file.update_size_and_mtime_from_disk()?;
                 file.update_hash_from_disk(|(read, total)| {
-                    progress(IncrementalProgress::Read(read, total));
+                    progress.borrow_mut()(IncrementalProgress::Read(read, total));
                 })?;
+                progress.borrow_mut()(IncrementalProgress::FileNew(v.relative_to_root.to_owned()));
 
                 hc.update(entry, file_raw);
             }
         }
+
+        progress.borrow_mut()(IncrementalProgress::Finished);
 
         Ok(hc)
     }
@@ -821,14 +837,39 @@ e37276a93ac1e99188340e3f61e3673b  file.rs").unwrap();
                         testdir.join("test.md5"),
                     ),
                 ),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("file.rs")
+                ),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("root.mp4")
+                ),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("test.md5")
+                ),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("foo/bar")
+                ),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("foo/foo.bin")
+                ),
                 IncrementalProgress::PreRead(
                     path::PathBuf::from("foo/foo.txt"),
                 ),
                 IncrementalProgress::Read(11, 11),
+                IncrementalProgress::FileNew(
+                    path::PathBuf::from("foo/foo.txt"),
+                ),
                 IncrementalProgress::PreRead(
                     path::PathBuf::from("bar/baz/baz_2025-06-28.foo"),
                 ),
                 IncrementalProgress::Read(26, 26),
+                IncrementalProgress::FileNew(
+                    path::PathBuf::from("bar/baz/baz_2025-06-28.foo"),
+                ),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("bar/baz/save.sav")
+                ),
+                IncrementalProgress::Finished,
             }
         );
 
