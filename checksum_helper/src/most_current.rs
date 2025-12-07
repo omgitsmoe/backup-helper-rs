@@ -39,8 +39,10 @@ where
         most_current.merge(hc)?;
     }
 
-    // TODO filter out files that are no longer on disk
-    // + callback?
+    if options.most_current_filter_deleted {
+        // TODO + callback?
+        most_current.filter_missing(file_tree)?;
+    }
 
     Ok(most_current)
 }
@@ -683,5 +685,122 @@ file.rs",
             }
         ));
         assert!(was_called);
+    }
+
+    fn setup_dir_two_hash_files_with_deleted() -> (std::path::PathBuf, Vec<&'static str>) {
+        let testdir = testdir!();
+        create_ftree(
+            &testdir,
+            "\
+foo/bar/baz/file.txt
+foo/bar/bar.mp4
+foo/foo.bin
+bar/baz/save.sav
+file.rs",
+        );
+
+        // missing, should be taken from md5:
+        // 1765124822.268275,15,sha512,2cff1435df6bb662a8297cc28f6b00803f91b8dc49d879099e19596b95319a7c2b8a8643ff090ed520f59efc5d5d9a3d9a2c4602dec2fd0996fd60a725947e17 foo/bar/bar.mp4
+        // baz/file.txt should also be taken from md5 since mtime is newer
+        let root_cshd_contents = "\
+# version 1
+1765124822.2688851,16,sha512,5b7f0dd92e529aa88471152757a796a548244c2330123a5fe9eb237fac38e2daffd22d765901c0f8af7bc466ed178d635cb31f323fdbc61806291526e7581df1 bar/baz/save.sav
+1765124822.2695565,7,sha512,617cf33d1fda9f6f15d686c41cfb03ef959a6296956cf9275c99a2890bce44033d77f2995e2f6c080d156e4af681333dc2314c17eec2667a5fb7639ffd41c986 file.rs
+1765124822.2679887,20,sha512,368ade34bd90afe3db2a9a655e883288aef03284cb40481def21b62a9a0b66a7d048a3264c836d6f48fa536daa319e9acb53e21ad6cea3982ad77c90174e8939 foo/bar/baz/file.txt
+1765124822.2691188,13,sha512,7d7cabd45d04fcc5b8609c01eecf46f05fa205fc44d99e23568fae9d80ff787fb47d26886b2ea6259d0a5d76ef657feeeb3103d851343da5ef322ce98ca24617 bar/other.txt
+1765124822.2685325,11,sha512,847f8f7a2df6539773aa192eb7e449b26cb765aeea13e66010be6ae14a447bfcea4ef99628dffd2dbcd17c624164c521692f43e5e8894955d0fa393b86112b44 foo/foo.bin
+1765124822.269339,7,sha512,d0fa60060582bca8845761653d41a4e60f13d00c458c745adc7b16e4c05afbc873fcce18fa37338d6ad65bbd6c4f4bd98f8fbfc8d9065237a7f739314ec1585d vid.mp4\
+";
+        std::fs::write(testdir.join("root.cshd"), root_cshd_contents).unwrap();
+
+        let foo_bar_file_md5_contents = "\
+d4ca4c74d827424ca5e6cb552cc039d3 *bar.mp4
+ac06ffd974d80119666da2b17d1595c9 *baz/file.txt\
+";
+        std::fs::write(
+            testdir.join("foo").join("bar").join("file.md5"),
+            foo_bar_file_md5_contents,
+        )
+        .unwrap();
+
+        let deleted = vec![
+            "bar/other.txt",
+            "vid.mp4",
+        ];
+        (testdir, deleted)
+    }
+
+    #[test]
+    fn update_most_current_merges_discovered_hash_files() {
+        let (testdir, _deleted_relative) = setup_dir_two_hash_files_with_deleted();
+        let options = ChecksumHelperOptions {
+            most_current_filter_deleted: false,
+            ..Default::default()
+        };
+        let mut ft = FileTree::new(&testdir).unwrap();
+
+        let most_current = update_most_current(&testdir, &mut ft, &options, |_| {}).unwrap();
+
+        let expected = "\
+# version 1
+1765124822.2688851,16,sha512,5b7f0dd92e529aa88471152757a796a548244c2330123a5fe9eb237fac38e2daffd22d765901c0f8af7bc466ed178d635cb31f323fdbc61806291526e7581df1 bar/baz/save.sav
+1765124822.2695565,7,sha512,617cf33d1fda9f6f15d686c41cfb03ef959a6296956cf9275c99a2890bce44033d77f2995e2f6c080d156e4af681333dc2314c17eec2667a5fb7639ffd41c986 file.rs
+,,md5,ac06ffd974d80119666da2b17d1595c9 foo/bar/baz/file.txt
+1765124822.2691188,13,sha512,7d7cabd45d04fcc5b8609c01eecf46f05fa205fc44d99e23568fae9d80ff787fb47d26886b2ea6259d0a5d76ef657feeeb3103d851343da5ef322ce98ca24617 bar/other.txt
+1765124822.2685325,11,sha512,847f8f7a2df6539773aa192eb7e449b26cb765aeea13e66010be6ae14a447bfcea4ef99628dffd2dbcd17c624164c521692f43e5e8894955d0fa393b86112b44 foo/foo.bin
+1765124822.269339,7,sha512,d0fa60060582bca8845761653d41a4e60f13d00c458c745adc7b16e4c05afbc873fcce18fa37338d6ad65bbd6c4f4bd98f8fbfc8d9065237a7f739314ec1585d vid.mp4
+,,md5,d4ca4c74d827424ca5e6cb552cc039d3 foo/bar/bar.mp4
+";
+
+        assert_eq!(
+            most_current.to_str(&ft).unwrap(),
+            expected,
+        );
+    }
+
+    #[test]
+    fn update_most_current_filters_deleted_files_by_default() {
+        let (testdir, deleted_relative) = setup_dir_two_hash_files_with_deleted();
+        let options = ChecksumHelperOptions {
+            ..Default::default()
+        };
+        let mut ft = FileTree::new(&testdir).unwrap();
+
+        let most_current = update_most_current(&testdir, &mut ft, &options, |_| {}).unwrap();
+
+
+        for deleted_path in deleted_relative {
+            assert!(!most_current.contains_path(deleted_path, &ft));
+        }
+
+        let expected = "\
+# version 1
+1765124822.2688851,16,sha512,5b7f0dd92e529aa88471152757a796a548244c2330123a5fe9eb237fac38e2daffd22d765901c0f8af7bc466ed178d635cb31f323fdbc61806291526e7581df1 bar/baz/save.sav
+1765124822.2695565,7,sha512,617cf33d1fda9f6f15d686c41cfb03ef959a6296956cf9275c99a2890bce44033d77f2995e2f6c080d156e4af681333dc2314c17eec2667a5fb7639ffd41c986 file.rs
+,,md5,ac06ffd974d80119666da2b17d1595c9 foo/bar/baz/file.txt
+1765124822.2685325,11,sha512,847f8f7a2df6539773aa192eb7e449b26cb765aeea13e66010be6ae14a447bfcea4ef99628dffd2dbcd17c624164c521692f43e5e8894955d0fa393b86112b44 foo/foo.bin
+,,md5,d4ca4c74d827424ca5e6cb552cc039d3 foo/bar/bar.mp4
+";
+
+        assert_eq!(
+            most_current.to_str(&ft).unwrap(),
+            expected,
+        );
+    }
+
+    #[test]
+    fn update_most_current_respects_keep_deleted_option() {
+        let (testdir, deleted_relative) = setup_dir_two_hash_files_with_deleted();
+        let options = ChecksumHelperOptions {
+            most_current_filter_deleted: false,
+            ..Default::default()
+        };
+        let mut ft = FileTree::new(&testdir).unwrap();
+
+        let most_current = update_most_current(&testdir, &mut ft, &options, |_| {}).unwrap();
+
+        for deleted_path in deleted_relative {
+            assert!(most_current.contains_path(deleted_path, &ft));
+        }
     }
 }

@@ -102,8 +102,14 @@ impl HashCollection {
         self.map.is_empty()
     }
 
-    pub fn filter_missing(&mut self) -> Result<()> {
-        todo!("filter out all files that do no longer exist")
+    pub fn filter_missing(&mut self, file_tree: &FileTree) -> Result<()> {
+        self.map
+            .retain(|k, _v| {
+                let file_path = file_tree.absolute_path(k);
+                std::fs::exists(file_path).unwrap_or(false)
+            });
+
+        Ok(())
     }
 
     pub(crate) fn new(
@@ -1139,5 +1145,49 @@ abcdefff foo/xer.mp4
         assert_eq!(file.raw(|f| f.absolute_path(&ft)), expected_path);
 
         assert!(iter.next().is_none());
+    }
+
+    fn setup_fill_missing() -> (std::path::PathBuf, HashCollection, FileTree, Vec<&'static str>) {
+        let testdir = testdir!();
+        let (hc, ft, _expected_serialization) = setup_minimal_hc(&testdir);
+        let relative_paths = vec![
+            "foo/bar/baz.txt",
+            "bar/foo.txt",
+            "xer.mp4",
+        ];
+        create_ftree(
+            &testdir,
+            "\
+foo/bar/baz.txt
+bar/foo.txt
+xer.mp4");
+
+
+        (testdir, hc, ft, relative_paths)
+    }
+
+    #[test]
+    fn filter_missing() {
+        let (testdir, mut hc, ft, relative_paths) = setup_fill_missing();
+
+        for p in &relative_paths {
+            assert!(hc.contains_path(p, &ft));
+        }
+
+        assert!(relative_paths.len() > 1);
+        let (keep, remove) = relative_paths.split_at(relative_paths.len() / 2);
+        for p in remove {
+            std::fs::remove_file(testdir.join(p)).unwrap();
+        }
+
+        hc.filter_missing(&ft).unwrap();
+
+
+        for p in remove {
+            assert!(!hc.contains_path(p, &ft));
+        }
+        for p in keep {
+            assert!(hc.contains_path(p, &ft));
+        }
     }
 }

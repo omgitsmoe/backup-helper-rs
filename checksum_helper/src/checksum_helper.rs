@@ -359,7 +359,6 @@ pub struct ChecksumHelperOptions {
 
     /// Whether the most_current hash file should filter out all files that are
     /// not found on disk at the time of generation.
-    // TODO use this
     pub most_current_filter_deleted: bool,
 
     /// Allow/block list like matching for hash files which will be used
