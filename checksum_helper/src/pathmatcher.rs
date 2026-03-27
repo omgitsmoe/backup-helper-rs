@@ -6,6 +6,7 @@ use std::path;
 
 type Result<T> = std::result::Result<T, PathMatcherError>;
 
+#[derive(Debug, Clone)]
 pub struct PathMatcher {
     allow_list: GlobSet,
     block_list: GlobSet,

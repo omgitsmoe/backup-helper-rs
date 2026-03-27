@@ -241,6 +241,9 @@ impl HashCollection {
         // NOTE: should be a nop
         other.relocate(self.root_dir.as_ref().expect("checked above"));
 
+        // TODO: decide on a file by file basis based on the stored mtime
+        //       and only fall back to the collection mtime if no mtime
+        //       is stored
         let keep_ours = match (self.mtime, other.mtime) {
             (Some(our_mtime), Some(their_mtime)) => our_mtime > their_mtime,
             (None, Some(_)) => false,
@@ -338,8 +341,8 @@ impl HashCollection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HashProgress {
-    bytes_read: u64,
-    bytes_total: u64,
+    pub bytes_read: u64,
+    pub bytes_total: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,18 +354,26 @@ pub enum VerifyProgress<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyProgressCommon<'a> {
-    tree_root: &'a Path,
-    relative_path: &'a Path,
-    file_number_processed: u64,
-    file_number_total: u64,
-    size_processed_bytes: u64,
-    size_total_bytes: u64,
+    pub tree_root: &'a Path,
+    pub relative_path: &'a Path,
+    pub file_number_processed: u64,
+    pub file_number_total: u64,
+    /// The number of bytes processed so far.
+    ///
+    /// Note that only files which have size information stored in the
+    /// checksum file count towards the processed bytes.
+    pub size_processed_bytes: u64,
+    /// The number of bytes to process in total.
+    ///
+    /// Note that only files which have size information stored in the
+    /// checksum file count towards the total bytes to process.
+    pub size_total_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyProgressPost<'a> {
-    progress: VerifyProgressCommon<'a>,
-    result: VerifyResult,
+    pub progress: VerifyProgressCommon<'a>,
+    pub result: VerifyResult,
 }
 
 fn is_path_above_hash_file(path: &str) -> bool {
