@@ -4,10 +4,11 @@ use crate::file_tree::FileTree;
 use crate::gather::{Gather, VisitType};
 
 use std::path;
+use std::time::SystemTime;
 
 type Result<T> = std::result::Result<T, ChecksumHelperError>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MostCurrentProgress {
     /// Found a hash file that will be included in the most current hash file.
     FoundFile(path::PathBuf),
@@ -28,10 +29,27 @@ where
     P: FnMut(MostCurrentProgress),
 {
     let root = root.as_ref();
-    let discover_result = discover_hash_files(root, options, &mut progress)?;
+    let mut discover_result = discover_hash_files(root, options, &mut progress)?;
     let most_current_path = root.join(default_filename(root, "most_current", ""));
     let mut most_current = HashCollection::new(Some(&most_current_path), None)
         .expect("creating an empty hash file collection must succeed");
+
+
+    fn mtime(p: &std::path::Path) -> Option<SystemTime> {
+        std::fs::metadata(p).and_then(|m| m.modified()).ok()
+    }
+
+    // NOTE: sort by ascending mtime, so the newer collection overwrite
+    //       the entries of older ones (even if no file mtime is present)
+    //       (not loading the files as HashCollection, since they could be quite large)
+    discover_result.hash_file_paths.sort_by(|a, b| {
+        match (mtime(a), mtime(b)) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
 
     for hash_file_path in discover_result.hash_file_paths {
         progress(MostCurrentProgress::MergeHashFile(hash_file_path.clone()));
@@ -802,5 +820,107 @@ ac06ffd974d80119666da2b17d1595c9 *baz/file.txt\
         for deleted_path in deleted_relative {
             assert!(most_current.contains_path(deleted_path, &ft));
         }
+    }
+
+    #[test]
+    fn update_most_current_keeps_hashes_with_newest_collection_mtime() {
+        let testdir = testdir!();
+
+        // NOTE: no individual file mtimes, so they don't influence the merge
+        let oldest = "\
+,md5,deadbeef4620b91ad9384857bc9c1234 file.rs
+,md5,deadbeef4620b91ad9384857bc9c1234 foo/bar.txt
+,md5,deadbeef4620b91ad9384857bc9c1234 xer/bar/file.txt
+,md5,deadbeef4620b91ad9384857bc9c1234 oldest.mp4";
+        let oldest_path = testdir.join("oldest.cshd");
+        std::fs::write(&oldest_path, oldest).unwrap();
+        filetime::set_file_mtime(&oldest_path, filetime::FileTime::from_unix_time(1234, 0))
+            .unwrap();
+
+        let middle = "\
+,md5,deadbeef4620b91ad9384857bc9c3333 file.rs
+,md5,deadbeef4620b91ad9384857bc9c3333 foo/bar.txt
+,md5,deadbeef4620b91ad9384857bc9c3333 bar/baz.bin
+,md5,deadbeef4620b91ad9384857bc9c3333 middle.mp4";
+        let middle_path = testdir.join("middle.cshd");
+        std::fs::write(&middle_path, middle).unwrap();
+        filetime::set_file_mtime(&middle_path, filetime::FileTime::from_unix_time(3333, 0))
+            .unwrap();
+
+        let newest = "\
+,md5,deadbeef4620b91ad9384857bc9c6789 foo/bar.txt
+,md5,deadbeef4620b91ad9384857bc9c6789 bar/baz.bin
+,md5,deadbeef4620b91ad9384857bc9c6789 newest.mp4";
+        let newest_path = testdir.join("newest.cshd");
+        std::fs::write(&newest_path, newest).unwrap();
+        filetime::set_file_mtime(&newest_path, filetime::FileTime::from_unix_time(6789, 0))
+            .unwrap();
+
+        let options = ChecksumHelperOptions {
+            most_current_filter_deleted: false,
+            ..Default::default()
+        };
+        let mut ft = FileTree::new(&testdir).unwrap();
+
+        let most_current = update_most_current(&testdir, &mut ft, &options, |_| {}).unwrap();
+        assert!(!most_current.is_empty());
+
+        let oldest_hash = hex::decode("deadbeef4620b91ad9384857bc9c1234").unwrap();
+        let middle_hash = hex::decode("deadbeef4620b91ad9384857bc9c3333").unwrap();
+        let newest_hash = hex::decode("deadbeef4620b91ad9384857bc9c6789").unwrap();
+
+        assert_eq!(
+            most_current
+                .get(&ft.find("file.rs").unwrap())
+                .unwrap()
+                .hash_bytes(),
+            middle_hash,
+        );
+
+        assert_eq!(
+            most_current
+                .get(&ft.find("foo/bar.txt").unwrap())
+                .unwrap()
+                .hash_bytes(),
+            newest_hash
+        );
+
+        assert_eq!(
+            most_current
+                .get(&ft.find("bar/baz.bin").unwrap())
+                .unwrap()
+                .hash_bytes(),
+            newest_hash,
+        );
+
+        assert_eq!(
+            most_current
+                .get(&ft.find("xer/bar/file.txt").unwrap())
+                .unwrap()
+                .hash_bytes(),
+            oldest_hash,
+        );
+
+        assert_eq!(
+            most_current
+                .get(&ft.find("oldest.mp4").unwrap())
+                .unwrap()
+                .hash_bytes(),
+            oldest_hash,
+        );
+        assert_eq!(
+            most_current
+                .get(&ft.find("middle.mp4").unwrap())
+                .unwrap()
+                .hash_bytes(),
+            middle_hash,
+        );
+        assert_eq!(
+            most_current
+                .get(&ft.find("newest.mp4").unwrap())
+                .unwrap()
+                .hash_bytes(),
+            newest_hash,
+        );
     }
 }
