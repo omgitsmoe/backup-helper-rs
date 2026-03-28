@@ -73,8 +73,10 @@ impl FileTree {
     }
 
     pub fn relative_path_to(&self, entry: &EntryHandle, base: impl AsRef<Path>) -> PathBuf {
+        let base = base.as_ref();
+        debug_assert!(base.starts_with(self.absolute_path(&self.root())), "Base must be a subpath of the file tree");
+
         let absolute_path = self.absolute_path(entry);
-        debug_assert!(absolute_path.starts_with(&base), "Base must be a subpath of the file tree");
         pathdiff::diff_paths(&absolute_path, base)
             .expect("BUG: should always succeed, since base must be \
                           a subpath of the file tree")
