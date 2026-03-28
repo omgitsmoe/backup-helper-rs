@@ -24,6 +24,7 @@ pub(crate) use writer::HashCollectionWriter;
 
 type Result<T> = std::result::Result<T, HashCollectionError>;
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct HashCollection {
     root_dir: Option<PathBuf>,
     // TODO just change this to a String?
@@ -42,7 +43,7 @@ impl HashCollection {
     /// Set the root_dir of the HashCollection.
     /// Note that this will not move any files. Instead, it will change the relative
     /// paths, which are serialized.
-    pub fn relocate(&mut self, root_dir: impl AsRef<Path>) {
+    pub(crate) fn relocate(&mut self, root_dir: impl AsRef<Path>) {
         self.root_dir = Some(root_dir.as_ref().to_path_buf());
     }
 
@@ -102,11 +103,33 @@ impl HashCollection {
         self.map.is_empty()
     }
 
-    pub fn filter_missing(&mut self, file_tree: &FileTree) -> Result<()> {
+    pub(crate) fn filter_missing(&mut self, file_tree: &FileTree) -> Result<()> {
         self.map
             .retain(|k, _v| {
                 let file_path = file_tree.absolute_path(k);
                 std::fs::exists(file_path).unwrap_or(false)
+            });
+
+        Ok(())
+    }
+
+    /// Filter [`self`] retaining all entries which fulfill [`predicate`].
+    ///
+    /// Note that the [`Path`] argument passed to [`predicate`] is relative to the
+    /// [`Self::root`].
+    pub(crate) fn filter<P>(&mut self, file_tree: &FileTree, predicate: P) -> Result<()>
+    where
+        P: Fn(&Path) -> bool,
+    {
+        let Some(root) = self.root().cloned() else {
+            return Err(HashCollectionError::InvalidCollectionRoot(self.root().cloned()));
+        };
+
+        dbg!(&root);
+        self.map
+            .retain(|path_handle, _v| {
+                let file_path = file_tree.relative_path_to(path_handle, &root);
+                predicate(&file_path)
             });
 
         Ok(())
@@ -1200,5 +1223,34 @@ xer.mp4");
         for p in keep {
             assert!(hc.contains_path(p, &ft));
         }
+    }
+
+    #[test]
+    fn filter() {
+        let testdir = testdir!();
+        let (mut hc, ft, _) = setup_minimal_hc(&testdir);
+        hc.relocate(&testdir);
+
+        hc.filter(&ft, |p| {
+            p.starts_with("foo/")
+        }).unwrap();
+
+        assert_eq!(hc.len(), 1);
+        assert!(hc.contains_path("foo/bar/baz.txt", &ft));
+    }
+
+    #[test]
+    fn filter_errors_on_missing_root() {
+        let testdir = testdir!();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let ft = FileTree::new(&testdir).unwrap();
+
+        let result = hc.filter(&ft, |_| true);
+
+
+        assert!(matches!(
+            result,
+            Err(HashCollectionError::InvalidCollectionRoot(None))
+        ));
     }
 }

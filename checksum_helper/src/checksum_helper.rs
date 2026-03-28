@@ -234,7 +234,15 @@ impl ChecksumHelper {
         })
     }
 
-    pub fn build_most_current<P>(&mut self, progress: P) -> Result<()>
+    /// Build a checksum file containing all the most current hashes found in all
+    /// checksum files under [`ChecksumHelper::root`].
+    ///
+    /// The received `&HashCollection` can be written by using [`ChecksumHelper::write_collection`]
+    /// or [`ChecksumHelper::write_into`].
+    ///
+    /// - `progress`: Progress callback that receives a [`MostCurrentProgress`]
+    ///   when progress is made.
+    pub fn build_most_current<P>(&mut self, progress: P) -> Result<&HashCollection>
     where
         P: FnMut(MostCurrentProgress),
     {
@@ -247,13 +255,7 @@ impl ChecksumHelper {
             )?);
         }
 
-        if let Some(most_current) = &mut self.most_current {
-            let mut writer = HashCollectionWriter::new();
-            writer.write(most_current, &self.file_tree)?;
-            Ok(())
-        } else {
-            Err(ChecksumHelperError::InvalidMostCurrentHashFile)
-        }
+        Ok(self.most_current.as_ref().expect("assigned above, must be Some"))
     }
 
     pub fn iter_collection<'a>(&'a self, collection: &'a HashCollection) -> HashCollectionIter<'a> {
@@ -276,13 +278,13 @@ impl ChecksumHelper {
         Ok(())
     }
 
-    /// Verify all files matching predicated `include` in the `HashCollection`
+    /// Verify all files matching predicated `include` in the [`HashCollection`]
     ///
-    /// `include`: Predicate function which determines whether to include the
-    ///            Path passed to it in verification. The path is relative
-    ///            to the `file_tree.root()`.
-    /// `progress`: Progress callback that receives a `VerifyProgress`
-    ///             before and after processing the file.
+    /// - `include`: Predicate function which determines whether to include the
+    ///   Path passed to it in verification. The path is relative
+    ///   to the `file_tree.root()`.
+    /// - `progress`: Progress callback that receives a [`VerifyProgress`]
+    ///   before and after processing the file.
     pub fn verify<F, P>(&self, collection: &HashCollection, include: F, progress: P) -> Result<()>
     where
         F: Fn(&path::Path) -> bool,
@@ -293,6 +295,17 @@ impl ChecksumHelper {
         Ok(())
     }
 
+    /// Verify all found checksum files found in the [`ChecksumHelper::root`].
+    ///
+    /// Verification results and progress in general is communicated via
+    /// the [`progress`] callback.
+    ///
+    /// - `include`: Predicate function which determines whether to include the
+    ///   Path passed to it in verification. The path is relative
+    ///   to the `file_tree.root()`.
+    /// - `progress`: Progress callback that receives a [`VerifyRootProgress`]
+    ///   when building the most current checksum file
+    ///   and on verification progress.
     pub fn verify_root<F, P>(&mut self, include: F, mut progress: P) -> Result<()>
     where
         F: Fn(&path::Path) -> bool,
@@ -319,13 +332,51 @@ impl ChecksumHelper {
         Ok(())
     }
 
-    fn move_collection() {
-        // should use copy_collection internally
-        todo!("move a hash collection; relocating paths, but preserving mtime of the collection")
-    }
+    /// Rebasing a [`HashCollection`] into a new `destination_directory` directory,
+    /// changes its location to the `destination_directory` and removes all entries
+    /// beyond the new location.
+    ///
+    /// If `destination_directory` is relative, it is interpreted relative to the collection root.
+    pub fn rebase_into(&self, collection: &mut HashCollection, destination_directory: impl AsRef<path::Path>) -> Result<()> {
+        if collection.root().is_none() {
+            return Err(ChecksumHelperError::HashCollectionError(
+                HashCollectionError::InvalidCollectionRoot(collection.root().cloned()),
+            ));
+        }
 
-    fn copy_collection() {
-        todo!("copy a hash collection; relocating paths, but preserving mtime of the collection")
+        let old_directory = collection.root().expect("checked above");
+
+        let destination_directory = {
+            let dest = destination_directory.as_ref();
+            if dest.is_absolute() {
+                dest.to_path_buf()
+            } else {
+                old_directory.join(dest)
+            }
+        };
+
+        let diff = pathdiff::diff_paths(&destination_directory, old_directory);
+        if diff.is_none() {
+            return Err(ChecksumHelperError::InvalidRebaseDestination((
+                old_directory.to_path_buf(),
+                destination_directory,
+            )));
+        }
+
+        let diff = diff.expect("checked above");
+        if diff.starts_with("..") {
+            return Err(ChecksumHelperError::InvalidRebaseDestination((
+                old_directory.to_path_buf(),
+                destination_directory,
+            )));
+        }
+
+        collection.relocate(destination_directory);
+        collection.filter(&self.file_tree, |p| {
+            !matches!(p.components().next(), Some(path::Component::ParentDir))
+        })?;
+
+        Ok(())
     }
 
     pub fn move_path() {
@@ -486,6 +537,7 @@ pub struct CheckMissingResult {
 pub enum ChecksumHelperError {
     RootIsRelative(path::PathBuf),
     InvalidMostCurrentHashFile,
+    InvalidRebaseDestination((path::PathBuf, path::PathBuf)),
     HashCollectionError(crate::collection::HashCollectionError),
     HashedFileError(crate::hashed_file::HashedFileError),
     GatherError(crate::gather::Error),
@@ -506,6 +558,17 @@ impl fmt::Display for ChecksumHelperError {
             ChecksumHelperError::HashedFileError(..) => write!(f, "hashed file error"),
             ChecksumHelperError::GatherError(..) => write!(f, "gather files error"),
             ChecksumHelperError::FileTreeError(..) => write!(f, "file tree error"),
+            ChecksumHelperError::InvalidRebaseDestination((ref original, ref destination)) => {
+                write!(
+                    f,
+                    concat!(
+                        "invalid rebase operation from '{:?}' to '{:?}': ",
+                        "expected a path that is a subpath of the ChecksumHelper root ",
+                        "and has a relative path to the original checksum file location"
+                    ),
+                    original, destination
+                )
+            }
         }
     }
 }
@@ -954,47 +1017,6 @@ root.mp4
 file.rs",
         );
 
-        // let cshd_root = "\
-        // 1774640824.4384162,sha512,617cf33d1fda9f6f15d686c41cfb03ef959a6296956cf9275c99a2890bce44033d77f2995e2f6c080d156e4af681333dc2314c17eec2667a5fb7639ffd41c986 file.rs
-        // 1774640824.438311,sha512,6ab2a146e0608e139ecfa9406a318035ccafa050b77a09819c1ca4cf8ccc19a68359166b93373daffe33c2d2e71e7e1ad9692600557be9b6cbf5134a699a55b7 root.mp4
-        // 1774640824.4381008,sha512,242acb52c5a6ddd30b700a892a051900d8749e406c205382859219639c4f11979bcd631030eac530caa8121fb2b38f76a995671d75aafd2380cb261533886f3d bar/baz_2025-06-28.foo
-        // 1774640824.438212,sha512,7d7cabd45d04fcc5b8609c01eecf46f05fa205fc44d99e23568fae9d80ff787fb47d26886b2ea6259d0a5d76ef657feeeb3103d851343da5ef322ce98ca24617 bar/other.txt
-        // 1774640824.4378712,sha512,dd1a6810dc91e4b4f6a55606ace0dc793a91608dfe776a7077014a420d16e59ccbd6fd70d1bcce70a926ee0f6631bff86092e4aa56902f74cf3baa5251800c84 bar/baz/baz_2025-06-28.foo
-        // 1774640824.4379904,sha512,5b7f0dd92e529aa88471152757a796a548244c2330123a5fe9eb237fac38e2daffd22d765901c0f8af7bc466ed178d635cb31f323fdbc61806291526e7581df1 bar/baz/save.sav
-        // 1774640824.4376843,sha512,847f8f7a2df6539773aa192eb7e449b26cb765aeea13e66010be6ae14a447bfcea4ef99628dffd2dbcd17c624164c521692f43e5e8894955d0fa393b86112b44 foo/foo.bin
-        // 1774640824.4375193,sha512,05c2926bd5af39e0054a35776924c1af9a960da676a3590fffdc82071f9476184dd126460c416a220872b6e76e3b7801320cb9ebfb3b935fccbccfeb1bfc9a29 foo/foo.txt
-        // 1774640824.4374044,sha512,2cff1435df6bb662a8297cc28f6b00803f91b8dc49d879099e19596b95319a7c2b8a8643ff090ed520f59efc5d5d9a3d9a2c4602dec2fd0996fd60a725947e17 foo/bar/bar.mp4
-        // 1774640824.4372783,sha512,d361f5a1ddf2da60264aa38fcacc6702e58107fdec8cc9cd1df19cfe7d7cf33ae45eda3c48e1e3f48c382bec2804fc6ed4751b1f330777ab443c2e122c17c20c foo/bar/bar.test
-        // 1774640824.4370198,sha512,a2005e4d2d686bd755654073d50c1a421fffb3ddc2e8904e929c01bf6aeb5c9973be2f6bd23ef29ef614aec9252abcbf95da79853ba42469ab869d748ac6d012 foo/bar/baz/file.bin
-        // 1774640824.4371605,sha512,368ade34bd90afe3db2a9a655e883288aef03284cb40481def21b62a9a0b66a7d048a3264c836d6f48fa536daa319e9acb53e21ad6cea3982ad77c90174e8939 foo/bar/baz/file.txt
-        // 1774640824.4384162,md5,8ad5f2184620b91ad9384857bc9c1370 file.rs
-        // 1774640824.438311,md5,e2e676034d46bfa72dd35482ee8b13dc root.mp4
-        // 1774640873.3941352,md5,04a4a142183e3a29f4c1534ffdc2d648 verify_root_2026-03-27.cshd
-        // 1774640824.4381008,md5,4b2eb3e4b5fb7741320b7a87bf720eca bar/baz_2025-06-28.foo
-        // 1774640824.438212,md5,96c4a1331ef7bf12846403e8fd5889ce bar/other.txt
-        // 1774640824.4378712,md5,a2ec00356c963af73814724b3376816d bar/baz/baz_2025-06-28.foo
-        // 1774640824.4379904,md5,10b2d370ae88690e8923e0261b556de9 bar/baz/save.sav
-        // 1774640824.4376843,md5,207174fb3b77ee29ea3d88ecbfd6885a foo/foo.bin
-        // 1774640824.4375193,md5,df42718d7eeae06c17b7280e5aece23c foo/foo.txt
-        // 1774640824.4374044,md5,d4ca4c74d827424ca5e6cb552cc039d3 foo/bar/bar.mp4
-        // 1774640824.4372783,md5,9078064e1ecedbf0852b51996522049b foo/bar/bar.test
-        // 1774640824.4370198,md5,0c078ca63b3ec5d6e599f97d82faf064 foo/bar/baz/file.bin
-        // 1774640824.4371605,md5,ac06ffd974d80119666da2b17d1595c9 foo/bar/baz/file.txt
-        // 1774640824.4384162,sha256,47b87f0dcbaa440876109db0ffc55478049eb13151b87616893cc2b4e99837c8 file.rs
-        // 1774640824.438311,sha256,a1cde1106e788b3811c4f238892319775166c00cd6721ac7f26a1177a8ebf305 root.mp4
-        // 1774640873.3941352,sha256,455cdc91706b5cf7c44468d6e1eadce2c741402455326e515c31a57603119fb3 verify_root_2026-03-27.cshd
-        // 1774640899.0435686,sha256,6be2440bb6debc062b63f8fff977dbb32866732cc41199c4c6d0b9cf9381d9ab verify_root_2026-03-27T204819.cshd
-        // 1774640824.4381008,sha256,d7a760256371fcb13da806678d1feb3b8f3567e262e99de451fe24aaa4108e4e bar/baz_2025-06-28.foo
-        // 1774640824.438212,sha256,934ec8eb0d640b5652cbfa46372f581c53b4fa40da7ffb46d773af206fa5a6a6 bar/other.txt
-        // 1774640824.4378712,sha256,e66f40a6224b0462c8a91b002d2bc8574787984e3f5754aab8bb3891ca9224cd bar/baz/baz_2025-06-28.foo
-        // 1774640824.4379904,sha256,11623d616ebcb16d0a4adbb801426cdf475c734e6558e35c560b2910382c2b4d bar/baz/save.sav
-        // 1774640824.4376843,sha256,ee15ee25da94386f5851fe226ec6f5bd59cd1f451fc1a2f29bab79bdacf8ae21 foo/foo.bin
-        // 1774640824.4375193,sha256,233f41d7c3d047dd574bcca261d9f9087869e82afe1e498e92594568325681a7 foo/foo.txt
-        // 1774640824.4374044,sha256,0da7a46c5f77f42bba3f26ebfcb37a6cda87ad64bbaaa3ec033f1695237ac13a foo/bar/bar.mp4
-        // 1774640824.4372783,sha256,50f46217112133af42c91ce489a17ee5a98f4b7ec3cba0ba0fadba06e4e22136 foo/bar/bar.test
-        // 1774640824.4370198,sha256,49fa8ad5377ddc53ffccc3a76207487694ce5861eae62afde38c8016079c2c75 foo/bar/baz/file.bin
-        // 1774640824.4371605,sha256,8586beeed9a89d3ec07af5ebbdc982c47b548652e4b467269d0c54b655919f50 foo/bar/baz/file.txt
-        // ";
         testdir
     }
 
@@ -1751,5 +1773,61 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         .unwrap();
 
         assert_eq!(progress_index, progress_expected.len());
+    }
+
+
+    fn setup_dir_rebase_into() -> (std::path::PathBuf, std::path::PathBuf) {
+        let testdir = testdir!();
+
+        let cshd_path = testdir.join("root.cshd");
+        std::fs::write(&cshd_path,
+        "# version 1
+1774640824.438311,,md5,deadbeef4d46bfa72dd35482ee8b13dc does_not_exist
+1774640824.4384162,7,md5,deadbeef4620b91ad9384857bc9c1370 file.rs
+1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 bar/baz/save.sav
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz_2025-06-28.foo
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz/does_not_exist
+1774640824.4372783,,md5,deadbeef1ecedbf0852b51996522049b foo/bar/bar.test").unwrap();
+
+        (testdir, cshd_path)
+    }
+
+    #[test]
+    fn rebase_into() {
+        let (testdir, cshd_path) = setup_dir_rebase_into();
+        let mut ch = ChecksumHelper::new(&testdir).unwrap();
+        let mut hc = ch.read_collection(&cshd_path).unwrap();
+
+        ch.rebase_into(&mut hc, testdir.join("bar")).unwrap();
+        // ch.rebase_into(&mut hc, path::Path::new("bar/")).unwrap();
+
+        let actual = hc.to_str(&ch.file_tree).unwrap();
+        let expected = "\
+# version 1
+1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 baz/save.sav
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz_2025-06-28.foo
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist
+";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rebase_into_interprets_relative_path_as_relative_to_collection() {
+        let (testdir, cshd_path) = setup_dir_rebase_into();
+        let mut ch = ChecksumHelper::new(&testdir).unwrap();
+        let mut hc = ch.read_collection(&cshd_path).unwrap();
+
+        ch.rebase_into(&mut hc, path::Path::new("bar/")).unwrap();
+
+        let actual = hc.to_str(&ch.file_tree).unwrap();
+        let expected = "\
+# version 1
+1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 baz/save.sav
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz_2025-06-28.foo
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist
+";
+
+        assert_eq!(actual, expected);
     }
 }
