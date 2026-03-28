@@ -125,7 +125,6 @@ impl HashCollection {
             return Err(HashCollectionError::InvalidCollectionRoot(self.root().cloned()));
         };
 
-        dbg!(&root);
         self.map
             .retain(|path_handle, _v| {
                 let file_path = file_tree.relative_path_to(path_handle, &root);
@@ -1085,7 +1084,6 @@ abcdefff foo/xer.mp4
             |_| true,
             |p| {
                 let expected = expected_progress[index];
-                dbg!(index);
                 assert_eq!(p, expected);
                 index += 1;
             },

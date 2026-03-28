@@ -8,6 +8,7 @@ use crate::hashed_file::FileRaw;
 use crate::incremental::Incremental;
 use crate::most_current::update_most_current;
 use crate::pathmatcher::{PathMatcher, PathMatcherBuilder};
+use crate::utils;
 
 use std::cell::RefCell;
 use std::cmp::{Eq, PartialEq};
@@ -349,9 +350,9 @@ impl ChecksumHelper {
         let destination_directory = {
             let dest = destination_directory.as_ref();
             if dest.is_absolute() {
-                dest.to_path_buf()
+                utils::normalize_path(dest)
             } else {
-                old_directory.join(dest)
+                utils::normalize_path(old_directory.join(dest))
             }
         };
 
@@ -363,8 +364,10 @@ impl ChecksumHelper {
             )));
         }
 
-        let diff = diff.expect("checked above");
-        if diff.starts_with("..") {
+        // Rebases are only allowed under the self.root().
+        // Otherwise, our path storage in self.file_tree can't build/store the paths properly.
+        let diff_ch_root = pathdiff::diff_paths(&destination_directory, self.root());
+        if diff_ch_root.is_none() || diff_ch_root.expect("checked before").starts_with("..") {
             return Err(ChecksumHelperError::InvalidRebaseDestination((
                 old_directory.to_path_buf(),
                 destination_directory,
@@ -1793,13 +1796,12 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
     }
 
     #[test]
-    fn rebase_into() {
+    fn rebase_into_moving_down() {
         let (testdir, cshd_path) = setup_dir_rebase_into();
         let mut ch = ChecksumHelper::new(&testdir).unwrap();
         let mut hc = ch.read_collection(&cshd_path).unwrap();
 
         ch.rebase_into(&mut hc, testdir.join("bar")).unwrap();
-        // ch.rebase_into(&mut hc, path::Path::new("bar/")).unwrap();
 
         let actual = hc.to_str(&ch.file_tree).unwrap();
         let expected = "\
@@ -1807,6 +1809,35 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
 1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 baz/save.sav
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz_2025-06-28.foo
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist
+";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rebase_into_moving_up() {
+        let testdir = testdir!();
+
+        let subdir = testdir.join("bar");
+        std::fs::create_dir(&subdir).unwrap();
+        let cshd_path = subdir.join("root.cshd");
+        std::fs::write(&cshd_path,
+        "# version 1
+1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 baz/save.sav
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz_2025-06-28.foo
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist").unwrap();
+
+        let mut ch = ChecksumHelper::new(&testdir).unwrap();
+        let mut hc = ch.read_collection(&cshd_path).unwrap();
+
+        ch.rebase_into(&mut hc, "..").unwrap();
+
+        let actual = hc.to_str(&ch.file_tree).unwrap();
+        let expected = "\
+# version 1
+1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 bar/baz/save.sav
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz_2025-06-28.foo
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz/does_not_exist
 ";
 
         assert_eq!(actual, expected);
@@ -1829,5 +1860,59 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
 ";
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rebase_into_collection_missing_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let ch = ChecksumHelper::new(&cwd).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+
+        let result = ch.rebase_into(&mut hc, cwd.join("bar"));
+        assert!(
+            matches!(
+                result,
+                Err(ChecksumHelperError::HashCollectionError(HashCollectionError::InvalidCollectionRoot(None)))
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn rebase_into_no_relative_path_to_destination() {
+        let cwd = std::env::current_dir().unwrap();
+        let ch = ChecksumHelper::new(&cwd).unwrap();
+
+        let root = path::Path::new("C:\\foo\\bar");
+        let mut hc = HashCollection::new(Some(&root.join("foo.cshd")), None).unwrap();
+
+        let path_not_relative_to_cwd = path::Path::new("D:\\foo\\bar");
+        let result = ch.rebase_into(&mut hc, &path_not_relative_to_cwd);
+        match result {
+            Err(ChecksumHelperError::InvalidRebaseDestination((original, dest))) => {
+                assert_eq!(&original, &root);
+                assert_eq!(&dest, &path_not_relative_to_cwd);
+            }
+            other => panic!("Expected InvalidRebaseDestination error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rebase_into_error_when_destination_outside_checksum_helper_root() {
+        let cwd = std::env::current_dir().unwrap();
+        let ch = ChecksumHelper::new(&cwd).unwrap();
+
+        let mut hc = HashCollection::new(Some(&cwd.join("foo.cshd")), None).unwrap();
+
+        let path_outside_of_ch_root = cwd.parent().unwrap();
+        let result = ch.rebase_into(&mut hc, path_outside_of_ch_root);
+
+        match result {
+            Err(ChecksumHelperError::InvalidRebaseDestination((original, dest))) => {
+                assert_eq!(&original, &cwd, "original location not equal");
+                assert_eq!(&dest, &path_outside_of_ch_root, "dest not equal");
+            }
+            other => panic!("Expected InvalidRebaseDestination error, got {:?}", other),
+        }
     }
 }
