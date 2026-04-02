@@ -1,3 +1,6 @@
+// TODO remove
+#![allow(dead_code)]
+
 use checksum_helper;
 
 use std::path::Path;
@@ -196,7 +199,7 @@ fn verify_root(abs_path: impl AsRef<Path>) {
                 checksum_helper::checksum_helper::VerifyRootProgress::BuildMostCurrent(
                     most_current_progress,
                 ) => match most_current_progress {
-                    checksum_helper::checksum_helper::MostCurrentProgress::FoundFile(path_buf) => {
+                    checksum_helper::checksum_helper::MostCurrentProgress::FoundFile(_path_buf) => {
                         files_found += 1;
                         print!(
                             "\r[BUILD] found {:03} (+ {:03} ignored)",

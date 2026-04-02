@@ -25,6 +25,7 @@ impl<F: FnOnce()> Drop for Defer<F> {
 
 /// Normalize a path by removing all __redundant__ pardir (..)
 /// and curdir (.) components.
+///
 /// Pardir references beyond the given path are kept,
 /// e.g., `normalize_path("foo/../../bar")` -> `"../bar"`.
 pub(crate) fn normalize_path(p: impl AsRef<Path>) -> PathBuf {
@@ -125,7 +126,7 @@ mod test {
 
     #[test]
     #[cfg(windows)]
-    fn normalize_path_strips_curdir() {
+    fn normalize_path() {
         let input_expected = [
             // absolute paths
             (r"C:\foo\bar", r"C:\foo\bar"),

@@ -1,3 +1,6 @@
+// TODO remove
+#![allow(dead_code)]
+
 pub mod collection;
 pub mod hash_type;
 pub mod hashed_file;

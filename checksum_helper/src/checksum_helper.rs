@@ -1,5 +1,5 @@
 use crate::collection::{
-    HashCollection, HashCollectionError, HashCollectionIter, HashCollectionWriter, VerifyProgress,
+    HashCollection, HashCollectionError, HashCollectionIter, VerifyProgress,
 };
 use crate::file_tree::FileTree;
 use crate::gather::{filtered, VisitType};
@@ -382,7 +382,11 @@ impl ChecksumHelper {
         Ok(())
     }
 
-    pub fn move_path() {
+    pub fn move_path(
+        &mut self,
+        _source: impl AsRef<path::Path>,
+        _destination: impl AsRef<path::Path>,
+    ) -> Result<()> {
         todo!("move files modifying their relative paths in disocovered collections, calling move_collection if it's a collection")
     }
 }
