@@ -552,17 +552,20 @@ vid.mp4"
                 _ => {},
             }
         }
+
+        visited.sort();
+
         assert_eq!(
             visited,
             vec! {
                 (path::PathBuf::from("bar"), root.join("bar")),
-                (path::PathBuf::from("foo"), root.join("foo")),
-                (path::PathBuf::from("foo/bar"), root.join("foo/bar")),
-                (path::PathBuf::from("foo/foo.txt"), root.join("foo/foo.txt")),
-                (path::PathBuf::from("foo/bar/baz"), root.join("foo/bar/baz")),
-                (path::PathBuf::from("foo/bar/baz/file.txt"), root.join("foo/bar/baz/file.txt")),
                 (path::PathBuf::from("bar/baz_2025-06-28.foo"), root.join("bar/baz_2025-06-28.foo")),
                 (path::PathBuf::from("bar/other.txt"), root.join("bar/other.txt")),
+                (path::PathBuf::from("foo"), root.join("foo")),
+                (path::PathBuf::from("foo/bar"), root.join("foo/bar")),
+                (path::PathBuf::from("foo/bar/baz"), root.join("foo/bar/baz")),
+                (path::PathBuf::from("foo/bar/baz/file.txt"), root.join("foo/bar/baz/file.txt")),
+                (path::PathBuf::from("foo/foo.txt"), root.join("foo/foo.txt")),
 
             }
         );
@@ -603,16 +606,18 @@ vid.mp4"
             }
         }
 
+        visited.sort();
+
         assert_eq!(
             visited,
             // NOTE: dirs foo, bar/baz are visited by the predicate, but
             //       not returned by the iterator, since they're ignored
             vec! {
                 (path::PathBuf::from("bar"), root.join("bar")),
-                (path::PathBuf::from("file.rs"), root.join("file.rs")),
-                (path::PathBuf::from("root.mp4"), root.join("root.mp4")),
                 (path::PathBuf::from("bar/baz_2025-06-28.foo"), root.join("bar/baz_2025-06-28.foo")),
                 (path::PathBuf::from("bar/other.txt"), root.join("bar/other.txt")),
+                (path::PathBuf::from("file.rs"), root.join("file.rs")),
+                (path::PathBuf::from("root.mp4"), root.join("root.mp4")),
 
             }
         );
@@ -656,6 +661,8 @@ vid.mp4"
         }
 
         assert!(at_least_one_ignored);
+
+        visited.sort();
 
         assert_eq!(
             visited,
