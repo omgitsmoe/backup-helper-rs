@@ -328,15 +328,15 @@ mod test {
         assert_eq!(
             "FileTree{
   file.txt
-  vid.mp4
   subdir/chksum.md5
   subdir/foo.txt
-  subdir/other/chksms.md5
-  subdir/other/file.txt
   subdir/nested/bar.txt
-  subdir/nested/vid.mov
   subdir/nested/nested/cgi.bin
   subdir/nested/nested/chksum.md5
+  subdir/nested/vid.mov
+  subdir/other/chksms.md5
+  subdir/other/file.txt
+  vid.mp4
 }",
             to_file_list(&inc.file_tree)
         );

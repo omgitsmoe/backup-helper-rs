@@ -644,8 +644,8 @@ pub mod test {
         assert_eq!(
             to_file_list(&ft),
             "FileTree{
-  foo/bar/baz.txt
   bar/foo.txt
+  foo/bar/baz.txt
   xer.mp4
 }"
         );
