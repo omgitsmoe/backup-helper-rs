@@ -53,6 +53,9 @@ pub struct Entry<'a> {
     pub relative_to_root: &'a path::Path,
 }
 
+type ReadDirItem = Result<std::fs::DirEntry, std::io::Error>;
+type ReadDirIter = std::vec::IntoIter<ReadDirItem>;
+
 /// Visits directories in a defined order:
 /// .
 /// ./foo/
@@ -73,7 +76,7 @@ pub struct Gather<P> {
     root: path::PathBuf,
     directory_stack: Vec<(u32, path::PathBuf)>,
     current_depth: u32,
-    current_dir_iter: Option<std::fs::ReadDir>,
+    current_dir_iter: Option<ReadDirIter>,
 }
 
 impl<P> Gather<P>
@@ -102,7 +105,8 @@ where
                 Some(Ok(e)) => match e.file_type() {
                     Ok(file_type) => {
                         let is_dir = file_type.is_dir();
-                        let relative_to_root = e.path()
+                        let relative_to_root = e
+                            .path()
                             .strip_prefix(&self.root)
                             .expect("paths under root must be relative to root")
                             .to_owned();
@@ -119,13 +123,13 @@ where
                         if is_dir {
                             self.directory_stack
                                 .push((self.current_depth + 1, e.path()));
-                            Ok(VisitType::Directory(VisitData{
+                            Ok(VisitType::Directory(VisitData {
                                 depth: self.current_depth,
                                 entry: e,
                                 relative_to_root,
                             }))
                         } else {
-                            Ok(VisitType::File(VisitData{
+                            Ok(VisitType::File(VisitData {
                                 depth: self.current_depth,
                                 entry: e,
                                 relative_to_root,
@@ -166,8 +170,8 @@ where
         }
 
         if let Some((depth, directory)) = self.directory_stack.pop() {
-            let iter_dir = match fs::read_dir(&directory) {
-                Ok(iter) => iter,
+            let mut entries: Vec<_> = match fs::read_dir(&directory) {
+                Ok(iter) => iter.collect::<Vec<_>>(),
                 Err(e) => {
                     self.has_fatal_error = true;
                     return Some(Err(Error::ReadDirectory((
@@ -178,8 +182,17 @@ where
                 }
             };
 
+            // Sort lexically by filename preserving errors
+            entries.sort_by(|a, b| match (a, b) {
+                (Ok(a), Ok(b)) => a.file_name().cmp(&b.file_name()),
+                (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+            });
+
             self.current_depth = depth;
-            self.current_dir_iter = Some(iter_dir.into_iter());
+            self.current_dir_iter = Some(entries.into_iter());
+
             Some(Ok(VisitType::ListDirStart(depth)))
         } else {
             None
@@ -232,9 +245,9 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::file_tree::{EntryHandle, FileTree};
     use crate::{pathmatcher::PathMatcherBuilder, test_utils::*};
     use pretty_assertions::assert_eq;
-    use crate::file_tree::{EntryHandle, FileTree};
 
     fn gather_into_file_tree<F>(
         start: &path::Path,
@@ -260,13 +273,11 @@ mod test {
                         .expect("there should be a directory queued");
                 }
                 Ok(VisitType::Directory(v)) => {
-                    let new_handle = file_tree.add_child(
-                        &handle, v.entry.file_name(), true);
+                    let new_handle = file_tree.add_child(&handle, v.entry.file_name(), true);
                     directories.push(new_handle);
                 }
                 Ok(VisitType::File(v)) => {
-                    let handle = file_tree.add_child(
-                        &handle, v.entry.file_name(), false);
+                    let handle = file_tree.add_child(&handle, v.entry.file_name(), false);
                     result_handles.push(handle);
                 }
                 Err(e) => return Err(e),
@@ -296,7 +307,8 @@ mod test {
                 VisitType::File(v) => visits.push(format!(
                     "file d{} {:?} r{:?}",
                     v.depth,
-                    v.entry.path()
+                    v.entry
+                        .path()
                         .strip_prefix(&test_path)
                         .unwrap()
                         .to_str()
@@ -307,7 +319,8 @@ mod test {
                 VisitType::Directory(v) => visits.push(format!(
                     "dir d{} {:?} r{:?}",
                     v.depth,
-                    v.entry.path()
+                    v.entry
+                        .path()
                         .strip_prefix(&test_path)
                         .unwrap()
                         .to_str()
@@ -544,12 +557,12 @@ vid.mp4"
             match v {
                 Ok(VisitType::File(v)) => {
                     visited.push((v.relative_to_root, v.entry.path()));
-                },
+                }
                 Ok(VisitType::Directory(v)) => {
                     visited.push((v.relative_to_root, v.entry.path()));
-                },
+                }
                 Err(_) => assert!(false),
-                _ => {},
+                _ => {}
             }
         }
 
@@ -597,12 +610,12 @@ vid.mp4"
             match v {
                 Ok(VisitType::File(v)) => {
                     visited.push((v.relative_to_root, v.entry.path()));
-                },
+                }
                 Ok(VisitType::Directory(v)) => {
                     visited.push((v.relative_to_root, v.entry.path()));
-                },
+                }
                 Err(_) => assert!(false),
-                _ => {},
+                _ => {}
             }
         }
 
@@ -651,12 +664,12 @@ vid.mp4"
             match v {
                 Ok(VisitType::File(v)) => {
                     visited.push((v.relative_to_root, v.entry.path()));
-                },
+                }
                 Ok(VisitType::Directory(v)) => {
                     visited.push((v.relative_to_root, v.entry.path()));
-                },
+                }
                 Err(_) => assert!(false),
-                _ => {},
+                _ => {}
             }
         }
 
