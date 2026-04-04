@@ -1,6 +1,4 @@
-use crate::collection::{
-    HashCollection, HashCollectionError, HashCollectionIter, VerifyProgress,
-};
+use crate::collection::{HashCollection, HashCollectionError, HashCollectionIter, VerifyProgress};
 use crate::file_tree::FileTree;
 use crate::gather::{filtered, VisitType};
 use crate::hash_type::HashType;
@@ -256,7 +254,10 @@ impl ChecksumHelper {
             )?);
         }
 
-        Ok(self.most_current.as_ref().expect("assigned above, must be Some"))
+        Ok(self
+            .most_current
+            .as_ref()
+            .expect("assigned above, must be Some"))
     }
 
     pub fn iter_collection<'a>(&'a self, collection: &'a HashCollection) -> HashCollectionIter<'a> {
@@ -338,7 +339,11 @@ impl ChecksumHelper {
     /// beyond the new location.
     ///
     /// If `destination_directory` is relative, it is interpreted relative to the collection root.
-    pub fn rebase_into(&self, collection: &mut HashCollection, destination_directory: impl AsRef<path::Path>) -> Result<()> {
+    pub fn rebase_into(
+        &self,
+        collection: &mut HashCollection,
+        destination_directory: impl AsRef<path::Path>,
+    ) -> Result<()> {
         if collection.root().is_none() {
             return Err(ChecksumHelperError::HashCollectionError(
                 HashCollectionError::InvalidCollectionRoot(collection.root().cloned()),
@@ -1038,27 +1043,39 @@ file.rs",
 1774640824.4379904,,md5,10b2d370ae88690e8923e0261b556de9 bar/baz/save.sav
 1774640824.4381008,,md5,4b2eb3e4b5fb7741320b7a87bf720eca bar/baz_2025-06-28.foo
 1774640824.4372783,,md5,9078064e1ecedbf0852b51996522049b foo/bar/bar.test";
-        std::fs::write(testdir.join("root.cshd"), cshd_root).unwrap();
+        let cshd_root_path = testdir.join("root.cshd");
+        std::fs::write(&cshd_root_path, cshd_root).unwrap();
+        filetime::set_file_mtime(&cshd_root_path, filetime::FileTime::from_unix_time(1234, 0))
+            .unwrap();
 
         let cshd_bar = "\
 1774640824.438212,md5,96c4a1331ef7bf12846403e8fd5889ce other.txt
 1774640824.438311,md5,f2e676034d46bfa72dd35482ee8b13dc does_not_exist
 1774640824.4378712,sha256,e66f40a6224b0462c8a91b002d2bc8574787984e3f5754aab8bb3891ca9224cd bar/baz/baz_2025-06-28.foo";
-        std::fs::write(testdir.join("bar").join("bar.cshd"), cshd_bar).unwrap();
+        let cshd_bar_path = testdir.join("bar").join("bar.cshd");
+        std::fs::write(&cshd_bar_path, cshd_bar).unwrap();
+        filetime::set_file_mtime(&cshd_bar_path, filetime::FileTime::from_unix_time(1235, 0))
+            .unwrap();
 
         let md5_root = "\
 e2e676034d46bfa72dd35482ee8b13dc  root.mp4
 207174fb3b77ee29ea3d88ecbfd6885a  foo/foo.bin
 307174fb3b77ee29ea3d88ecbfd6885a  foo/bar/foo/xer/does_not_exist
 0c078ca63b3ec5d6e599f97d82faf064  foo/bar/baz/file.bin";
-        std::fs::write(testdir.join("root.md5"), md5_root).unwrap();
+        let md5_root_path = testdir.join("root.md5");
+        std::fs::write(&md5_root_path, md5_root).unwrap();
+        filetime::set_file_mtime(&md5_root_path, filetime::FileTime::from_unix_time(1237, 0))
+            .unwrap();
 
         let md5_foo = "\
 df42718d7eeae06c17b7280e5aece23c  foo.txt
 d4ca4c74d827424ca5e6cb552cc039d3  bar/bar.mp4
 e4ca4c74d827424ca5e6cb552cc039d3  bar/baz/foo/does_not_exist
 ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
-        std::fs::write(testdir.join("foo").join("foo.md5"), md5_foo).unwrap();
+        let md5_foo_path = testdir.join("foo").join("foo.md5");
+        std::fs::write(&md5_foo_path, md5_foo).unwrap();
+        filetime::set_file_mtime(&md5_foo_path, filetime::FileTime::from_unix_time(1238, 0))
+            .unwrap();
 
         let corrupt_files = vec![
             "root.mp4",
@@ -1500,10 +1517,14 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             path::Path::new("bar/baz/does_not_exist"),
         ];
 
-        let mut ch = ChecksumHelper::with_options(&testdir, ChecksumHelperOptions {
-            most_current_filter_deleted: true,
-            ..Default::default()
-        }).unwrap();
+        let mut ch = ChecksumHelper::with_options(
+            &testdir,
+            ChecksumHelperOptions {
+                most_current_filter_deleted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         ch.verify_root(
             |_path| true,
             |progress| {
@@ -1530,10 +1551,15 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
 1771337.1337,md5,deadbeef4620b91ad9384857bc9c1370 file.rs";
         let outdated_path = testdir.join("outdated.cshd");
         std::fs::write(&outdated_path, outdated).unwrap();
+        filetime::set_file_mtime(&outdated_path, filetime::FileTime::from_unix_time(1234, 0))
+            .unwrap();
 
         let current = "\
 1774640824.4384162,md5,8ad5f2184620b91ad9384857bc9c1370 file.rs";
-        std::fs::write(testdir.join("current.cshd"), current).unwrap();
+        let current_path = testdir.join("current.cshd");
+        std::fs::write(&current_path, current).unwrap();
+        filetime::set_file_mtime(&current_path, filetime::FileTime::from_unix_time(5678, 0))
+            .unwrap();
 
         let mut count = 0usize;
 
@@ -1542,10 +1568,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             |_path| true,
             |progress| {
                 if let VerifyRootProgress::Verify(VerifyProgress::Post(verify)) = progress {
-                    assert_eq!(
-                        verify.result,
-                        VerifyResult::Ok
-                    );
+                    assert_eq!(verify.result, VerifyResult::Ok);
                     count += 1;
                 }
             },
@@ -1761,12 +1784,18 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         let mut progress_index = 0usize;
 
         // only include cshd_bar
-        let mut ch = ChecksumHelper::with_options(&testdir, ChecksumHelperOptions{
-            hash_files_matcher: PathMatcherBuilder::new()
-                .allow("bar/*.cshd").unwrap()
-                .build().unwrap(),
-            ..Default::default()
-        }).unwrap();
+        let mut ch = ChecksumHelper::with_options(
+            &testdir,
+            ChecksumHelperOptions {
+                hash_files_matcher: PathMatcherBuilder::new()
+                    .allow("bar/*.cshd")
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         ch.verify_root(
             |_path| true,
             |progress| {
@@ -1782,19 +1811,21 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         assert_eq!(progress_index, progress_expected.len());
     }
 
-
     fn setup_dir_rebase_into() -> (std::path::PathBuf, std::path::PathBuf) {
         let testdir = testdir!();
 
         let cshd_path = testdir.join("root.cshd");
-        std::fs::write(&cshd_path,
-        "# version 1
+        std::fs::write(
+            &cshd_path,
+            "# version 1
 1774640824.438311,,md5,deadbeef4d46bfa72dd35482ee8b13dc does_not_exist
 1774640824.4384162,7,md5,deadbeef4620b91ad9384857bc9c1370 file.rs
 1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 bar/baz/save.sav
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz_2025-06-28.foo
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz/does_not_exist
-1774640824.4372783,,md5,deadbeef1ecedbf0852b51996522049b foo/bar/bar.test").unwrap();
+1774640824.4372783,,md5,deadbeef1ecedbf0852b51996522049b foo/bar/bar.test",
+        )
+        .unwrap();
 
         (testdir, cshd_path)
     }
@@ -1825,11 +1856,14 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         let subdir = testdir.join("bar");
         std::fs::create_dir(&subdir).unwrap();
         let cshd_path = subdir.join("root.cshd");
-        std::fs::write(&cshd_path,
-        "# version 1
+        std::fs::write(
+            &cshd_path,
+            "# version 1
 1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 baz/save.sav
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz_2025-06-28.foo
-1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist").unwrap();
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist",
+        )
+        .unwrap();
 
         let mut ch = ChecksumHelper::new(&testdir).unwrap();
         let mut hc = ch.read_collection(&cshd_path).unwrap();
@@ -1873,12 +1907,12 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
 
         let result = ch.rebase_into(&mut hc, cwd.join("bar"));
-        assert!(
-            matches!(
-                result,
-                Err(ChecksumHelperError::HashCollectionError(HashCollectionError::InvalidCollectionRoot(None)))
-            )
-        );
+        assert!(matches!(
+            result,
+            Err(ChecksumHelperError::HashCollectionError(
+                HashCollectionError::InvalidCollectionRoot(None)
+            ))
+        ));
     }
 
     #[test]

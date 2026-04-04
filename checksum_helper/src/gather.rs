@@ -314,7 +314,7 @@ mod test {
                         .to_str()
                         .unwrap()
                         .replace("\\", "/"),
-                    v.relative_to_root,
+                    v.relative_to_root.to_str().unwrap().replace('\\', "/"),
                 )),
                 VisitType::Directory(v) => visits.push(format!(
                     "dir d{} {:?} r{:?}",
@@ -326,7 +326,7 @@ mod test {
                         .to_str()
                         .unwrap()
                         .replace("\\", "/"),
-                    v.relative_to_root,
+                    v.relative_to_root.to_str().unwrap().replace('\\', "/"),
                 )),
             }
         }
