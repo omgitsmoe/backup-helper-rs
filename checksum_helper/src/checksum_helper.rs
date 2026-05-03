@@ -424,9 +424,9 @@ pub struct ChecksumHelperOptions {
     /// modification time as in the latest available hash found.
     pub incremental_skip_unchanged: bool,
 
-    /// If `true`, periodically flushes the incremental hash collection
+    /// If Some, periodically flushes the incremental hash collection
     /// to disk upon the next modification after the specified time interval.
-    pub incremental_periodic_write_interval: std::time::Duration,
+    pub incremental_periodic_write_interval: Option<std::time::Duration>,
 
     /// Up to which depth should the root and its subdirectories be searched
     /// for hash files (*.cshd, *.md5, *.sha512, etc.) to determine the
@@ -459,7 +459,7 @@ impl ChecksumHelperOptions {
             hash_type: HashType::Sha512,
             incremental_include_unchanged_files: true,
             incremental_skip_unchanged: false,
-            incremental_periodic_write_interval: std::time::Duration::from_secs(60),
+            incremental_periodic_write_interval: None,
             discover_hash_files_depth: None,
             most_current_filter_deleted: true,
             hash_files_matcher: PathMatcherBuilder::new()
@@ -492,7 +492,7 @@ impl ChecksumHelperOptions {
         }
     }
 
-    pub fn incremental_periodic_write_interval(self, value: std::time::Duration) -> Self {
+    pub fn incremental_periodic_write_interval(self, value: Option<std::time::Duration>) -> Self {
         Self {
             incremental_periodic_write_interval: value,
             ..self

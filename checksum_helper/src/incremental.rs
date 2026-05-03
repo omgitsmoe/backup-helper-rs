@@ -5,8 +5,10 @@ use crate::gather::{filtered, VisitType};
 use crate::most_current::MostCurrentProgress;
 use crate::{ChecksumHelperError, ChecksumHelperOptions};
 use crate::checksum_helper::default_filename;
+use crate::collection::writer::HashCollectionWriter;
 
 use std::path;
+use std::time;
 
 type Result<T> = std::result::Result<T, ChecksumHelperError>;
 
@@ -137,6 +139,22 @@ impl<'a> Incremental<'a> {
         Ok(())
     }
 
+    fn flush_if_necessary(
+        &mut self,
+        last_flush: &mut time::Instant,
+        writer: &mut HashCollectionWriter,
+        collection: &mut HashCollection,
+    ) -> Result<()> {
+        if let Some(flush_interval) = self.options.incremental_periodic_write_interval {
+            if last_flush.elapsed() >= flush_interval {
+                writer.flush(collection, self.file_tree)?;
+                *last_flush = time::Instant::now();
+            }
+        }
+
+        Ok(())
+    }
+
     fn checksum_files<P>(&mut self, mut progress: P) -> Result<HashCollection>
     where
         P: FnMut(IncrementalProgress),
@@ -149,6 +167,9 @@ impl<'a> Incremental<'a> {
             Some(&self.root.join(default_filename(self.root, "incremental", ""))),
             None,
         )?;
+
+        let mut last_flush_time = time::Instant::now();
+        let mut writer = HashCollectionWriter::new();
 
         let files_to_checksum = std::mem::take(&mut self.files_to_checksum);
         for handle in files_to_checksum {
@@ -200,7 +221,13 @@ impl<'a> Incremental<'a> {
 
             if include {
                 result.update(handle, file_raw);
+                self.flush_if_necessary(&mut last_flush_time, &mut writer, &mut result)?;
             }
+        }
+
+        if self.options.incremental_periodic_write_interval.is_some() {
+            // Flush remaining entries
+            writer.flush(&mut result, self.file_tree)?;
         }
 
         for missing in self.most_current.iter_with_context(self.file_tree) {
@@ -505,7 +532,7 @@ vid.mp4
     }
 
     fn most_current_all() -> &'static str {
-        return "# version 1
+        "# version 1
 1763239693.8727274,8,sha512,98dfdd998999f4e05f71e500559bd366e67c2039b8b2da3215ea80a16fa92033d2e471fa02aca7f232572d41913a912e5dd8f241bcd889b1482b1967f93e353a file.txt
 1763239693.8732224,7,sha512,d0fa60060582bca8845761653d41a4e60f13d00c458c745adc7b16e4c05afbc873fcce18fa37338d6ad65bbd6c4f4bd98f8fbfc8d9065237a7f739314ec1585d vid.mp4
 1763239693.8742228,17,sha512,16240544f3fe5b23107522f59a68814267dca8faa51acc37bb56031f8d431bd6ab8466fed0c5dc6322c83be4032b67f5cc1b87d9391f18a850f093f508c44c4f subdir/chksum.md5
@@ -515,7 +542,7 @@ vid.mp4
 1763239693.8747134,21,sha512,3b62a1e6bf057a53e1d3e61486d5b9ba4bade9193700ab0ec65015cef91274aae08bd16422115183ef5922f15f01a1863accd0abe204b8917bf9c05b0d0686d5 subdir/nested/bar.txt
 1763239693.8753488,21,sha512,e374a8bbbfeaa038ddf2fcd8b62f2971607fd2c1d2e091c30410c73ad199ae8c8e0e319d33455f7547b246ee9792571dfb82821a8c8637caf6732ba2c9079108 subdir/nested/vid.mov
 1763239693.8765886,28,sha512,5045ee6bd5128311600b8807ea40a1f17feadbf14a10b30c815b5371d6fb45ed99e96c55f925dbb69aed8a9b01a4b658fd35e21a6e39e7ae84a85d3138ee21e4 subdir/nested/nested/cgi.bin
-1763239693.875868,31,sha512,879a1635ab8e8079238cb2471ed2c9c034430055482f93945f6a18a2340583a670e785df21477f35e02b8762f8d070a17365b0378f4345056c293dc41d044162 subdir/nested/nested/chksum.md5";
+1763239693.875868,31,sha512,879a1635ab8e8079238cb2471ed2c9c034430055482f93945f6a18a2340583a670e785df21477f35e02b8762f8d070a17365b0378f4345056c293dc41d044162 subdir/nested/nested/chksum.md5"
     }
 
     fn file_from_disk(
@@ -778,6 +805,130 @@ vid.mp4
                 cshd_str_paths_only_sorted(&cshd_str),
             );
         }
+    }
+
+    #[test]
+    fn checksum_files_respects_incremental_periodic_write_interval_none() {
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let options = ChecksumHelperOptions::default();
+        let hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let mut inc = Incremental::new(
+            &test_path, &mut ft, &options, hc);
+
+        inc.discover_files(|_| {}).unwrap();
+        let new = inc.checksum_files(|_| {}).unwrap();
+        // No flush happened, which clears the HashCollection entries
+        assert_eq!(new.len(), 10);
+
+        for f in std::fs::read_dir(test_path).unwrap() {
+            let f = f.unwrap();
+            let is_incremental = f.file_name().to_string_lossy().contains("incremental");
+            assert!(!is_incremental);
+        }
+    }
+
+    #[test]
+    fn checksum_files_respects_incremental_periodic_write_interval_some() {
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let options = ChecksumHelperOptions::default()
+            .incremental_periodic_write_interval(Some(time::Duration::from_millis(50)));
+        let hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
+
+        let has_incremental_file = || {
+            for f in std::fs::read_dir(&test_path).unwrap() {
+                let f = f.unwrap();
+                let is_incremental = f.file_name().to_string_lossy().contains("incremental");
+                if is_incremental {
+                    return Some(f.file_name());
+                }
+            }
+
+            None
+        };
+
+        let mut num_files_seen = 0usize;
+        inc.discover_files(|_| {}).unwrap();
+
+        let new = inc
+            .checksum_files(|p| {
+                if let IncrementalProgress::FileNew(_) = p {
+                    if num_files_seen == 2 {
+                        // exceed write interval
+                        std::thread::sleep(time::Duration::from_millis(100));
+                    } else if num_files_seen == 3 {
+                        // check that file was written with 3 entries
+                        let incremental_file_name = has_incremental_file();
+                        assert!(incremental_file_name.is_some());
+
+                        let path = test_path.join(incremental_file_name.unwrap());
+                        let mut ft = FileTree::new(&test_path).unwrap();
+                        let hc = HashCollection::from_disk(&path, &mut ft).unwrap();
+                        assert_eq!(hc.len(), 3);
+                    }
+                    num_files_seen += 1;
+                }
+            })
+            .unwrap();
+
+        // Final flush
+        assert_eq!(new.len(), 0);
+
+        let contents =
+            std::fs::read_to_string(new.full_path().unwrap()).unwrap();
+
+        assert_eq!(
+            "file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+            cshd_str_paths_only_sorted(&contents),
+        );
+    }
+
+    #[test]
+    fn checksum_files_respects_incremental_periodic_write_interval_some_final_flush() {
+        let test_path = setup_ftree();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let options = ChecksumHelperOptions::default()
+            // high interval so we don't trigger intermediate flushes
+            .incremental_periodic_write_interval(Some(time::Duration::from_mins(3)));
+        let hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
+
+        inc.discover_files(|_| {}).unwrap();
+
+        let new = inc.checksum_files(|_| {}).unwrap();
+
+        // Final flush still happened
+        assert_eq!(new.len(), 0);
+
+        let contents =
+            std::fs::read_to_string(new.full_path().unwrap()).unwrap();
+
+        assert_eq!(
+            "file.txt
+subdir/chksum.md5
+subdir/foo.txt
+subdir/nested/bar.txt
+subdir/nested/nested/cgi.bin
+subdir/nested/nested/chksum.md5
+subdir/nested/vid.mov
+subdir/other/chksms.md5
+subdir/other/file.txt
+vid.mp4
+",
+            cshd_str_paths_only_sorted(&contents),
+        );
     }
 
     #[test]

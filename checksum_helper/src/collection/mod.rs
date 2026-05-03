@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 mod parser;
 mod serialize;
-mod writer;
+pub (crate) mod writer;
 
 pub use serialize::sort_serialized;
 
