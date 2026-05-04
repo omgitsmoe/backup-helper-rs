@@ -3,7 +3,7 @@ use crate::{MostCurrentArgs, VerifyMatcherArgs};
 use std::path::Path;
 
 
-pub fn verify_root(root: impl AsRef<Path>, most_current_args: MostCurrentArgs, matcher: VerifyMatcherArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn verify_root(root: impl AsRef<Path>, _most_current_args: MostCurrentArgs, _matcher: VerifyMatcherArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::absolute(root)?;
     let mut ch = checksum_helper::ChecksumHelper::new(&root)?;
 
@@ -209,6 +209,6 @@ pub fn verify_root(root: impl AsRef<Path>, most_current_args: MostCurrentArgs, m
     Ok(())
 }
 
-pub fn verify_file(root: impl AsRef<Path>, matcher: VerifyMatcherArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn verify_file(_root: impl AsRef<Path>, _matcher: VerifyMatcherArgs) -> Result<(), Box<dyn std::error::Error>> {
     todo!()
 }

@@ -2,12 +2,10 @@ use crate::MostCurrentArgs;
 
 use std::path::Path;
 
-pub fn build(root: impl AsRef<Path>, args: MostCurrentArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn build(_root: impl AsRef<Path>, _args: MostCurrentArgs) -> Result<(), Box<dyn std::error::Error>> {
     todo!();
-    Ok(())
 }
 
-pub fn missing(root: impl AsRef<Path>, args: MostCurrentArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn missing(_root: impl AsRef<Path>, _args: MostCurrentArgs) -> Result<(), Box<dyn std::error::Error>> {
     todo!();
-    Ok(())
 }

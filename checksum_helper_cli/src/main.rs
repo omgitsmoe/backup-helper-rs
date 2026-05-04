@@ -4,7 +4,7 @@
 use checksum_helper::pathmatcher::PathMatcherBuilder;
 use checksum_helper::ChecksumHelperOptions;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use std::io::prelude::*;
 

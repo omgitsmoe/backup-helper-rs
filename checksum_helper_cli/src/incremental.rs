@@ -117,8 +117,6 @@ pub fn incremental(args: IncrementalArgs) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-pub fn fill(args: IncrementalArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn fill(_args: IncrementalArgs) -> Result<(), Box<dyn std::error::Error>> {
     todo!();
-
-    Ok(())
 }
