@@ -1,6 +1,8 @@
 // TODO remove
 #![allow(dead_code)]
 
+use checksum_helper::pathmatcher::PathMatcherBuilder;
+use checksum_helper::ChecksumHelperOptions;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
@@ -10,8 +12,8 @@ use checksum_helper::hash_type::HashType as HashTypeLib;
 
 mod build;
 mod incremental;
-mod verify;
 mod modify;
+mod verify;
 
 fn pause() {
     let mut stdin = std::io::stdin();
@@ -112,6 +114,27 @@ struct MostCurrentArgs {
     hash_files_matcher: HashMatcherArgs,
 }
 
+impl MostCurrentArgs {
+    fn apply(
+        self,
+        options: ChecksumHelperOptions,
+    ) -> Result<ChecksumHelperOptions, Box<dyn std::error::Error>> {
+        let mut matcher = PathMatcherBuilder::new();
+        for allow in self.hash_files_matcher.hash_allow {
+            matcher = matcher.allow(allow)?;
+        }
+        for block in self.hash_files_matcher.hash_block {
+            matcher = matcher.block(block)?;
+        }
+
+        Ok(options
+            .discover_hash_files_depth(self.discover_hash_files_depth)
+            .most_current_filter_deleted(!self.keep_deleted)
+            .hash_files_matcher(matcher.build()?))
+    }
+
+}
+
 #[derive(Args, Debug)]
 pub struct VerifyMatcherArgs {
     /// Glob patterns for files included in verify operations.
@@ -158,6 +181,32 @@ struct IncrementalArgs {
 
     #[command(flatten)]
     all_files_matcher: AllMatcherArgs,
+}
+
+impl IncrementalArgs {
+    fn apply(
+        self,
+        options: ChecksumHelperOptions,
+    ) -> Result<ChecksumHelperOptions, Box<dyn std::error::Error>> {
+        let mut matcher = PathMatcherBuilder::new();
+        for allow in self.all_files_matcher.all_allow {
+            matcher = matcher.allow(allow)?;
+        }
+        for block in self.all_files_matcher.all_block {
+            matcher = matcher.block(block)?;
+        }
+
+        Ok(self.most_current.apply(options)?
+            .hash_type(self.hash_type.into())
+            .incremental_include_unchanged_files(self.include_unchanged)
+            .incremental_skip_unchanged(self.skip_unchanged)
+            .incremental_periodic_write_interval(
+                self.periodic_write_interval_seconds
+                    .map(std::time::Duration::from_secs),
+            )
+            .all_files_matcher(matcher.build()?))
+    }
+
 }
 
 #[derive(Subcommand)]
@@ -252,9 +301,9 @@ fn main() {
 
     let result = match cli.command {
         Commands::Incremental(incremental_args) => incremental::incremental(incremental_args),
+        Commands::Fill(incremental_args) => incremental::fill(incremental_args),
         Commands::Build { root, most_current } => build::build(&root, most_current),
         Commands::Missing { root, most_current } => build::missing(&root, most_current),
-        Commands::Fill(incremental_args) => incremental::fill(incremental_args),
         Commands::Move { src, dst } => modify::move_hash_file(src, dst),
         Commands::Verify(verify_command) => match verify_command {
             VerifyCommand::File {

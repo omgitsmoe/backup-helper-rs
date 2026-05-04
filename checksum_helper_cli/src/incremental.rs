@@ -1,8 +1,11 @@
+use checksum_helper::ChecksumHelperOptions;
+
 use crate::IncrementalArgs;
 
 pub fn incremental(args: IncrementalArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::path::absolute(args.root)?;
-    let mut ch = checksum_helper::ChecksumHelper::new(&root)?;
+    let root = std::path::absolute(args.root.clone())?;
+    let options = args.apply(ChecksumHelperOptions::default())?;
+    let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
 
     let mut files_found = 0;
     let mut files_ignored = 0;
