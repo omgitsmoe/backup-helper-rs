@@ -559,27 +559,46 @@ pub enum ChecksumHelperError {
 
 impl fmt::Display for ChecksumHelperError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            ChecksumHelperError::RootIsRelative(ref p) => {
-                write!(f, "root must be absolute, got: {:?}", p)
-            }
-            ChecksumHelperError::InvalidMostCurrentHashFile => {
-                write!(f, "invalid most current hash file")
-            }
-            ChecksumHelperError::HashCollectionError(..) => write!(f, "hash collection error"),
-            ChecksumHelperError::HashedFileError(..) => write!(f, "hashed file error"),
-            ChecksumHelperError::GatherError(..) => write!(f, "gather files error"),
-            ChecksumHelperError::FileTreeError(..) => write!(f, "file tree error"),
-            ChecksumHelperError::InvalidRebaseDestination((ref original, ref destination)) => {
+        match self {
+            ChecksumHelperError::RootIsRelative(p) => {
                 write!(
                     f,
-                    concat!(
-                        "invalid rebase operation from '{:?}' to '{:?}': ",
-                        "expected a path that is a subpath of the ChecksumHelper root ",
-                        "and has a relative path to the original checksum file location"
-                    ),
-                    original, destination
+                    "root path must be absolute, but got: {}",
+                    p.display()
                 )
+            }
+
+            ChecksumHelperError::InvalidMostCurrentHashFile => {
+                write!(
+                    f,
+                    "failed to determine the most current hash file (no valid candidates found)"
+                )
+            }
+
+            ChecksumHelperError::InvalidRebaseDestination((original, destination)) => {
+                write!(
+                    f,
+                    "cannot rebase from '{}' to '{}': destination must be within the root \
+                     directory and maintain a valid relative path to the original location",
+                    original.display(),
+                    destination.display()
+                )
+            }
+
+            ChecksumHelperError::HashCollectionError(err) => {
+                write!(f, "failed to process hash collection: {}", err)
+            }
+
+            ChecksumHelperError::HashedFileError(err) => {
+                write!(f, "failed to process hashed file: {}", err)
+            }
+
+            ChecksumHelperError::GatherError(err) => {
+                write!(f, "failed to gather files from filesystem: {}", err)
+            }
+
+            ChecksumHelperError::FileTreeError(_err) => {
+                write!(f, "file tree operation failed")
             }
         }
     }

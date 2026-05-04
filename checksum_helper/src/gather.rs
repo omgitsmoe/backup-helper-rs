@@ -69,6 +69,8 @@ type ReadDirIter = std::vec::IntoIter<ReadDirItem>;
 /// 1) All the children of `.`
 /// 2) Then all the directories of `.` in reverse order
 /// ...
+///
+/// **Note**: Symlinks to directories are NOT followed!
 pub struct Gather<P> {
     predicate: P,
     // Whether a fatal error was returned and iteration should end on the next call.
@@ -128,12 +130,44 @@ where
                                 entry: e,
                                 relative_to_root,
                             }))
-                        } else {
+                        } else if file_type.is_file() {
                             Ok(VisitType::File(VisitData {
                                 depth: self.current_depth,
                                 entry: e,
                                 relative_to_root,
                             }))
+                        } else if file_type.is_symlink() {
+                            // NOTE: use fs::metadata, since it resolves symlinks
+                            let meta = match std::fs::metadata(e.path()) {
+                                Ok(m) => m,
+                                Err(err) => {
+                                    return Some(Err(Error::Iteration(
+                                        format!("failed to read file metadata: {:?}", err),
+                                        err.kind(),
+                                    )))
+                                }
+                            };
+
+                            if meta.is_file() {
+                                Ok(VisitType::File(VisitData {
+                                    depth: self.current_depth,
+                                    entry: e,
+                                    relative_to_root,
+                                }))
+                            } else if meta.is_dir() {
+                                // we don't follow symlinks to directories for traversal
+                                // but we still output an iteration entry
+                                Ok(VisitType::Directory(VisitData {
+                                    depth: self.current_depth,
+                                    entry: e,
+                                    relative_to_root,
+                                }))
+                            } else {
+                                // we only follow symlinks to files
+                                continue;
+                            }
+                        } else {
+                            continue;
                         }
                     }
                     Err(err) => Err(Error::ReadFileInfo((
@@ -364,6 +398,109 @@ file d1 "abc/boo.txt" r"abc/boo.txt"
 file d1 "abc/other.txt" r"abc/other.txt"
 stop d1"#
         );
+    }
+
+    fn normalize(root: &path::Path, path: std::path::PathBuf) -> String {
+        path.strip_prefix(root)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace('\\', "/")
+    }
+
+    #[test]
+    fn gather_handles_symlinks() {
+        use std::fs;
+
+        let test_path = testdir!();
+
+        // --- setup -------------------------------------------------------------
+
+        // file
+        fs::write(test_path.join("file.txt"), "hello").unwrap();
+
+        // dir
+        fs::create_dir(test_path.join("dir")).unwrap();
+
+        // symlink -> file
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(test_path.join("file.txt"), test_path.join("link_to_file"))
+            .unwrap();
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(
+            test_path.join("file.txt"),
+            test_path.join("link_to_file"),
+        )
+        .unwrap();
+
+        // symlink -> dir
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(test_path.join("dir"), test_path.join("link_to_dir")).unwrap();
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(test_path.join("dir"), test_path.join("link_to_dir"))
+            .unwrap();
+
+        // symlink -> symlink -> file
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            test_path.join("link_to_file"),
+            test_path.join("link_to_link"),
+        )
+        .unwrap();
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(
+            test_path.join("link_to_file"),
+            test_path.join("link_to_link"),
+        )
+        .unwrap();
+
+        // --- run gather --------------------------------------------------------
+
+        let mut visits = vec![];
+        let gather = Gather::new(&test_path, |_| true);
+
+        for v in gather {
+            let v = v.unwrap();
+
+            match v {
+                VisitType::ListDirStart(d) => visits.push(format!("start d{}", d)),
+                VisitType::ListDirStop(d) => visits.push(format!("stop d{}", d)),
+
+                VisitType::File(v) => visits.push(format!(
+                    "file d{} {}",
+                    v.depth,
+                    normalize(&test_path, v.entry.path())
+                )),
+
+                VisitType::Directory(v) => visits.push(format!(
+                    "dir d{} {}",
+                    v.depth,
+                    normalize(&test_path, v.entry.path())
+                )),
+            }
+        }
+
+        let actual = visits.join("\n");
+        println!("actual:\n{}", actual);
+
+        // --- expected ----------------------------------------------------------
+
+        // NOTE: we output iteration entries for symlinks, but we don't
+        //       traverse into symlinked directories
+        let expected = r#"start d0
+dir d0 dir
+file d0 file.txt
+dir d0 link_to_dir
+file d0 link_to_file
+file d0 link_to_link
+stop d0
+start d1
+stop d1"#;
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
