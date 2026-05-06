@@ -58,16 +58,9 @@ impl ChecksumHelper {
     where
         P: FnMut(IncrementalProgress),
     {
-        let root = self.root();
-        if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(
-                &root,
-                &mut self.file_tree,
-                &self.options,
-                |p| progress(IncrementalProgress::BuildMostCurrent(p)),
-            )?);
-        }
+        self.ensure_most_current(|p| progress(IncrementalProgress::BuildMostCurrent(p)))?;
 
+        let root = self.root();
         let inc = Incremental::new(
             &root,
             &mut self.file_tree,
@@ -88,15 +81,7 @@ impl ChecksumHelper {
     {
         // NOTE: can't use check_missing's result, since the file list is incomplete
         //       if there are directories missing!
-        let root = self.root();
-        if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(
-                &root,
-                &mut self.file_tree,
-                &self.options,
-                |p| progress(IncrementalProgress::BuildMostCurrent(p)),
-            )?);
-        }
+        self.ensure_most_current(|p| progress(IncrementalProgress::BuildMostCurrent(p)))?;
         let most_current = self.most_current.as_ref().expect("checked above");
 
         let root = self.root();
@@ -157,21 +142,14 @@ impl ChecksumHelper {
     where
         P: FnMut(IncrementalProgress),
     {
-        let root = self.root();
-        if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(
-                &root,
-                &mut self.file_tree,
-                &self.options,
-                |p| progress(IncrementalProgress::BuildMostCurrent(p)),
-            )?);
-        }
+        self.ensure_most_current(|p| progress(IncrementalProgress::BuildMostCurrent(p)))?;
 
         // first find all directories that have at least one file and add all
         // its parents,
         // if we find a directory later that is not in this set,
         // we can record it as missing entirely
         let mut dirs_with_hashed_file = std::collections::HashSet::new();
+        let root = self.root();
         dirs_with_hashed_file.insert(root.clone());
 
         let most_current = self.most_current.as_ref().expect("checked above");
@@ -234,30 +212,37 @@ impl ChecksumHelper {
     }
 
     /// Build a checksum file containing all the most current hashes found in all
-    /// checksum files under [`ChecksumHelper::root`].
+    /// checksum files under [`ChecksumHelper::root`] if it isn't available yet.
+    /// Then perform on action on it.
+    /// If a most current collection is already available just the action
+    /// the caller provides will be performed.
     ///
     /// The received `&HashCollection` can be written by using [`ChecksumHelper::write_collection`]
     /// or [`ChecksumHelper::write_into`].
     ///
     /// - `progress`: Progress callback that receives a [`MostCurrentProgress`]
     ///   when progress is made.
-    pub fn build_most_current<P>(&mut self, progress: P) -> Result<&HashCollection>
+    /// - `action`: Closure that receives a reference to most current
+    ///   [`HashCollection`].
+    pub fn with_most_current<P, F>(&mut self, progress: P, action: F) -> Result<()>
     where
         P: FnMut(MostCurrentProgress),
+        F: FnOnce(&Self, &HashCollection) -> Result<()>,
     {
-        if self.most_current.is_none() {
-            self.most_current = Some(update_most_current(
-                self.root(),
-                &mut self.file_tree,
-                &self.options,
-                progress,
-            )?);
-        }
+        self.ensure_most_current(progress)?;
 
-        Ok(self
-            .most_current
-            .as_ref()
-            .expect("assigned above, must be Some"))
+        action(
+            self,
+            self.most_current
+                .as_ref()
+                .expect("assigned above, must be Some"),
+        )?;
+
+        Ok(())
+    }
+
+    pub fn clear_most_current(&mut self) {
+        self.most_current = None;
     }
 
     pub fn iter_collection<'a>(&'a self, collection: &'a HashCollection) -> HashCollectionIter<'a> {
@@ -393,6 +378,22 @@ impl ChecksumHelper {
         _destination: impl AsRef<path::Path>,
     ) -> Result<()> {
         todo!("move files modifying their relative paths in disocovered collections, calling move_collection if it's a collection")
+    }
+
+    fn ensure_most_current<P>(&mut self, progress: P) -> Result<()>
+    where
+        P: FnMut(MostCurrentProgress),
+    {
+        if self.most_current.is_none() {
+            self.most_current = Some(update_most_current(
+                self.root(),
+                &mut self.file_tree,
+                &self.options,
+                progress,
+            )?);
+        }
+
+        Ok(())
     }
 }
 
@@ -561,11 +562,7 @@ impl fmt::Display for ChecksumHelperError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ChecksumHelperError::RootIsRelative(p) => {
-                write!(
-                    f,
-                    "root path must be absolute, but got: {}",
-                    p.display()
-                )
+                write!(f, "root path must be absolute, but got: {}", p.display())
             }
 
             ChecksumHelperError::InvalidMostCurrentHashFile => {
