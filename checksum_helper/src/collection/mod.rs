@@ -1,7 +1,7 @@
+use crate::alias::{Map, MapIter};
 use crate::file_tree::{EntryHandle, ErrorKind, FileTree};
 use crate::hash_type::HashType;
-use crate::hashed_file::{FileRaw, File, VerifyResult};
-use crate::alias::{Map, MapIter};
+use crate::hashed_file::{File, FileRaw, VerifyResult};
 
 // TODO logging
 // use log::{debug, error, info, warn};
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 mod parser;
 mod serialize;
-pub (crate) mod writer;
+pub(crate) mod writer;
 
 pub use serialize::sort_serialized;
 
@@ -103,11 +103,10 @@ impl HashCollection {
     }
 
     pub(crate) fn filter_missing(&mut self, file_tree: &FileTree) -> Result<()> {
-        self.map
-            .retain(|k, _v| {
-                let file_path = file_tree.absolute_path(k);
-                std::fs::exists(file_path).unwrap_or(false)
-            });
+        self.map.retain(|k, _v| {
+            let file_path = file_tree.absolute_path(k);
+            std::fs::exists(file_path).unwrap_or(false)
+        });
 
         Ok(())
     }
@@ -121,14 +120,15 @@ impl HashCollection {
         P: Fn(&Path) -> bool,
     {
         let Some(root) = self.root().cloned() else {
-            return Err(HashCollectionError::InvalidCollectionRoot(self.root().cloned()));
+            return Err(HashCollectionError::InvalidCollectionRoot(
+                self.root().cloned(),
+            ));
         };
 
-        self.map
-            .retain(|path_handle, _v| {
-                let file_path = file_tree.relative_path_to(path_handle, &root);
-                predicate(&file_path)
-            });
+        self.map.retain(|path_handle, _v| {
+            let file_path = file_tree.relative_path_to(path_handle, &root);
+            predicate(&file_path)
+        });
 
         Ok(())
     }
@@ -137,26 +137,30 @@ impl HashCollection {
         path: Option<&impl AsRef<Path>>,
         mtime: Option<filetime::FileTime>,
     ) -> Result<HashCollection> {
+        let (root_dir, name) = match path {
+            Some(p) => {
+                // TODO: technically std::fs::canonicalize would be better,
+                //       but this requires the path to exist :/
+                let abs = std::path::absolute(p)?;
+
+                let name = abs
+                    .file_name()
+                    .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
+                    .to_owned();
+
+                let root = abs
+                    .parent()
+                    .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
+                    .to_owned();
+
+                (Some(root), Some(name))
+            }
+            None => (None, None),
+        };
         Ok(HashCollection {
             map: Map::new(),
-            name: match path {
-                Some(p) => Some(
-                    p.as_ref()
-                        .file_name()
-                        .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
-                        .to_owned(),
-                ),
-                None => None,
-            },
-            root_dir: match path {
-                Some(p) => Some(
-                    p.as_ref()
-                        .parent()
-                        .ok_or_else(|| HashCollectionError::InvalidPath(p.as_ref().to_path_buf()))?
-                        .to_owned(),
-                ),
-                None => None,
-            },
+            name,
+            root_dir,
             mtime,
         })
     }
@@ -167,7 +171,10 @@ impl HashCollection {
 
     pub(crate) fn contains_path(&self, path: impl AsRef<Path>, file_tree: &FileTree) -> bool {
         let path = path.as_ref();
-        assert!(path.is_relative(), "Only paths relative to file_tree allowed!");
+        assert!(
+            path.is_relative(),
+            "Only paths relative to file_tree allowed!"
+        );
         let handle = file_tree.find(path);
         if handle.is_none() {
             return false;
@@ -297,7 +304,12 @@ impl HashCollection {
     ///            to the `file_tree.root()`.
     /// `progress`: Progress callback that receives a `VerifyProgress`
     ///             before and after processing the file.
-    pub(crate) fn verify<F, P>(&self, file_tree: &FileTree, include: F, mut progress: P) -> Result<()>
+    pub(crate) fn verify<F, P>(
+        &self,
+        file_tree: &FileTree,
+        include: F,
+        mut progress: P,
+    ) -> Result<()>
     where
         F: Fn(&Path) -> bool,
         P: FnMut(VerifyProgress),
@@ -329,7 +341,7 @@ impl HashCollection {
             //       verify, so it's fine to use `?` here. For everything else a corresponding
             //       VerifyResult is used.
             let result = file.verify(|p| {
-                progress(VerifyProgress::During(HashProgress{
+                progress(VerifyProgress::During(HashProgress {
                     bytes_read: p.0,
                     bytes_total: p.1,
                 }));
@@ -352,7 +364,10 @@ impl HashCollection {
         Ok(())
     }
 
-    pub(crate) fn iter_with_context<'a>(&'a self, file_tree: &'a FileTree) -> HashCollectionIter<'a> {
+    pub(crate) fn iter_with_context<'a>(
+        &'a self,
+        file_tree: &'a FileTree,
+    ) -> HashCollectionIter<'a> {
         HashCollectionIter {
             map_iter: self.map.iter(),
             file_tree,
@@ -564,6 +579,36 @@ pub mod test {
         assert!(!is_path_above_hash_file("./foo/./../baz/.."));
         assert!(!is_path_above_hash_file("foo/./../baz/.."));
         assert!(!is_path_above_hash_file("./foo/././baz/.."));
+    }
+
+    #[test]
+    fn new_relative_path() {
+        let cwd = std::env::current_dir().unwrap();
+        // path.parent() would result in Some("")
+        // so we have to use an absolute path internally
+        let path = "foo.cshd";
+        let hc = HashCollection::new(Some(&path), None).unwrap();
+        assert_eq!(hc.root_dir, Some(cwd.clone()));
+        assert_eq!(hc.name, Some(OsString::from(path)));
+
+        let path = PathBuf::from("bar").join("foo.cshd");
+        let hc = HashCollection::new(Some(&path), None).unwrap();
+        assert_eq!(hc.root_dir, Some(cwd.join("bar")));
+        assert_eq!(hc.name, Some(OsString::from("foo.cshd")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_absolute_path() {
+        let path = "/foo.cshd";
+        let hc = HashCollection::new(Some(&path), None).unwrap();
+        assert_eq!(hc.root_dir, Some("/".into()));
+        assert_eq!(hc.name, Some(OsString::from("foo.cshd")));
+
+        let path = PathBuf::from("/").join("bar").join("foo.cshd");
+        let hc = HashCollection::new(Some(&path), None).unwrap();
+        assert_eq!(hc.root_dir, Some(path.parent().unwrap().to_owned()));
+        assert_eq!(hc.name, Some(OsString::from("foo.cshd")));
     }
 
     pub fn setup_minimal_hc(root: &Path) -> (HashCollection, FileTree, &'static str) {
@@ -1019,8 +1064,8 @@ abcdefff foo/xer.mp4
                 size_total_bytes: 1350,
             }),
             // NOTE: no during, since no read due to MismatchSize
-            VerifyProgress::Post(VerifyProgressPost{
-                progress: VerifyProgressCommon{
+            VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
                     tree_root: &testdir,
                     relative_path: Path::new("foo/bar/baz.txt"),
                     file_number_processed: 1,
@@ -1038,12 +1083,12 @@ abcdefff foo/xer.mp4
                 size_processed_bytes: 1337,
                 size_total_bytes: 1350,
             }),
-            VerifyProgress::During(HashProgress{
+            VerifyProgress::During(HashProgress {
                 bytes_read: 3,
                 bytes_total: 3,
             }),
-            VerifyProgress::Post(VerifyProgressPost{
-                progress: VerifyProgressCommon{
+            VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
                     tree_root: &testdir,
                     relative_path: Path::new("foo/bar/baz2.txt"),
                     file_number_processed: 2,
@@ -1061,12 +1106,12 @@ abcdefff foo/xer.mp4
                 size_processed_bytes: 1340,
                 size_total_bytes: 1350,
             }),
-            VerifyProgress::During(HashProgress{
+            VerifyProgress::During(HashProgress {
                 bytes_read: 10,
                 bytes_total: 10,
             }),
-            VerifyProgress::Post(VerifyProgressPost{
-                progress: VerifyProgressCommon{
+            VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
                     tree_root: &testdir,
                     relative_path: Path::new("foo/bar/baz3.txt"),
                     file_number_processed: 3,
@@ -1075,7 +1120,7 @@ abcdefff foo/xer.mp4
                     size_total_bytes: 1350,
                 },
                 result: VerifyResult::MismatchOutdatedHash,
-            })
+            }),
         ];
         let mut index = 0usize;
         hc.verify(
@@ -1088,7 +1133,6 @@ abcdefff foo/xer.mp4
             },
         )
         .unwrap();
-
     }
 
     #[test]
@@ -1147,10 +1191,7 @@ abcdefff foo/xer.mp4
             HashType::Sha512,
             vec![0xde, 0xad, 0xbe, 0xef],
         );
-        hc.update(
-            eh1.clone(),
-            f1,
-        );
+        hc.update(eh1.clone(), f1);
         let f2 = FileRaw::new(
             eh2.clone(),
             None,
@@ -1158,10 +1199,7 @@ abcdefff foo/xer.mp4
             HashType::Sha512,
             vec![0xde, 0xad, 0xbe, 0xef],
         );
-        hc.update(
-            eh2.clone(),
-            f2,
-        );
+        hc.update(eh2.clone(), f2);
 
         let mut iter = hc.iter_with_context(&ft);
 
@@ -1178,21 +1216,22 @@ abcdefff foo/xer.mp4
         assert!(iter.next().is_none());
     }
 
-    fn setup_fill_missing() -> (std::path::PathBuf, HashCollection, FileTree, Vec<&'static str>) {
+    fn setup_fill_missing() -> (
+        std::path::PathBuf,
+        HashCollection,
+        FileTree,
+        Vec<&'static str>,
+    ) {
         let testdir = testdir!();
         let (hc, ft, _expected_serialization) = setup_minimal_hc(&testdir);
-        let relative_paths = vec![
-            "foo/bar/baz.txt",
-            "bar/foo.txt",
-            "xer.mp4",
-        ];
+        let relative_paths = vec!["foo/bar/baz.txt", "bar/foo.txt", "xer.mp4"];
         create_ftree(
             &testdir,
             "\
 foo/bar/baz.txt
 bar/foo.txt
-xer.mp4");
-
+xer.mp4",
+        );
 
         (testdir, hc, ft, relative_paths)
     }
@@ -1213,7 +1252,6 @@ xer.mp4");
 
         hc.filter_missing(&ft).unwrap();
 
-
         for p in remove {
             assert!(!hc.contains_path(p, &ft));
         }
@@ -1228,9 +1266,7 @@ xer.mp4");
         let (mut hc, ft, _) = setup_minimal_hc(&testdir);
         hc.relocate(&testdir);
 
-        hc.filter(&ft, |p| {
-            p.starts_with("foo/")
-        }).unwrap();
+        hc.filter(&ft, |p| p.starts_with("foo/")).unwrap();
 
         assert_eq!(hc.len(), 1);
         assert!(hc.contains_path("foo/bar/baz.txt", &ft));
@@ -1243,7 +1279,6 @@ xer.mp4");
         let ft = FileTree::new(&testdir).unwrap();
 
         let result = hc.filter(&ft, |_| true);
-
 
         assert!(matches!(
             result,
