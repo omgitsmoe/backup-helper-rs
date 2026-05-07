@@ -1,7 +1,7 @@
 // TODO remove
 #![allow(dead_code)]
 
-use checksum_helper::pathmatcher::PathMatcherBuilder;
+use checksum_helper::pathmatcher::{PathMatcher, PathMatcherBuilder, PathMatcherError};
 use checksum_helper::ChecksumHelperOptions;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ mod build;
 mod incremental;
 mod modify;
 mod verify;
+mod progress;
 
 fn pause() {
     let mut stdin = std::io::stdin();
@@ -148,6 +149,23 @@ pub struct VerifyMatcherArgs {
     /// Block patterns always take precedence over allow patterns.
     #[arg(long, num_args = 1..)]
     verify_block: Vec<String>,
+}
+
+impl VerifyMatcherArgs {
+    fn to_path_matcher(self) -> Result<PathMatcher, PathMatcherError> {
+        let mut builder = PathMatcherBuilder::new();
+
+        for allow in self.verify_allow {
+            builder = builder.allow(allow)?;
+        }
+
+        for block in self.verify_block {
+            builder = builder.block(block)?;
+        }
+
+        builder
+            .build()
+    }
 }
 
 #[derive(Args)]

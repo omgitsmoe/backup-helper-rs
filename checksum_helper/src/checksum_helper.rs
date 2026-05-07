@@ -85,7 +85,7 @@ impl ChecksumHelper {
         let most_current = self.most_current.as_ref().expect("checked above");
 
         let root = self.root();
-        let filename = default_filename(&root, "missing", "_missing_");
+        let filename = default_filename(&root, "missing", "missing_");
         let mut hc = HashCollection::new(Some(&root.join(filename)), None)?;
         // dyanmic borrow checking needed, since we use it in the predicate closure
         // as well as in our for loop while the closure is still alive

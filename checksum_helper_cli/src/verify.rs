@@ -1,214 +1,223 @@
-use crate::{MostCurrentArgs, VerifyMatcherArgs};
+use checksum_helper::{
+    checksum_helper::VerifyRootProgress, collection::VerifyProgress, hashed_file::VerifyResult,
+    ChecksumHelperOptions,
+};
 
-use std::path::Path;
+use crate::{progress::ProgressReporter, MostCurrentArgs, VerifyMatcherArgs};
 
+use std::path::{Path, PathBuf};
 
-pub fn verify_root(root: impl AsRef<Path>, _most_current_args: MostCurrentArgs, _matcher: VerifyMatcherArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::path::absolute(root)?;
-    let mut ch = checksum_helper::ChecksumHelper::new(&root)?;
+#[derive(Default)]
+pub struct VerifySummary {
+    pub ok: u64,
+    pub missing: Vec<PathBuf>,
+    pub mismatch: Vec<PathBuf>,
+    pub mismatch_size: Vec<PathBuf>,
+    pub corrupted: Vec<PathBuf>,
+    pub outdated: Vec<PathBuf>,
+}
 
-    let mut files_found = 0usize;
-    let mut files_ignored = 0usize;
+#[derive(Debug, PartialEq)]
+pub enum VerifySummaryResult {
+    Success,
+    WithWarnings,
+    WithErrors,
+}
 
-    let mut ok = Vec::new();
-    let mut missing = Vec::new();
-    let mut mismatch = Vec::new();
-    let mut mismatch_size = Vec::new();
-    let mut corrupted = Vec::new();
-    let mut outdated = Vec::new();
+impl std::fmt::Display for VerifySummaryResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VerifySummaryResult::Success => {
+                write!(f, "Success! Verified all files!")
+            }
 
-    // track current file + last printed progress
-    let mut current_file: Option<std::path::PathBuf> = None;
+            VerifySummaryResult::WithWarnings => {
+                write!(f, "Warning: Verified all files with warnings!")
+            }
 
-    let verify = ch.verify_root(
-        |_path| true,
-        |p| {
-            match p {
-                checksum_helper::checksum_helper::VerifyRootProgress::BuildMostCurrent(
-                    most_current_progress,
-                ) => match most_current_progress {
-                    checksum_helper::checksum_helper::MostCurrentProgress::FoundFile(_path_buf) => {
-                        files_found += 1;
-                        print!(
-                            "\r[BUILD] found {:03} (+ {:03} ignored)",
-                            files_found, files_ignored
-                        );
-                    }
+            VerifySummaryResult::WithErrors => {
+                write!(f, "Failure: There were verification failures!")
+            }
+        }
+    }
+}
 
-                    checksum_helper::checksum_helper::MostCurrentProgress::IgnoredPath(
-                        _path_buf,
-                    ) => {
-                        files_ignored += 1;
-                    }
+impl VerifySummaryResult {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::Success => 0,
+            Self::WithWarnings => 1,
+            Self::WithErrors => 2,
+        }
+    }
 
-                    checksum_helper::checksum_helper::MostCurrentProgress::MergeHashFile(
-                        path_buf,
-                    ) => {
-                        println!("\n[MERGE] {:?}", path_buf);
-                    }
-                },
+    pub fn as_result(&self) -> Result<(), String> {
+        if *self == Self::Success {
+            Ok(())
+        } else {
+            Err(format!("{}", self))
+        }
+    }
+}
 
-                checksum_helper::checksum_helper::VerifyRootProgress::Verify(verify_progress) => {
-                    match verify_progress {
-                        checksum_helper::collection::VerifyProgress::Pre(common) => {
-                            let path = common.tree_root.join(common.relative_path);
-                            current_file = Some(path.clone());
+impl VerifySummary {
+    pub fn record(&mut self, result: &VerifyResult, path: impl AsRef<Path>) {
+        match result {
+            VerifyResult::Ok => self.ok += 1,
+            VerifyResult::FileMissing(_) => self.missing.push(path.as_ref().to_path_buf()),
+            VerifyResult::Mismatch => self.mismatch.push(path.as_ref().to_path_buf()),
+            VerifyResult::MismatchSize => self.mismatch_size.push(path.as_ref().to_path_buf()),
+            VerifyResult::MismatchCorrupted => self.corrupted.push(path.as_ref().to_path_buf()),
+            VerifyResult::MismatchOutdatedHash => self.outdated.push(path.as_ref().to_path_buf()),
+        }
+    }
 
-                            println!(
-                                "\n[VERIFY] ({:>4}/{:>4}) {:?}",
-                                common.file_number_processed, common.file_number_total, path
-                            );
+    pub fn report(&self) -> VerifySummaryResult {
+        println!("\n========== VERIFY SUMMARY ==========");
 
-                            println!(
-                                "[PROG ] bytes {:>10} / {:>10}",
-                                common.size_processed_bytes, common.size_total_bytes
-                            );
-                        }
+        let total = self.ok as usize
+            + self.missing.len()
+            + self.mismatch.len()
+            + self.mismatch_size.len()
+            + self.corrupted.len()
+            + self.outdated.len();
 
-                        checksum_helper::collection::VerifyProgress::During(hash_progress) => {
-                            if let Some(path) = &current_file {
-                                let percent = if hash_progress.bytes_total > 0 {
-                                    (hash_progress.bytes_read as f64
-                                        / hash_progress.bytes_total as f64)
-                                        * 100.0
-                                } else {
-                                    0.0
-                                };
+        println!(
+            "Total: {} | OK: {} | ERR: {} | WARN: {}",
+            total,
+            self.ok,
+            self.missing.len()
+                + self.mismatch.len()
+                + self.mismatch_size.len()
+                + self.corrupted.len(),
+            self.outdated.len()
+        );
 
-                                print!(
-                                    "\r[HASH ] {:<30} {:>8}/{:>8} bytes ({:5.1}%)",
-                                    path.file_name().unwrap_or_default().to_string_lossy(),
-                                    hash_progress.bytes_read,
-                                    hash_progress.bytes_total,
-                                    percent
-                                );
-                            } else {
-                                print!(
-                                    "\r[HASH ] {:>8}/{:>8} bytes",
-                                    hash_progress.bytes_read, hash_progress.bytes_total
-                                );
-                            }
-                        }
+        let has_errors = !self.missing.is_empty()
+            || !self.mismatch.is_empty()
+            || !self.mismatch_size.is_empty()
+            || !self.corrupted.is_empty();
+        let has_warnings = !self.outdated.is_empty();
 
-                        checksum_helper::collection::VerifyProgress::Post(post) => {
-                            let path = post.progress.tree_root.join(post.progress.relative_path);
+        if !has_errors {
+            println!("✅ ALL FILES VERIFIED SUCCESSFULLY");
+        } else {
+            println!("❌ VERIFICATION FAILED\n");
 
-                            print!("\r");
-
-                            let status = match post.result {
-                                checksum_helper::hashed_file::VerifyResult::Ok => {
-                                    ok.push(path.clone());
-                                    "[OK      ]"
-                                }
-
-                                checksum_helper::hashed_file::VerifyResult::FileMissing(_error_kind) => {
-                                    missing.push(path.clone());
-                                    "[ERR MISS]"
-                                }
-
-                                checksum_helper::hashed_file::VerifyResult::Mismatch => {
-                                    mismatch.push(path.clone());
-                                    "[ERR HASH]"
-                                }
-
-                                checksum_helper::hashed_file::VerifyResult::MismatchSize => {
-                                    mismatch_size.push(path.clone());
-                                    "[ERR SIZE]"
-                                }
-
-                                checksum_helper::hashed_file::VerifyResult::MismatchCorrupted => {
-                                    corrupted.push(path.clone());
-                                    "[ERR CORR]"
-                                }
-
-                                checksum_helper::hashed_file::VerifyResult::MismatchOutdatedHash => {
-                                    outdated.push(path.clone());
-                                    "[WARN OLD]" // not strictly an error
-                                }
-                            };
-
-                            println!("{} {:?}", status, path);
-                        }
-                    }
+            if !self.missing.is_empty() {
+                println!("--- Missing files ({}) ---", self.missing.len());
+                for p in &self.missing {
+                    println!("[ERR MISS  ] {:?}", p);
                 }
+                println!();
             }
+
+            if !self.mismatch.is_empty() {
+                println!("--- Hash mismatches ({}) ---", self.mismatch.len());
+                for p in &self.mismatch {
+                    println!("[ERR HASH  ] {:?}", p);
+                }
+                println!();
+            }
+
+            if !self.mismatch_size.is_empty() {
+                println!("--- Size mismatches ({}) ---", self.mismatch_size.len());
+                for p in &self.mismatch_size {
+                    println!("[ERR SIZE  ] {:?}", p);
+                }
+                println!();
+            }
+
+            if !self.corrupted.is_empty() {
+                println!("--- Corrupted files ({}) ---", self.corrupted.len());
+                for p in &self.corrupted {
+                    println!("[ERR CORR  ] {:?}", p);
+                }
+                println!();
+            }
+        }
+
+        // Warnings separately (less alarming)
+        if has_warnings {
+            println!("--- Outdated hashes ({}) ---", self.outdated.len());
+            for p in &self.outdated {
+                println!("[WARN STALE] {:?}", p);
+            }
+        }
+
+        match (has_errors, has_warnings) {
+            (true, _) => VerifySummaryResult::WithErrors,
+            (false, true) => VerifySummaryResult::WithWarnings,
+            (false, false) => VerifySummaryResult::Success,
+        }
+    }
+}
+
+pub fn verify_root(
+    root: impl AsRef<Path>,
+    most_current_args: MostCurrentArgs,
+    matcher: VerifyMatcherArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::absolute(root)?;
+    let options = most_current_args.apply(ChecksumHelperOptions::default())?;
+    let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
+    let matcher = matcher.to_path_matcher()?;
+
+    let mut reporter = ProgressReporter::new();
+    let mut summary = VerifySummary::default();
+    ch.verify_root(
+        |path| matcher.is_match(path) && !matcher.is_excluded(path),
+        |p| {
+            if let VerifyRootProgress::Verify(VerifyProgress::Post(post)) = p {
+                summary.record(&post.result, post.progress.relative_path);
+            }
+            reporter.report_verify_root(p);
         },
-    );
+    )?;
 
-    println!("\n========== VERIFY SUMMARY ==========");
-
-    let total = ok.len()
-        + missing.len()
-        + mismatch.len()
-        + mismatch_size.len()
-        + corrupted.len()
-        + outdated.len();
-
-    println!(
-        "Total: {} | OK: {} | ERR: {} | WARN: {}",
-        total,
-        ok.len(),
-        missing.len() + mismatch.len() + mismatch_size.len() + corrupted.len(),
-        outdated.len()
-    );
-
-    if missing.is_empty() && mismatch.is_empty() && mismatch_size.is_empty() && corrupted.is_empty()
-    {
-        println!("✅ ALL FILES VERIFIED SUCCESSFULLY");
-    } else {
-        println!("❌ VERIFICATION FAILED\n");
-
-        if !missing.is_empty() {
-            println!("--- Missing files ({}) ---", missing.len());
-            for p in &missing {
-                println!("[ERR MISS] {:?}", p);
-            }
-            println!();
-        }
-
-        if !mismatch.is_empty() {
-            println!("--- Hash mismatches ({}) ---", mismatch.len());
-            for p in &mismatch {
-                println!("[ERR HASH] {:?}", p);
-            }
-            println!();
-        }
-
-        if !mismatch_size.is_empty() {
-            println!("--- Size mismatches ({}) ---", mismatch_size.len());
-            for p in &mismatch_size {
-                println!("[ERR SIZE] {:?}", p);
-            }
-            println!();
-        }
-
-        if !corrupted.is_empty() {
-            println!("--- Corrupted files ({}) ---", corrupted.len());
-            for p in &corrupted {
-                println!("[ERR CORR] {:?}", p);
-            }
-            println!();
-        }
-    }
-
-    // Warnings separately (less alarming)
-    if !outdated.is_empty() {
-        println!("--- Outdated hashes ({}) ---", outdated.len());
-        for p in &outdated {
-            println!("[WARN OLD] {:?}", p);
-        }
-    }
-
-    if let Err(err) = verify {
-        println!("ERR: {}", err);
-        std::process::exit(-1);
-    } else {
-        println!("Success! Verified all files!")
-    }
+    let result = summary.report();
+    result.as_result()?;
 
     Ok(())
 }
 
-pub fn verify_file(_root: impl AsRef<Path>, _matcher: VerifyMatcherArgs) -> Result<(), Box<dyn std::error::Error>> {
-    todo!()
+pub fn verify_file(
+    path: impl AsRef<Path>,
+    matcher: VerifyMatcherArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = path.as_ref();
+
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(format!("Expected a path to a hash file, got: {:?}", path).into());
+    }
+
+    let root = if path.is_relative() {
+        std::env::current_dir()?.join(path.parent().expect("checked above"))
+    } else {
+        path.parent().expect("checked above").to_path_buf()
+    };
+
+    let options = ChecksumHelperOptions::default();
+    let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
+    let matcher = matcher.to_path_matcher()?;
+
+    let mut reporter = ProgressReporter::new();
+    let mut summary = VerifySummary::default();
+
+    let hc = ch.read_collection(path)?;
+    ch.verify(
+        &hc,
+        |path| matcher.is_match(path) && !matcher.is_excluded(path),
+        |p| {
+            if let VerifyProgress::Post(post) = p {
+                summary.record(&post.result, post.progress.relative_path);
+            }
+            reporter.report_verify(p);
+        },
+    )?;
+
+    let result = summary.report();
+    result.as_result()?;
+
+    Ok(())
 }
