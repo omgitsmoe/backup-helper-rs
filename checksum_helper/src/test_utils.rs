@@ -73,3 +73,7 @@ pub fn create_ftree(root: &std::path::Path, file_list: &str) {
             .expect("Failed to write to file");
     })
 }
+
+pub fn abs(p: &str) -> std::path::PathBuf {
+    std::path::absolute(p).unwrap()
+}

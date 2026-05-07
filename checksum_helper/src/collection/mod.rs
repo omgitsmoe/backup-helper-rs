@@ -757,8 +757,8 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn relocate_changes_serialized_paths() {
-        let root = Path::new("/foo");
-        let mut ft = FileTree::new(root).unwrap();
+        let root = abs("foo");
+        let mut ft = FileTree::new(&root).unwrap();
 
         let mut hc = HashCollection::new(Some(&root.join("foo.cshd")), None).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz/file.txt").unwrap();
@@ -806,7 +806,7 @@ abcdefff foo/xer.mp4
         let result = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
         assert_eq!(result, expected_serialization_sorted,);
 
-        hc.relocate(Path::new("/foo/foo"));
+        hc.relocate(root.join("foo"));
 
         let expected_serialization_sorted_relocated = "\
 # version 1
@@ -842,9 +842,9 @@ abcdefff foo/xer.mp4
     }
 
     fn setup_two_collections_for_merge() -> (FileTree, HashCollection, HashCollection) {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mut hc = HashCollection::new(
-            Some(&"/foo/hc.cshd"),
+            Some(&abs("foo/hc.cshd")),
             Some(filetime::FileTime::from_unix_time(123, 0)),
         )
         .unwrap();
@@ -959,9 +959,9 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn merge_adds_entries_in_other() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
 
-        let mut hc = HashCollection::new(Some(&"/foo/hc.cshd"), None).unwrap();
+        let mut hc = HashCollection::new(Some(&abs("foo/hc.cshd")), None).unwrap();
         let path_handle = ft.add_file("foo/file1.txt").unwrap();
         let path_handle2 = ft.add_file("bar/file2.txt").unwrap();
         hc.update(
@@ -1137,7 +1137,7 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn not_contained_when_not_in_file_tree() {
-        let ft = FileTree::new("/foo/bar").unwrap();
+        let ft = FileTree::new(abs("foo/bar")).unwrap();
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
         assert!(!hc.contains_path("baz", &ft));
         assert!(!hc.contains_path("baz/bar", &ft));
@@ -1146,7 +1146,7 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn contains_path_when_in_file_tree() {
-        let mut ft = FileTree::new("/foo/bar").unwrap();
+        let mut ft = FileTree::new(abs("foo/bar")).unwrap();
         let eh1 = ft.add_file(Path::new("baz.txt")).unwrap();
         let eh2 = ft.add_file(Path::new("baz/file.txt")).unwrap();
         let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
@@ -1180,7 +1180,8 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn collection_iter() {
-        let mut ft = FileTree::new("/foo/bar").unwrap();
+        let root = abs("foo/bar");
+        let mut ft = FileTree::new(&root).unwrap();
         let eh1 = ft.add_file(Path::new("baz.txt")).unwrap();
         let eh2 = ft.add_file(Path::new("baz/file.txt")).unwrap();
         let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
@@ -1204,12 +1205,12 @@ abcdefff foo/xer.mp4
         let mut iter = hc.iter_with_context(&ft);
 
         let (path, file) = iter.next().unwrap();
-        let expected_path = PathBuf::from("/foo/bar/baz.txt");
+        let expected_path = root.join("baz.txt");
         assert_eq!(path, expected_path);
         assert_eq!(file.raw(|f| f.absolute_path(&ft)), expected_path);
 
         let (path, file) = iter.next().unwrap();
-        let expected_path = PathBuf::from("/foo/bar/baz/file.txt");
+        let expected_path = root.join("baz/file.txt");
         assert_eq!(path, expected_path);
         assert_eq!(file.raw(|f| f.absolute_path(&ft)), expected_path);
 

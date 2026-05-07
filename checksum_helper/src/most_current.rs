@@ -481,16 +481,16 @@ file.rs",
         let options = ChecksumHelperOptions::default();
         for ext in HASH_FILE_EXTENSIONS {
             assert!(include_hash_file(
-                &root,
+                root,
                 &options,
                 path::Path::new(&format!("/opt/foo.{}", ext)),
                 &mut |_| {}
             ));
         }
 
-        for ext in vec!["txt", "bin", "iso", "rs"] {
+        for ext in ["txt", "bin", "iso", "rs"] {
             assert!(!include_hash_file(
-                &root,
+                root,
                 &options,
                 path::Path::new(&format!("/opt/foo.{}", ext)),
                 &mut |_| {}

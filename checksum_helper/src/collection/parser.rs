@@ -366,21 +366,21 @@ mod test {
 
     #[test]
     fn test_parse_handles_empty_string() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
-        assert!(parse(Cursor::new(""), Path::new("/foo/hc.cshd"), &mut ft,)
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        assert!(parse(Cursor::new(""), abs("foo/hc.cshd"), &mut ft,)
             .inspect_err(|e| println!("{}", e))
             .is_ok());
 
-        assert!(parse(Cursor::new("\n"), Path::new("/foo/hc.cshd"), &mut ft,)
+        assert!(parse(Cursor::new("\n"), abs("foo/hc.cshd"), &mut ft,)
             .inspect_err(|e| println!("{}", e))
             .is_ok());
     }
 
     #[test]
     fn parse_line_respects_prefix() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mut hc = HashCollection::new(
-            Some(&Path::new("/foo/hc.cshd")), None)
+            Some(&abs("foo/hc.cshd")), None)
             .unwrap();
         let line = "123,1337,md5,aabbccdd foo/bar/baz.txt";
 
@@ -394,7 +394,7 @@ mod test {
 
     #[test]
     fn test_parse_version_1() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mtime = "1673815645.7979772";
         let size = 1337;
         let hash_type = HashType::Sha512;
@@ -415,7 +415,7 @@ mod test {
                 hash_hex,
                 file_path
             )),
-            Path::new("/foo/bar/hc.cshd"),
+            abs("foo/bar/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))
@@ -451,7 +451,7 @@ mod test {
 
     #[test]
     fn test_parse_version_0() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mtime = "1673815645.7979772";
         let hash_type = HashType::Sha512;
         let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
@@ -469,7 +469,7 @@ mod test {
                 hash_hex,
                 file_path
             )),
-            Path::new("/foo/bar/hc.cshd"),
+            abs("foo/bar/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))
@@ -514,7 +514,7 @@ mod test {
 
     #[test]
     fn test_parse_single_hash() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let hash_type = HashType::Sha512;
         let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
         let file_path = ".gitignore";
@@ -530,7 +530,7 @@ abcdefff *foo/xer.mp4
                 file_path
             )),
             hash_type,
-            Path::new("/foo/hc.cshd"),
+            abs("foo/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))
@@ -575,7 +575,7 @@ abcdefff *foo/xer.mp4
 
     #[test]
     fn test_parse_single_hash_respects_ft_root() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let hash_type = HashType::Sha512;
         let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
         let file_path = ".gitignore";
@@ -591,7 +591,7 @@ abcdefff foo/xer.mp4
                 file_path
             )),
             hash_type,
-            Path::new("/foo/bar/hc.cshd"),
+            abs("foo/bar/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))
@@ -636,7 +636,7 @@ abcdefff foo/xer.mp4
 
     #[test]
     fn parse_respects_ft_root() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mtime = "1673815645.7979772";
         let hash_type = HashType::Sha512;
         let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
@@ -654,7 +654,7 @@ abcdefff foo/xer.mp4
                 hash_hex,
                 file_path
             )),
-            Path::new("/foo/bar/hc.cshd"),
+            abs("foo/bar/hc.cshd"),
             &mut ft,
         )
         .inspect_err(|e| println!("{}", e))

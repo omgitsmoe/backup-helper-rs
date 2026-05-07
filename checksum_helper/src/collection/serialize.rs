@@ -111,12 +111,12 @@ mod test {
     use super::*;
     use super::super::test::setup_minimal_hc;
     use pretty_assertions::assert_eq;
-    use std::path::Path;
     use crate::hash_type::HashType;
+    use crate::test_utils::abs;
 
     #[test]
     fn test_serialize_entry() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mut buf = vec![];
         let prefix = path::Path::new("foo"); // prefix will be stripped from v
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
@@ -137,7 +137,7 @@ mod test {
 
     #[test]
     fn test_serialize_entry_missing_mtime_and_size() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mut buf = vec![];
         let prefix = path::Path::new("foo");
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
@@ -159,8 +159,8 @@ mod test {
     #[test]
     fn test_serialize() {
         let mut buf = vec![];
-        let (mut hc, ft, expected_serialization) = setup_minimal_hc(Path::new("/foo"));
-        hc.relocate(Path::new("/foo"));
+        let (mut hc, ft, expected_serialization) = setup_minimal_hc(&abs("foo"));
+        hc.relocate(abs("foo"));
 
         serialize(&hc, &mut buf, &ft, true).unwrap();
 
@@ -175,9 +175,9 @@ mod test {
     fn test_serialize_strips_collection_root_prefix() {
         // NOTE: The prefix from the FileTree root to the root dir of the collection should
         //       be stripped from paths when serializing.
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mut hc = HashCollection::new(
-            Some(&"/foo/foo/bar/foo.cshd"), None).unwrap();
+            Some(&abs("foo/foo/bar/foo.cshd")), None).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
         hc.update(
             path_handle.clone(),
@@ -232,9 +232,9 @@ mod test {
 
     #[test]
     fn serialize_with_and_without_header() {
-        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        let mut ft = FileTree::new(abs("foo")).unwrap();
         let mut hc = HashCollection::new(
-            Some(&"/foo/foo/bar/foo.cshd"), None).unwrap();
+            Some(&abs("foo/foo/bar/foo.cshd")), None).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
         hc.update(
             path_handle.clone(),
