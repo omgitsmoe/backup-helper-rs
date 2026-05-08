@@ -403,13 +403,54 @@ mod test {
     // Files: 319966, PathsSum: 109877724
     // SIZE: 77481 KB
 
-    // #[test]
+    // path
+    // Files: 1428201, PathsSum: 98463154
+    // SIZE: 204929 KB
+    // ft
+    // Files: 1425530, PathsSum: 6438979976  (<- possible bug in gather_into_file_tree)
+    // SIZE: 302157 KB
+    // path
+    // Files: 1422137, PathsSum: 98261527
+    // SIZE: 204253 KB
+    // ft (using gather directly, no gather_into_file_tree)
+    // Files: 1422565, PathsSum: 98275256
+    // SIZE: 301865 KB
+
+    fn include_mem(e: Entry) -> bool {
+        let path = e.dir_entry.path();
+        let valid_prefixes = [
+            "/home",
+            "/tmp",
+            "/usr",
+            "/etc",
+            "/mnt",
+            "/opt",
+            "/proc",
+        ];
+        if valid_prefixes.iter().any(|p| path.starts_with(p)) {
+            return true;
+        }
+
+        false
+    }
+
+    #[test]
     fn _file_tree_mem_usage() {
-        let root = std::path::Path::new("/home/m");
+        let root = std::path::Path::new("/");
         let mut ft = FileTree::new(root).unwrap();
-        // NOTE to test this you likely need to change
-        //      Err(e) => return Err(e), in gather_into_file_tree
-        let _ = gather_into_file_tree(&mut ft, |_| true).unwrap();
+        let iter = Gather::new(root, include_mem);
+
+        for visit_type in iter {
+            match visit_type {
+                Ok(VisitType::File(v)) => {
+                    let path = v.entry.path();
+                    let path = path.strip_prefix("/").unwrap();
+                    ft.add_file(path).unwrap();
+                }
+                Err(e) => println!("err: {}", e),
+                _ => {}
+            }
+        }
 
         let size = memsize().unwrap();
 
@@ -428,9 +469,9 @@ mod test {
         panic!()
     }
 
-    // #[test]
+    #[test]
     fn _path_memusage() {
-        let iter = Gather::new("/home/m", |_| true);
+        let iter = Gather::new("/", include_mem);
 
         let mut paths = vec![];
         for visit_type in iter {
