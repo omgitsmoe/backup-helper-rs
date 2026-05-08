@@ -415,6 +415,22 @@ mod test {
     // ft (using gather directly, no gather_into_file_tree)
     // Files: 1422565, PathsSum: 98275256
     // SIZE: 301865 KB
+    //
+    // NOTE: forgot that we'd have to store the path twice, once as map key
+    //       and on the HashedFile the second time.
+    //
+    // path (2x stored, map as k+v)
+    // Files: 1581326, PathsSum: 105984310
+    // SIZE: 411544 KB
+    // ft (2x stored, map as k+v just handle, rest in ft)
+    // Files: 1580506, PathsSum: 105957110
+    // SIZE: 366588 KB
+    //
+    // => this still means FileTree is not the right abstraction: would be better
+    //    to "intern" the strings and refer to them with handles
+    //    like: Vec<PathBuf> and type PathId = u32;
+    //    -> use PathId as map key and in HashedFile
+    //       (may not work since we need the path->id and id->path lookup :/)
 
     fn include_mem(e: Entry) -> bool {
         let path = e.dir_entry.path();
@@ -434,18 +450,21 @@ mod test {
         false
     }
 
-    #[test]
+    // #[test]
     fn _file_tree_mem_usage() {
         let root = std::path::Path::new("/");
         let mut ft = FileTree::new(root).unwrap();
         let iter = Gather::new(root, include_mem);
 
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
         for visit_type in iter {
             match visit_type {
                 Ok(VisitType::File(v)) => {
                     let path = v.entry.path();
                     let path = path.strip_prefix("/").unwrap();
-                    ft.add_file(path).unwrap();
+                    let handle = ft.add_file(path).unwrap();
+                    map.insert(handle.clone(), handle.clone());
                 }
                 Err(e) => println!("err: {}", e),
                 _ => {}
@@ -469,15 +488,17 @@ mod test {
         panic!()
     }
 
-    #[test]
+    // #[test]
     fn _path_memusage() {
         let iter = Gather::new("/", include_mem);
 
-        let mut paths = vec![];
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
         for visit_type in iter {
             match visit_type {
                 Ok(VisitType::File(v)) => {
-                    paths.push(v.entry.path());
+                    let path = v.entry.path();
+                    map.insert(path.clone(), path);
                 }
                 Err(e) => println!("err: {}", e),
                 _ => {}
@@ -488,7 +509,7 @@ mod test {
 
         let mut files = 0;
         let mut pathlensum = 0;
-        for p in paths {
+        for (p, _) in map {
             files += 1;
             pathlensum += p.to_string_lossy().len();
             // println!("{:?}", p);
