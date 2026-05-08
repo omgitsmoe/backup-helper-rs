@@ -56,6 +56,9 @@ pub struct Entry<'a> {
 type ReadDirItem = Result<std::fs::DirEntry, std::io::Error>;
 type ReadDirIter = std::vec::IntoIter<ReadDirItem>;
 
+// TODO use lexical order and visit child directories first before
+//      continuing with other entries so we have proper DFS
+//      oder which provides lexical sorting for all paths
 /// Visits directories in a defined order:
 /// .
 /// ./foo/
@@ -284,7 +287,6 @@ mod test {
     use pretty_assertions::assert_eq;
 
     fn gather_into_file_tree<F>(
-        start: &path::Path,
         file_tree: &mut FileTree,
         include_fn: F,
     ) -> Result<Vec<EntryHandle>, Error>
@@ -297,7 +299,7 @@ mod test {
 
         let mut directories = vec![file_tree.root()];
         let mut handle = file_tree.root();
-        let iter = Gather::new(start, include_fn);
+        let iter = Gather::new(file_tree.absolute_path(&handle), include_fn);
 
         for visit_type in iter {
             match visit_type {
@@ -320,6 +322,141 @@ mod test {
         }
 
         Ok(result_handles)
+    }
+
+    fn memsize() -> std::io::Result<String> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let pid = std::process::id();
+        let path = format!("/proc/{}/smaps", pid);
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+
+        let mut total_kb: u64 = 0;
+
+        for line in reader.lines() {
+            let line = line?;
+
+            if line.starts_with("Pss:") {
+                // Format: "Pss:   123 kB"
+                if let Some(value) = line.split_whitespace().nth(1) {
+                    if let Ok(kb) = value.parse::<u64>() {
+                        total_kb += kb;
+                    }
+                }
+            }
+        }
+
+        Ok(format!("{:.6} KB", total_kb))
+    }
+
+    // TODO change filetree: the tree-like storage is not worh it,
+    //      as seen below. Either just use full paths
+    //      or
+    //
+    //      full tree-like instead of storing children
+    //
+    //      type NodeId = u32;
+    //
+    //      struct Node {
+    //          parent: Option<NodeId>,
+    //          name: NameId,              // interned or arena-stored component
+    //          is_directory: bool,
+    //          first_child: Option<NodeId>,
+    //          next_sibling: Option<NodeId>,
+    //      }
+    //      struct Arena {
+    //          nodes: Vec<Node>,
+    //          names: Vec<std::ffi::OsString>,
+    //          // optional: map OsString -> NameId for dedup
+    //      }
+    //
+    //      mb first try
+    //
+    //      pub struct EntryHandle(u32);  // from usize
+    //
+    //      pub struct Entry {
+    //          name: std::ffi::OsString,          // not PathBuf if this is one component
+    //          is_directory: bool,
+    //          parent: Option<EntryHandle>,
+    //          children: Vec<EntryHandle>,        // no repeated names here
+    //                                             // had that, was pretty slow due to lookup
+    //      }
+    //
+    //      or try interning the names
+    //
+    // name: NameId
+    // children: Vec<(NameId, EntryHandle)>
+    // path
+    // Files: 139356, PathsSum: 13772965
+    // SIZE: 29226 KB
+    // ftree
+    // Files: 139356, PathsSum: 15475991
+    // SIZE: 36506 KB
+
+    // path
+    // Files: 319966, PathsSum: 37396172
+    // SIZE: 74302 KB
+    // ft
+    // Files: 319966, PathsSum: 109877724
+    // SIZE: 77481 KB
+
+    // #[test]
+    fn _file_tree_mem_usage() {
+        let root = std::path::Path::new("/home/m");
+        let mut ft = FileTree::new(root).unwrap();
+        // NOTE to test this you likely need to change
+        //      Err(e) => return Err(e), in gather_into_file_tree
+        let _ = gather_into_file_tree(&mut ft, |_| true).unwrap();
+
+        let size = memsize().unwrap();
+
+        let mut files = 0;
+        let mut pathlensum = 0;
+        for f in ft.iter() {
+            let path = ft.absolute_path(&f);
+            // println!("{:?}", path);
+            files += 1;
+            pathlensum += path.to_string_lossy().len();
+        }
+
+        println!("Files: {}, PathsSum: {}", files, pathlensum);
+        println!("SIZE: {}", size);
+
+        panic!()
+    }
+
+    // #[test]
+    fn _path_memusage() {
+        let iter = Gather::new("/home/m", |_| true);
+
+        let mut paths = vec![];
+        for visit_type in iter {
+            match visit_type {
+                Ok(VisitType::File(v)) => {
+                    paths.push(v.entry.path());
+                }
+                Err(e) => println!("err: {}", e),
+                _ => {}
+            }
+        }
+
+        let size = memsize().unwrap();
+
+        let mut files = 0;
+        let mut pathlensum = 0;
+        for p in paths {
+            files += 1;
+            pathlensum += p.to_string_lossy().len();
+            // println!("{:?}", p);
+        }
+
+        println!("Files: {}, PathsSum: {}", files, pathlensum);
+        println!("SIZE: {}", size);
+
+        panic!()
     }
 
     #[test]
@@ -507,7 +644,7 @@ stop d1"#;
     fn int_file_tree_no_filter() {
         let test_path = setup_ftree();
         let mut file_tree = FileTree::new(&test_path).unwrap();
-        let file_handles = gather_into_file_tree(&test_path, &mut file_tree, |_| true).unwrap();
+        let file_handles = gather_into_file_tree(&mut file_tree, |_| true).unwrap();
         let str = to_file_list(&file_tree);
         assert_eq!(
             str,
@@ -545,7 +682,7 @@ vid.mp4"
     fn filter_extension() {
         let test_path = setup_ftree();
         let mut file_tree = FileTree::new(&test_path).unwrap();
-        let file_handles = gather_into_file_tree(&test_path, &mut file_tree, |e| {
+        let file_handles = gather_into_file_tree(&mut file_tree, |e| {
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the filename
             //       -> use extension or str::ends_with
@@ -574,7 +711,7 @@ subdir/other/chksms.md5"
     fn filter_dir() {
         let test_path = setup_ftree();
         let mut file_tree = FileTree::new(&test_path).unwrap();
-        let file_handles = gather_into_file_tree(&test_path, &mut file_tree, |e| {
+        let file_handles = gather_into_file_tree(&mut file_tree, |e| {
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the filename
             //       -> use extension or str::ends_with
