@@ -42,6 +42,8 @@ where
     // NOTE: sort by ascending mtime, so the newer collection overwrite
     //       the entries of older ones (even if no file mtime is present)
     //       (not loading the files as HashCollection, since they could be quite large)
+    // TODO make one collection with both path + mtime, since we compare files
+    //      multiple times
     discover_result.hash_file_paths.sort_by(|a, b| {
         match (mtime(a), mtime(b)) {
             (Some(a), Some(b)) => a.cmp(&b),

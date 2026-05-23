@@ -205,6 +205,8 @@ impl ChecksumHelper {
             }
         }
 
+        // TODO missing DiscoverFilesDone
+
         Ok(CheckMissingResult {
             directories: missing_directories,
             files: missing_files,
@@ -546,6 +548,7 @@ pub struct CheckMissingResult {
     pub files: Vec<path::PathBuf>,
 }
 
+// TODO switch some to a Box err, since some of the error variants bloat my return type size
 #[derive(Debug)]
 pub enum ChecksumHelperError {
     RootIsRelative(path::PathBuf),

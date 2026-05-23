@@ -159,8 +159,6 @@ impl<'a> Incremental<'a> {
     where
         P: FnMut(IncrementalProgress),
     {
-        // TODO this needs to flush intermediate results to disk depending on
-        //      self.options.incremental_periodic_write_interval
         // Build a new collection and remove processed
         // entries from self.most_current (Python version does this, without removal)
         let mut result = HashCollection::new(
@@ -241,6 +239,8 @@ impl<'a> Incremental<'a> {
         Ok(result)
     }
 
+    // TODO: test the case where hashes compare the same with include_unchanged=false,
+    //       but previous doesn't have a mtime, so the mtime should be updated!
     fn compare_files_and_include<P>(
         &self,
         on_disk: &FileMut,

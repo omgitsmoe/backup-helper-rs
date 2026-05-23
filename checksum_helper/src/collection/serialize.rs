@@ -31,6 +31,7 @@ pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tre
     if with_header {
         writer.write_all(VERSION_HEADER.as_bytes())?;
     }
+    // TODO: !IMPORTANT! sort by path first
     for (path_handle, hashed_file) in &collection.map {
         serialize_entry(writer, &prefix, path_handle, hashed_file, file_tree)?;
     }

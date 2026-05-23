@@ -324,6 +324,8 @@ impl HashCollection {
         for (idx, (path_handle, file_raw)) in self.map.iter().enumerate() {
             let path = file_tree.relative_path(path_handle);
             if !include(&path) {
+                // TODO counts need to be adjusted! + test
+                //      -> mb filter before actual iteration?
                 continue;
             }
 

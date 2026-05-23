@@ -431,6 +431,7 @@ mod test {
     //    like: Vec<PathBuf> and type PathId = u32;
     //    -> use PathId as map key and in HashedFile
     //       (may not work since we need the path->id and id->path lookup :/)
+    // TODO benchmark FileTree vs storing full paths vs interning
 
     fn include_mem(e: Entry) -> bool {
         let path = e.dir_entry.path();
