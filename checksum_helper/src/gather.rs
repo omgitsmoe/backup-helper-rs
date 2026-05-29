@@ -41,6 +41,7 @@ pub enum VisitType {
     ListDirStop(u32),
     Directory(VisitData),
     File(VisitData),
+    SpecialFile((path::PathBuf, std::fs::FileType)),
 }
 
 pub struct Entry<'a> {
@@ -48,6 +49,7 @@ pub struct Entry<'a> {
     /// 1 => one directory down from root
     pub depth: u32,
     pub is_directory: bool,
+    pub file_type: std::fs::FileType,
     pub dir_entry: &'a fs::DirEntry,
     /// Path relative to the start path passed into [`Gather::new`]
     pub relative_to_root: &'a path::Path,
@@ -119,6 +121,7 @@ where
                         if !(self.predicate)(Entry {
                             depth: self.current_depth,
                             is_directory: is_dir,
+                            file_type,
                             dir_entry: &e,
                             relative_to_root: &relative_to_root,
                         }) {
@@ -139,38 +142,8 @@ where
                                 entry: e,
                                 relative_to_root,
                             }))
-                        } else if file_type.is_symlink() {
-                            // NOTE: use fs::metadata, since it resolves symlinks
-                            let meta = match std::fs::metadata(e.path()) {
-                                Ok(m) => m,
-                                Err(err) => {
-                                    return Some(Err(Error::Iteration(
-                                        format!("failed to read file metadata: {:?}", err),
-                                        err.kind(),
-                                    )))
-                                }
-                            };
-
-                            if meta.is_file() {
-                                Ok(VisitType::File(VisitData {
-                                    depth: self.current_depth,
-                                    entry: e,
-                                    relative_to_root,
-                                }))
-                            } else if meta.is_dir() {
-                                // we don't follow symlinks to directories for traversal
-                                // but we still output an iteration entry
-                                Ok(VisitType::Directory(VisitData {
-                                    depth: self.current_depth,
-                                    entry: e,
-                                    relative_to_root,
-                                }))
-                            } else {
-                                // we only follow symlinks to files
-                                continue;
-                            }
                         } else {
-                            continue;
+                            Ok(VisitType::SpecialFile((e.path(), file_type)))
                         }
                     }
                     Err(err) => Err(Error::ReadFileInfo((
@@ -239,7 +212,8 @@ where
 
 pub struct FilteredEntry<'a> {
     pub entry: Entry<'a>,
-    /// Whether the entry was ignored by [`GatherFiltered::filter`].
+    /// Whether the entry was ignored by [`GatherFiltered::filter`]
+    /// or if it was ignored due to being a special file.
     /// Can be overriden, by e.g., returning `true` from the predicate.
     pub ignored: bool,
 }
@@ -266,6 +240,32 @@ where
                 });
             }
         } else if !filter.is_match(e.relative_to_root) {
+            return predicate(FilteredEntry {
+                entry: e,
+                ignored: true,
+            });
+        } else if !e.file_type.is_file() {
+            // NOTE: better handling for symlinks and other special files:
+            //      we will only visit regular files by default, but notify
+            //      about skipped files!
+            //
+            //      options:
+            //      - skip non-regular files
+            //        - scorch: skips non-regular files
+            //        - `find ./foo/ -type f -print0 | xargs -0 sha1sum`
+            //          also skips non-regular files
+            //      - follow the symlink for files, record error for faulty links
+            //        - is confusing, since we don't follow links to directories
+            //          and doing that would be a completely different rabbit hole
+            //        - also most tools don't follow symlinks when copying by
+            //          default, e.g. rsync BUT cp does follow BUT only
+            //          in file, not directory-mode :/
+            //      - hash the contents of a symlink
+            //        - would lead to confusing results for links that point
+            //          to the same path, but different contents depending
+            //          on the environment
+            //      - record the symlink itself as a special entry
+            //        - same drawback as hashing the link contents
             return predicate(FilteredEntry {
                 entry: e,
                 ignored: true,
@@ -562,6 +562,7 @@ mod test {
                         .replace("\\", "/"),
                     v.relative_to_root.to_str().unwrap().replace('\\', "/"),
                 )),
+                VisitType::SpecialFile(_) => unreachable!("no special files expected")
             }
         }
         let actual = visits.join("\n");
@@ -608,8 +609,7 @@ stop d1"#
             .replace('\\', "/")
     }
 
-    #[test]
-    fn gather_handles_symlinks() {
+    fn setup_symlink_testdir() -> path::PathBuf {
         use std::fs;
 
         let test_path = testdir!();
@@ -657,7 +657,12 @@ stop d1"#
         )
         .unwrap();
 
-        // --- run gather --------------------------------------------------------
+        test_path
+    }
+
+    #[test]
+    fn gather_handles_symlinks() {
+        let test_path = setup_symlink_testdir();
 
         let mut visits = vec![];
         let gather = Gather::new(&test_path, |_| true);
@@ -680,6 +685,11 @@ stop d1"#
                     v.depth,
                     normalize(&test_path, v.entry.path())
                 )),
+                VisitType::SpecialFile((p, file_type)) => visits.push(format!(
+                    "special {} islink: {}",
+                    normalize(&test_path, p),
+                    file_type.is_symlink()
+                )),
             }
         }
 
@@ -693,9 +703,9 @@ stop d1"#
         let expected = r#"start d0
 dir d0 dir
 file d0 file.txt
-dir d0 link_to_dir
-file d0 link_to_file
-file d0 link_to_link
+special link_to_dir islink: true
+special link_to_file islink: true
+special link_to_link islink: true
 stop d0
 start d1
 stop d1"#;
@@ -1021,5 +1031,72 @@ vid.mp4"
                 (path::PathBuf::from("root.mp4"), root.join("root.mp4")),
             }
         );
+    }
+
+    #[test]
+    fn filtered_ignores_symlinks_by_default() {
+        let test_path = setup_symlink_testdir();
+
+        let mut had_special_file = false;
+        let filter = PathMatcherBuilder::new().build().unwrap();
+        let iter = filtered(&test_path, &filter, |e| {
+            if !e.entry.is_directory && !e.entry.file_type.is_file() {
+                assert!(e.ignored);
+                had_special_file = true;
+            }
+
+            // NOTE: !IMPRORTANT! need to return the reversed, since it's used
+            //       to determine whether to descent into e.entry
+            if e.ignored {
+                return false;
+            }
+
+            true
+        });
+
+        for v in iter {
+            let v = v.unwrap();
+
+            if let VisitType::SpecialFile(_) = v {
+                unreachable!()
+            }
+        }
+
+        assert!(had_special_file);
+    }
+
+    #[test]
+    fn filtered_ignored_symlink_can_be_overridden() {
+        let test_path = setup_symlink_testdir();
+
+        let mut had_special_file_pred = false;
+        let filter = PathMatcherBuilder::new().build().unwrap();
+        let iter = filtered(&test_path, &filter, |e| {
+            if !e.entry.is_directory && !e.entry.file_type.is_file() {
+                had_special_file_pred = true;
+
+                return true;
+            }
+
+            // NOTE: !IMPRORTANT! need to return the reversed, since it's used
+            //       to determine whether to descent into e.entry
+            if e.ignored {
+                return false;
+            }
+
+            true
+        });
+
+        let mut visited_special_file = false;
+        for v in iter {
+            let v = v.unwrap();
+
+            if let VisitType::SpecialFile(_) = v {
+                visited_special_file = true;
+            }
+        }
+
+        assert!(had_special_file_pred);
+        assert!(visited_special_file);
     }
 }

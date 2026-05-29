@@ -120,21 +120,33 @@ impl<'a> Incremental<'a> {
                 true
             });
 
+        let mut ignored_special_num = 0usize;
         for entry in iter {
             let entry = entry?;
-            if let VisitType::File(v) = entry {
-                let handle = self.file_tree.add_file(v.relative_to_root)?;
-                self.files_to_checksum.push(handle);
-                progress.borrow_mut()(IncrementalProgress::DiscoverFilesFound(
-                    self.files_to_checksum.len() as u64,
-                ));
+            match entry {
+                VisitType::File(v) => {
+                    let handle = self.file_tree.add_file(v.relative_to_root)?;
+                    self.files_to_checksum.push(handle);
+                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesFound(
+                        self.files_to_checksum.len() as u64,
+                    ));
+                }
+                VisitType::ListDirStart(_) => {},
+                VisitType::ListDirStop(_) => {},
+                VisitType::Directory(_) => {},
+                // TODO test (but should not appear, since ignored by filtered, unless we overwrite
+                VisitType::SpecialFile((p, _)) => {
+                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(
+                        p));
+                    ignored_special_num += 1;
+                },
             }
         }
 
         let mut progress = progress.into_inner();
         progress(
             IncrementalProgress::DiscoverFilesDone(
-                self.files_to_checksum.len(), ignored_num));
+                self.files_to_checksum.len(), ignored_num + ignored_special_num));
 
         Ok(())
     }
