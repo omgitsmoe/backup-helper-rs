@@ -273,6 +273,38 @@ impl FileTree {
     }
 }
 
+// TODO change filetree to something like below
+//      keep the handle (could otherwise also use 'str, but former is prob easier)
+// pub struct StorePackedChunked {
+//     chunk_size: usize,
+//     chunks: Vec<Vec<u8>>,
+//     pos: usize,
+//     offsets: Vec<usize>,
+//     total_data_len: usize,
+// }
+// impl StorePackedChunked {
+//     pub fn store(&mut self, path: &[u8]) -> usize {
+//         if self.chunks.is_empty() || self.pos + path.len() > self.chunk_size {
+//             self.chunks.push(vec![0; self.chunk_size]); // zero-init, trivial cost
+//             self.pos = 0;
+//         }
+//         let chunk = self.chunks.last_mut().unwrap();
+//         chunk[self.pos..self.pos + path.len()].copy_from_slice(path);
+//         let global = (self.chunks.len() - 1) * self.chunk_size + self.pos;
+//         self.pos += path.len();
+//         self.total_data_len = global;
+//         self.offsets.push(global);
+//         self.offsets.len() - 1
+//     }
+//     pub fn get(&self, handle: usize) -> &[u8] {
+//         let start = self.offsets[handle];
+//         let end = self.offsets.get(handle + 1).copied().unwrap_or(self.total_data_len);
+//         let chunk = start / self.chunk_size;
+//         let local = start % self.chunk_size;
+//         &self.chunks[chunk][local..local + (end - start)]
+//     }
+// }
+
 impl Display for FileTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "FileTree{{")?;

@@ -273,8 +273,13 @@ impl HashCollection {
         //       and only fall back to the collection mtime if no mtime
         //       is stored
         let keep_ours = match (self.mtime, other.mtime) {
-            (Some(our_mtime), Some(their_mtime)) => our_mtime > their_mtime,
+            (Some(our_mtime), Some(their_mtime)) => our_mtime >= their_mtime,
             (None, Some(_)) => false,
+            // TODO: does this make sense?
+            //       in the context of update_most_current where the files
+            //       are sorted by mtime it would make the most sense to
+            //       use other's entries if any mtime is zero
+            // => add MergePolicy: prefer other/prefer ours to decide what happens
             (Some(_), None) => true,
             (None, None) => true,
         };
@@ -926,6 +931,25 @@ abcdefff foo/xer.mp4
         let (ft, mut hc, mut other) = setup_two_collections_for_merge();
         hc.set_mtime(Some(filetime::FileTime::from_unix_time(123, 0)));
         other.set_mtime(None);
+
+        hc.merge(other).unwrap();
+
+        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        assert_eq!(
+            serialized,
+            "\
+# version 1
+123,1337,md5,abbccdde bar/file2.txt
+222,1337,md5,aabbccdd foo/file1.txt
+"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_entries_from_self_if_same_mtime() {
+        let (ft, mut hc, mut other) = setup_two_collections_for_merge();
+        hc.set_mtime(Some(filetime::FileTime::from_unix_time(1337, 0)));
+        other.set_mtime(Some(filetime::FileTime::from_unix_time(1337, 0)));
 
         hc.merge(other).unwrap();
 
