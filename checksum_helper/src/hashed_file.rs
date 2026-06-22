@@ -367,6 +367,11 @@ pub(crate) fn mtimes_match(a: Option<FileTime>, b: Option<FileTime>) -> bool {
         (Some(a), Some(b)) => {
             let diff_secs = a.seconds() - b.seconds();
             let diff_nanos = a.nanoseconds() as i64 - b.nanoseconds() as i64;
+            // More than 1 second diff means >1000 ns difference, bail early
+            // to avoid i64 overflow on the multiplication (e.g. Windows epoch)
+            if diff_secs.abs() > 1 {
+                return false;
+            }
             let total_nanos = diff_secs * 1_000_000_000 + diff_nanos;
             total_nanos.abs() <= 1_000
         }
@@ -649,10 +654,18 @@ mod test {
     #[test]
     fn test_verify_mismatch_outdated() {
         let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
-        let mut file = FileMut::from_raw(&mut raw,&ft);
-        let (_, current_mtime) = file.as_file().fetch_size_and_mtime().unwrap();
+        let mut file = FileMut::from_raw(&mut raw, &ft);
+        let (_, _current_mtime) = file.as_file().fetch_size_and_mtime().unwrap();
+        // Use SystemTime (Unix epoch) for platform-independent arithmetic.
+        // Directly using current_mtime.seconds() on Windows gives Windows epoch
+        // seconds, which breaks from_unix_time().
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("SystemTime before Unix epoch");
         let outdated_mtime = filetime::FileTime::from_unix_time(
-            current_mtime.seconds() - 5, current_mtime.nanoseconds());
+            now.as_secs().saturating_sub(5) as i64,
+            now.subsec_nanos(),
+        );
         file.raw(|raw| raw.set_mtime(Some(outdated_mtime)));
 
         let new_content = "foobaz";
