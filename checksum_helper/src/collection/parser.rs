@@ -335,7 +335,26 @@ mod test {
         assert_eq!(parse_mtime("   ,foo,bar"), Ok((None, "foo,bar")));
     }
 
-    // TODO: error cases
+    #[test]
+    fn test_parse_mtime_error_cases() {
+        // Missing comma delimiter
+        assert_eq!(
+            parse_mtime("1337"),
+            Err(HashCollectionError::InvalidHashLine((
+                "1337".to_owned(),
+                String::new()
+            )))
+        );
+        // Invalid float
+        assert_eq!(
+            parse_mtime("abc,foo"),
+            Err(HashCollectionError::InvalidHashLine((
+                "abc".to_owned(),
+                "abc,foo".to_owned()
+            )))
+        );
+    }
+
     #[test]
     fn test_parse_mtime() {
         assert_eq!(
@@ -354,7 +373,26 @@ mod test {
         assert_eq!(parse_size("   ,foo,bar"), Ok((None, "foo,bar")));
     }
 
-    // TODO: error cases
+    #[test]
+    fn test_parse_size_error_cases() {
+        // Missing comma delimiter
+        assert_eq!(
+            parse_size("1337"),
+            Err(HashCollectionError::InvalidHashLine((
+                "1337".to_owned(),
+                String::new()
+            )))
+        );
+        // Invalid integer
+        assert_eq!(
+            parse_size("abc,foo"),
+            Err(HashCollectionError::InvalidHashLine((
+                "abc".to_owned(),
+                "abc,foo".to_owned()
+            )))
+        );
+    }
+
     #[test]
     fn test_parse_size() {
         assert_eq!(parse_size("42069,foo,bar"), Ok((Some(42069), "foo,bar")));
@@ -694,6 +732,75 @@ abcdefff foo/xer.mp4
   bar/foo/bar/baz
   bar/foo/xer.mp4
 }"
+        );
+    }
+
+    #[test]
+    fn test_parse_hash_error_cases() {
+        // Missing comma before hash type
+        assert_eq!(
+            parse_hash("sha512 abcdef foo"),
+            Err(HashCollectionError::InvalidHashLine((
+                "sha512 abcdef foo".to_owned(),
+                String::new()
+            )))
+        );
+        // Invalid hash type
+        assert_eq!(
+            parse_hash("foobar,abcdef foo/bar"),
+            Err(HashCollectionError::UnsupportedHashType("foobar".to_owned()))
+        );
+        // Missing space after hash hex
+        assert_eq!(
+            parse_hash("sha512,abcdef"),
+            Err(HashCollectionError::InvalidHashLine((
+                "abcdef".to_owned(),
+                String::new()
+            )))
+        );
+        // Invalid hex representation
+        assert_eq!(
+            parse_hash("sha512,xyz foo/bar"),
+            Err(HashCollectionError::InvalidHashLine((
+                "xyz".to_owned(),
+                String::new()
+            )))
+        );
+        // Absolute path
+        assert_eq!(
+            parse_hash("sha512,abcdefff /foo/bar"),
+            Err(HashCollectionError::AbsolutePath("/foo/bar".to_owned()))
+        );
+    }
+
+    #[test]
+    fn test_parse_single_hash_error_cases() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        // Missing space delimiter (no path)
+        assert_eq!(
+            parse_single_hash(
+                Cursor::new("abcdef"),
+                HashType::Sha512,
+                abs("foo/hc.cshd"),
+                &mut ft,
+            ),
+            Err(HashCollectionError::InvalidSingleHashLine((
+                "abcdef".to_owned(),
+                String::new()
+            )))
+        );
+        // Invalid hex
+        assert_eq!(
+            parse_single_hash(
+                Cursor::new("xyz foo/bar"),
+                HashType::Sha512,
+                abs("foo/hc.cshd"),
+                &mut ft,
+            ),
+            Err(HashCollectionError::InvalidSingleHashLine((
+                "xyz".to_owned(),
+                format!("{:?}", PathBuf::from("foo/bar"))
+            )))
         );
     }
 }

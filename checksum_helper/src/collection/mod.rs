@@ -32,8 +32,6 @@ pub struct HashCollection {
     mtime: Option<filetime::FileTime>,
 }
 
-// TODO: add datetime/mtime of the collection itself to the file, then we don't have to
-//       rely on mtime for cshd >=v1 files
 impl HashCollection {
     pub fn root(&self) -> Option<&PathBuf> {
         self.root_dir.as_ref()
@@ -51,7 +49,6 @@ impl HashCollection {
     }
 
     pub fn rename(&mut self, name: &OsStr) {
-        // TODO check extension?
         self.name = Some(name.to_owned());
     }
 
