@@ -54,6 +54,14 @@ impl ChecksumHelper {
         self.file_tree.absolute_path(&self.file_tree.root())
     }
 
+    /// Generate a [`HashCollection`], while comparing the resulting hashes
+    /// to the hashes in the *most current* hash file.
+    ///
+    /// Depending on [`ChecksumHelperOptions.incremental_include_unchanged_files`]
+    /// only the changed files are kept.
+    ///
+    /// To skip checking "unchanged" files: set
+    /// [`ChecksumHelperOptions.incremental_skip_unchanged`].
     pub fn incremental<P>(&mut self, mut progress: P) -> Result<HashCollection>
     where
         P: FnMut(IncrementalProgress),
@@ -164,6 +172,13 @@ impl ChecksumHelper {
             }
         }
 
+        // TODO split part of this into a private function, so it can be reused
+        //      by fill_missing
+        //      -> doesn't really work, since we exit early out of walkin a dir if missing
+        // TODO do we still need fill_missing?
+        //      using incremental_skip_unchanged=True seems better?
+        //      not exactly the same, but what you want most of the time
+        //
         // dyanmic borrow checking needed, since we use it in the predicate closure
         // as well as in our for loop while the closure is still alive
         let progress = RefCell::new(progress);

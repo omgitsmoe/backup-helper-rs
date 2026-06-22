@@ -275,11 +275,6 @@ impl HashCollection {
         let keep_ours = match (self.mtime, other.mtime) {
             (Some(our_mtime), Some(their_mtime)) => our_mtime >= their_mtime,
             (None, Some(_)) => false,
-            // TODO: does this make sense?
-            //       in the context of update_most_current where the files
-            //       are sorted by mtime it would make the most sense to
-            //       use other's entries if any mtime is zero
-            // => add MergePolicy: prefer other/prefer ours to decide what happens
             (Some(_), None) => true,
             (None, None) => true,
         };

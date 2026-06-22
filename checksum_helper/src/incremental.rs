@@ -1,5 +1,5 @@
 use crate::collection::HashCollection;
-use crate::hashed_file::{FileRaw, FileMut};
+use crate::hashed_file::{mtimes_match, FileRaw, FileMut};
 use crate::file_tree::{FileTree, EntryHandle};
 use crate::gather::{filtered, VisitType};
 use crate::most_current::MostCurrentProgress;
@@ -198,7 +198,7 @@ impl<'a> Incremental<'a> {
             progress(IncrementalProgress::PreRead(relative_path.to_owned()));
             file.update_size_and_mtime_from_disk()?;
             if let (true, Some(p)) = (self.options.incremental_skip_unchanged, previous) {
-                if p.mtime().is_some() && file.raw(|r| r.mtime()) == p.mtime() {
+                if mtimes_match(file.raw(|r| r.mtime()), p.mtime()) {
                     // we skip checking the hash on disk, since mtime is unchanged
                     // and the user set incremental_skip_unchanged
                     if self.options.incremental_include_unchanged_files {

@@ -39,9 +39,15 @@ where
         std::fs::metadata(p).and_then(|m| m.modified()).ok()
     }
 
-    // NOTE: sort by ascending mtime, so the newer collection overwrite
+    // NOTE: sort by ascending mtime, so the newer collection overwrites
     //       the entries of older ones (even if no file mtime is present)
-    //       (not loading the files as HashCollection, since they could be quite large)
+    //       (not loading the files as HashCollection, since they could be quite large).
+    //
+    //       this is necessary, since .merge will count a collection with mtime
+    //       as older and keep the other entries and most_current __has no mtime__
+    //       we could assign max(most_current.mtime, hc.mtime) while iterating,
+    //       but this also solves testing issues, so prefer this
+    //
     // TODO make one collection with both path + mtime, since we compare files
     //      multiple times
     discover_result.hash_file_paths.sort_by(|a, b| {

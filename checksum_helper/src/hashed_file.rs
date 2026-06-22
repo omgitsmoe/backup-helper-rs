@@ -279,7 +279,7 @@ impl<'a> File<'a> {
         }
 
         let mtime_on_disk = filetime::FileTime::from_last_modification_time(&meta);
-        if self.file.mtime().expect("checked above") == mtime_on_disk {
+        if mtimes_match(self.file.mtime(), Some(mtime_on_disk)) {
             Ok(VerifyResult::MismatchCorrupted)
         } else {
             Ok(VerifyResult::MismatchOutdatedHash)
@@ -359,6 +359,19 @@ pub enum VerifyResult {
     /// time of the file on disk is newer or older compared to the stored
     /// modification time. The stored hash might be outdated.
     MismatchOutdatedHash,
+}
+
+pub(crate) fn mtimes_match(a: Option<FileTime>, b: Option<FileTime>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            let diff_secs = a.seconds() - b.seconds();
+            let diff_nanos = a.nanoseconds() as i64 - b.nanoseconds() as i64;
+            let total_nanos = diff_secs * 1_000_000_000 + diff_nanos;
+            total_nanos.abs() <= 1_000
+        }
+        _ => false,
+    }
 }
 
 fn compute_hash<R: BufRead, P: FnMut(u64)>(reader: R, hash_type: HashType, progress: P) -> Result<Vec<u8>> {
