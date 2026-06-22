@@ -196,6 +196,7 @@ impl<'a> Incremental<'a> {
             let previous = self.most_current.get(&handle);
 
             progress(IncrementalProgress::PreRead(relative_path.to_owned()));
+            // TODO only open the file once for the whole incremental process!
             file.update_size_and_mtime_from_disk()?;
             if let (true, Some(p)) = (self.options.incremental_skip_unchanged, previous) {
                 if mtimes_match(file.raw(|r| r.mtime()), p.mtime()) {
@@ -251,8 +252,6 @@ impl<'a> Incremental<'a> {
         Ok(result)
     }
 
-    // TODO: test the case where hashes compare the same with include_unchanged=false,
-    //       but previous doesn't have a mtime, so the mtime should be updated!
     fn compare_files_and_include<P>(
         &self,
         on_disk: &FileMut,
@@ -276,7 +275,10 @@ impl<'a> Incremental<'a> {
 
         if is_match {
             progress(IncrementalProgress::FileMatch(relative_path.to_owned()));
-            return Ok(self.options.incremental_include_unchanged_files);
+            return Ok(self.options.incremental_include_unchanged_files
+                // we didn't have an mtime before, include despite the match,
+                // so we have the opportunity to skip nex time
+                || (previous.mtime().is_none() && on_disk.mtime().is_some()));
         }
 
         match (previous.mtime(), on_disk.mtime()) {
@@ -1354,5 +1356,50 @@ vid.mp4
                 IncrementalProgress::Finished,
             ],
         );
+    }
+
+    #[test]
+    fn checksum_files_file_match_when_no_mtime_include_always() {
+        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let mut cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        // Previous entry has no mtime
+        cgi_bin.1.set_mtime(None);
+        hc.update(cgi_bin.0.clone(), cgi_bin.1);
+
+        for include_unchanged in [true, false] {
+            let options = ChecksumHelperOptions {
+                incremental_include_unchanged_files: include_unchanged,
+                ..Default::default()
+            };
+            let mut inc = Incremental::new(
+                &test_path, &mut ft, &options, hc.clone());
+
+            inc.discover_files(|_| {}).unwrap();
+            let mut callbacks = vec![];
+            let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+            // Hash matched but include_unchanged=false -> is excluded from result:
+            // the mtime from the on-disk file (filetime_cig_bin) should be
+            // persisted so future runs can use mtime-based skipping.
+            // Currently it is lost since the file is dropped from the result.
+            let with_mtime = new.get(&cgi_bin.0);
+            assert!(with_mtime.is_some());
+
+            assert_eq!(
+                callbacks,
+                vec![
+                    IncrementalProgress::PreRead(
+                        path::PathBuf::from(&path_cgi_bin),
+                    ),
+                    IncrementalProgress::Read(28, 28),
+                    IncrementalProgress::FileMatch(
+                        path::PathBuf::from(&path_cgi_bin),
+                    ),
+                    IncrementalProgress::Finished,
+                ],
+            );
+        }
     }
 }
