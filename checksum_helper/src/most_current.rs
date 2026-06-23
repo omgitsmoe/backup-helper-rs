@@ -29,15 +29,24 @@ where
     P: FnMut(MostCurrentProgress),
 {
     let root = root.as_ref();
-    let mut discover_result = discover_hash_files(root, options, &mut progress)?;
+    let discover_result = discover_hash_files(root, options, &mut progress)?;
     let most_current_path = root.join(default_filename(root, "most_current", ""));
     let mut most_current = HashCollection::new(Some(&most_current_path), None)
         .expect("creating an empty hash file collection must succeed");
 
 
+    struct MTimePath<'a> {
+        path: &'a std::path::Path,
+        mtime: Option<SystemTime>,
+    }
     fn mtime(p: &std::path::Path) -> Option<SystemTime> {
         std::fs::metadata(p).and_then(|m| m.modified()).ok()
     }
+
+    let mut files = discover_result.hash_file_paths
+        .iter()
+        .map(|p| MTimePath{ path: p, mtime: mtime(p) })
+        .collect::<Vec<_>>();
 
     // NOTE: sort by ascending mtime, so the newer collection overwrites
     //       the entries of older ones (even if no file mtime is present)
@@ -47,11 +56,8 @@ where
     //       as older and keep the other entries and most_current __has no mtime__
     //       we could assign max(most_current.mtime, hc.mtime) while iterating,
     //       but this also solves testing issues, so prefer this
-    //
-    // TODO make one collection with both path + mtime, since we compare files
-    //      multiple times
-    discover_result.hash_file_paths.sort_by(|a, b| {
-        match (mtime(a), mtime(b)) {
+    files.sort_by(|a, b| {
+        match (a.mtime, b.mtime) {
             (Some(a), Some(b)) => a.cmp(&b),
             (None, Some(_)) => std::cmp::Ordering::Less,
             (Some(_), None) => std::cmp::Ordering::Greater,
@@ -59,9 +65,9 @@ where
         }
     });
 
-    for hash_file_path in discover_result.hash_file_paths {
-        progress(MostCurrentProgress::MergeHashFile(hash_file_path.clone()));
-        let hc = HashCollection::from_disk(&hash_file_path, file_tree)?;
+    for MTimePath { path, .. } in files {
+        progress(MostCurrentProgress::MergeHashFile(path.to_path_buf()));
+        let hc = HashCollection::from_disk(path, file_tree)?;
         most_current.merge(hc)?;
     }
 
