@@ -7,17 +7,19 @@ use std::path::Path;
 pub fn build(
     root: impl AsRef<Path>,
     args: MostCurrentArgs,
+    verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::absolute(root)?;
     let options = args.apply(ChecksumHelperOptions::default())?;
     let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
 
     let mut reporter = ProgressReporter::new();
+    reporter.set_verbose(verbose);
     ch.with_most_current(
         |p| reporter.report_most_current(p),
         |ch, c| {
             ch.write_collection(c)?;
-            println!("Wrote collection at: {:?}", c.full_path()?);
+            println!("\nWrote collection at: {:?}", c.full_path()?);
 
             Ok(())
         }
@@ -29,12 +31,14 @@ pub fn build(
 pub fn missing(
     root: impl AsRef<Path>,
     args: MostCurrentArgs,
+    verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::absolute(root)?;
     let options = args.apply(ChecksumHelperOptions::default())?;
     let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
 
     let mut reporter = ProgressReporter::new();
+    reporter.set_verbose(verbose);
     let result = ch.check_missing(|p| reporter.report_incremental(p))?;
 
     if result.directories.is_empty() && result.files.is_empty() {

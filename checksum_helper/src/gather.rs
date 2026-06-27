@@ -83,22 +83,15 @@ struct StackEntry {
 type ReadDirItem = std::result::Result<std::fs::DirEntry, std::io::Error>;
 type ReadDirIter = std::vec::IntoIter<ReadDirItem>;
 
-// TODO use lexical order and visit child directories first before
-//      continuing with other entries so we have proper DFS
-//      oder which provides lexical sorting for all paths
-/// Visits directories in a defined order:
-/// .
-/// ./foo/
+/// Visits directories in DFS order, where children are sorted lexically:
 /// ./file.txt
+/// ./foo/
+/// ./foo/bar.txt
 /// ./bar/
-/// ./bar/file.txt
 /// ./bar/baz/
+/// ./bar/baz/vid.mp4
+/// ./bar/file.txt
 /// ./xer.bin
-///
-/// Will be visited in:
-/// 1) All the children of `.`
-/// 2) Then all the directories of `.` in reverse order
-/// ...
 ///
 /// **Note**: Symlinks to directories are NOT followed!
 pub struct Gather<P> {

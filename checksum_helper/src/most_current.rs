@@ -17,6 +17,10 @@ pub enum MostCurrentProgress {
     IgnoredPath(path::PathBuf),
     /// Load and merge hash file into most current.
     MergeHashFile(path::PathBuf),
+    /// Filtered a file that was present in one of the discovered hash files,
+    /// but was missing on disk and filtered due to
+    /// [`ChecksumHelperOptions::most_current_filter_deleted`].
+    FilteredMissingFile(path::PathBuf),
 }
 
 pub(crate) fn update_most_current<P>(
@@ -72,8 +76,7 @@ where
     }
 
     if options.most_current_filter_deleted {
-        // TODO + callback?
-        most_current.filter_missing(file_tree)?;
+        most_current.filter_missing(file_tree, progress)?;
     }
 
     Ok(most_current)

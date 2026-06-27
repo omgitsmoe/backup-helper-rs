@@ -157,6 +157,7 @@ pub fn verify_root(
     root: impl AsRef<Path>,
     most_current_args: MostCurrentArgs,
     matcher: VerifyMatcherArgs,
+    verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::absolute(root)?;
     let options = most_current_args.apply(ChecksumHelperOptions::default())?;
@@ -164,6 +165,7 @@ pub fn verify_root(
     let matcher = matcher.to_path_matcher()?;
 
     let mut reporter = ProgressReporter::new();
+    reporter.set_verbose(verbose);
     let mut summary = VerifySummary::default();
     ch.verify_root(
         |path| matcher.is_match(path) && !matcher.is_excluded(path),
@@ -184,6 +186,7 @@ pub fn verify_root(
 pub fn verify_file(
     path: impl AsRef<Path>,
     matcher: VerifyMatcherArgs,
+    verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = path.as_ref();
 
@@ -202,6 +205,7 @@ pub fn verify_file(
     let matcher = matcher.to_path_matcher()?;
 
     let mut reporter = ProgressReporter::new();
+    reporter.set_verbose(verbose);
     let mut summary = VerifySummary::default();
 
     let hc = ch.read_collection(path)?;

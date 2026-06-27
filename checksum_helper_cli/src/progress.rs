@@ -10,6 +10,8 @@ pub struct ProgressReporter {
     checksum_files_ignored: u64,
     files_found: u64,
     files_ignored: u64,
+    files_missing: u64,
+    verbose: u8,
     current_file: Option<PathBuf>,
 }
 
@@ -20,8 +22,14 @@ impl ProgressReporter {
             checksum_files_ignored: 0,
             files_found: 0,
             files_ignored: 0,
+            files_missing: 0,
+            verbose: 0,
             current_file: None,
         }
+    }
+
+    pub fn set_verbose(&mut self, verbose: u8) {
+        self.verbose = verbose;
     }
 
     pub fn report_most_current(&mut self, progress: MostCurrentProgress) {
@@ -42,6 +50,14 @@ impl ProgressReporter {
             MostCurrentProgress::IgnoredPath(path_buf) => {
                 self.checksum_files_ignored += 1;
                 println!("\n[IGN  ] {:?}", path_buf);
+            }
+
+            MostCurrentProgress::FilteredMissingFile(path_buf) => {
+                self.files_missing += 1;
+                if self.verbose > 0 {
+                    println!("\n[MISS ] {:?}", path_buf);
+                }
+                print!("\rFiltered missing: {:003} files", self.files_missing);
             }
         }
     }

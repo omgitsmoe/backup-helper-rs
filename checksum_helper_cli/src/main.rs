@@ -33,6 +33,10 @@ fn pause() {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Verbosity level (-v, -vv, -vvv)
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -318,21 +322,25 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Incremental(incremental_args) => incremental::incremental(incremental_args),
-        Commands::Fill(incremental_args) => incremental::fill(incremental_args),
-        Commands::Build { root, most_current } => build::build(&root, most_current),
-        Commands::Missing { root, most_current } => build::missing(&root, most_current),
+        Commands::Incremental(incremental_args) => {
+            incremental::incremental(incremental_args, cli.verbose)
+        }
+        Commands::Fill(incremental_args) => incremental::fill(incremental_args, cli.verbose),
+        Commands::Build { root, most_current } => build::build(&root, most_current, cli.verbose),
+        Commands::Missing { root, most_current } => {
+            build::missing(&root, most_current, cli.verbose)
+        }
         Commands::Move { src, dst } => modify::move_hash_file(src, dst),
         Commands::Verify(verify_command) => match verify_command {
             VerifyCommand::File {
                 path,
                 verify_matcher,
-            } => verify::verify_file(&path, verify_matcher),
+            } => verify::verify_file(&path, verify_matcher, cli.verbose),
             VerifyCommand::Root {
                 root,
                 most_current,
                 verify_matcher,
-            } => verify::verify_root(&root, most_current, verify_matcher),
+            } => verify::verify_root(&root, most_current, verify_matcher, cli.verbose),
         },
     };
 

@@ -2,6 +2,7 @@ use crate::alias::{Map, MapIter};
 use crate::file_tree::{EntryHandle, ErrorKind, FileTree};
 use crate::hash_type::HashType;
 use crate::hashed_file::{File, FileRaw, VerifyResult};
+use crate::most_current::MostCurrentProgress;
 
 // TODO logging
 // use log::{debug, error, info, warn};
@@ -99,10 +100,18 @@ impl HashCollection {
         self.map.is_empty()
     }
 
-    pub(crate) fn filter_missing(&mut self, file_tree: &FileTree) -> Result<()> {
+    pub(crate) fn filter_missing<P>(&mut self, file_tree: &FileTree, mut progress: P) -> Result<()>
+    where
+        P: FnMut(MostCurrentProgress),
+    {
         self.map.retain(|k, _v| {
             let file_path = file_tree.absolute_path(k);
-            std::fs::exists(file_path).unwrap_or(false)
+            let exists = std::fs::exists(&file_path).unwrap_or(false);
+            if !exists {
+                progress(MostCurrentProgress::FilteredMissingFile(file_path.clone()));
+            }
+
+            exists
         });
 
         Ok(())
@@ -1269,11 +1278,28 @@ xer.mp4",
             std::fs::remove_file(testdir.join(p)).unwrap();
         }
 
-        hc.filter_missing(&ft).unwrap();
+        let mut actual_callbacks = vec![];
+        hc.filter_missing(&ft, |p| match p {
+            MostCurrentProgress::FilteredMissingFile(p) => {
+                actual_callbacks.push(p)
+            }
+            _ => unreachable!(),
+        }).unwrap();
 
         for p in remove {
             assert!(!hc.contains_path(p, &ft));
         }
+
+        assert_eq!(remove.len(), actual_callbacks.len());
+        for p in &actual_callbacks {
+            let relative = p
+                .strip_prefix(&testdir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            assert!(remove.contains(&relative.as_str()));
+        }
+
         for p in keep {
             assert!(hc.contains_path(p, &ft));
         }
