@@ -118,7 +118,7 @@ impl<'a> Incremental<'a> {
                 }
 
                 true
-            });
+            })?;
 
         let mut ignored_special_num = 0usize;
         for entry in iter {
@@ -471,9 +471,6 @@ subdir/other/file.txt",
             vec!{
                 IncrementalProgress::DiscoverFilesFound(1),  // file.txt
                 IncrementalProgress::DiscoverFilesIgnored(
-                    path::PathBuf::from("vid.mp4"),
-                ),
-                IncrementalProgress::DiscoverFilesIgnored(
                     path::PathBuf::from("subdir/chksum.md5"),
                 ),
                 IncrementalProgress::DiscoverFilesFound(2),  // subdir/foo.txt
@@ -484,6 +481,9 @@ subdir/other/file.txt",
                     path::PathBuf::from("subdir/other/chksms.md5"),
                 ),
                 IncrementalProgress::DiscoverFilesFound(3),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("vid.mp4"),
+                ),
                 IncrementalProgress::DiscoverFilesDone(3, 4)
             },
             callbacks,

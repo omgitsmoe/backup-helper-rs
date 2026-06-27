@@ -112,7 +112,7 @@ impl ChecksumHelper {
             }
 
             true
-        });
+        })?;
         for v in iter {
             let v = v?;
             if let VisitType::File(v) = v {
@@ -189,7 +189,7 @@ impl ChecksumHelper {
                 // TODO unify what kind of path is returned:
                 //      absolute or relative to root
                 progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(
-                    e.entry.dir_entry.path(),
+                    e.entry.path.to_owned(),
                 ));
                 return false;
             }
@@ -205,7 +205,7 @@ impl ChecksumHelper {
             } else {
                 true
             }
-        });
+        })?;
 
         let mut found = 0u64;
         for visit_result in iter {
@@ -732,11 +732,11 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
                     path::PathBuf::from("bar").join("baz"),
                 },
                 files: vec! {
-                    path::PathBuf::from("root.mp4"),
-                    path::PathBuf::from("test.md5"),
+                    path::PathBuf::from("foo/bar/baz/file.txt"),
                     path::PathBuf::from("foo").join("foo.bin"),
                     path::PathBuf::from("foo").join("foo.txt"),
-                    path::PathBuf::from("foo/bar/baz/file.txt"),
+                    path::PathBuf::from("root.mp4"),
+                    path::PathBuf::from("test.md5"),
                 },
             }
         );
@@ -764,10 +764,10 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
                     path::PathBuf::from("foo").join("bar").join("baz"),
                 },
                 files: vec! {
-                    path::PathBuf::from("root.mp4"),
-                    path::PathBuf::from("test.md5"),
                     path::PathBuf::from("foo").join("foo.bin"),
                     path::PathBuf::from("foo").join("foo.txt"),
+                    path::PathBuf::from("root.mp4"),
+                    path::PathBuf::from("test.md5"),
                 },
             }
         );
@@ -808,9 +808,9 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
                     path::PathBuf::from("foo").join("bar").join("baz"),
                 },
                 files: vec! {
-                    path::PathBuf::from("root.mp4"),
                     path::PathBuf::from("foo").join("foo.bin"),
                     path::PathBuf::from("foo").join("foo.txt"),
+                    path::PathBuf::from("root.mp4"),
                 },
             }
         );
@@ -875,9 +875,9 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
                     path::PathBuf::from("foo").join("bar").join("baz"),
                 },
                 files: vec! {
-                    path::PathBuf::from("root.mp4"),
                     path::PathBuf::from("foo").join("foo.bin"),
                     path::PathBuf::from("foo").join("foo.txt"),
+                    path::PathBuf::from("root.mp4"),
                 },
             }
         );
@@ -1007,14 +1007,18 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
                         testdir.join("test.md5"),
                     ),
                 ),
+                IncrementalProgress::PreRead(
+                    path::PathBuf::from("bar/baz/baz_2025-06-28.foo"),
+                ),
+                IncrementalProgress::Read(26, 26),
+                IncrementalProgress::FileNew(
+                    path::PathBuf::from("bar/baz/baz_2025-06-28.foo"),
+                ),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("bar/baz/save.sav")
+                ),
                 IncrementalProgress::DiscoverFilesIgnored(
                     path::PathBuf::from("file.rs")
-                ),
-                IncrementalProgress::DiscoverFilesIgnored(
-                    path::PathBuf::from("root.mp4")
-                ),
-                IncrementalProgress::DiscoverFilesIgnored(
-                    path::PathBuf::from("test.md5")
                 ),
                 IncrementalProgress::DiscoverFilesIgnored(
                     path::PathBuf::from("foo/bar")
@@ -1029,15 +1033,11 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
                 IncrementalProgress::FileNew(
                     path::PathBuf::from("foo/foo.txt"),
                 ),
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from("bar/baz/baz_2025-06-28.foo"),
-                ),
-                IncrementalProgress::Read(26, 26),
-                IncrementalProgress::FileNew(
-                    path::PathBuf::from("bar/baz/baz_2025-06-28.foo"),
+                IncrementalProgress::DiscoverFilesIgnored(
+                    path::PathBuf::from("root.mp4")
                 ),
                 IncrementalProgress::DiscoverFilesIgnored(
-                    path::PathBuf::from("bar/baz/save.sav")
+                    path::PathBuf::from("test.md5")
                 ),
                 IncrementalProgress::Finished,
             }
@@ -1128,16 +1128,16 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         };
         let progress_expected = vec![
             VerifyRootProgress::BuildMostCurrent(MostCurrentProgress::FoundFile(
-                std::path::PathBuf::from("root.cshd"),
-            )),
-            VerifyRootProgress::BuildMostCurrent(MostCurrentProgress::FoundFile(
-                std::path::PathBuf::from("root.md5"),
+                std::path::PathBuf::from("bar/bar.cshd"),
             )),
             VerifyRootProgress::BuildMostCurrent(MostCurrentProgress::FoundFile(
                 std::path::PathBuf::from("foo/foo.md5"),
             )),
             VerifyRootProgress::BuildMostCurrent(MostCurrentProgress::FoundFile(
-                std::path::PathBuf::from("bar/bar.cshd"),
+                std::path::PathBuf::from("root.cshd"),
+            )),
+            VerifyRootProgress::BuildMostCurrent(MostCurrentProgress::FoundFile(
+                std::path::PathBuf::from("root.md5"),
             )),
             // merged in ascending mtime order!
             VerifyRootProgress::BuildMostCurrent(MostCurrentProgress::MergeHashFile(

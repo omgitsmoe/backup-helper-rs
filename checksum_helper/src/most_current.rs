@@ -113,15 +113,15 @@ where
     let root = root.as_ref();
     let iter = Gather::new(root, |e| {
         if e.is_directory {
-            include_hash_file_dir(root, options, e.depth, &e.dir_entry.path(), &mut progress)
+            include_hash_file_dir(root, options, e.depth, &e.path, &mut progress)
         } else {
-            include_hash_file(root, options, &e.dir_entry.path(), &mut progress)
+            include_hash_file(root, options, &e.path, &mut progress)
         }
-    });
+    })?;
     for entry_result in iter {
         let visit_data = entry_result?;
         if let VisitType::File(v) = visit_data {
-            files.push(v.entry.path());
+            files.push(v.entry.path);
         }
     };
 

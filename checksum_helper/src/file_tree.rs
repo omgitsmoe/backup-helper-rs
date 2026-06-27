@@ -60,8 +60,16 @@ impl FileTree {
         }
     }
 
-    pub fn entry(&self, entry: &EntryHandle) -> Entry {
-        self.nodes[entry.0].clone()
+    fn entry(&self, entry: &EntryHandle) -> &Entry {
+        &self.nodes[entry.0]
+    }
+
+    pub fn parent(&self, entry: &EntryHandle) -> EntryHandle {
+        if let Some(p) = &self.nodes[entry.0].parent {
+            *p
+        } else {
+            self.root()
+        }
     }
 
     pub fn absolute_path(&self, entry: &EntryHandle) -> PathBuf {
@@ -355,7 +363,7 @@ impl Iterator for FileTreeIter<'_> {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EntryHandle(usize);
 
 impl EntryHandle {
@@ -450,11 +458,11 @@ mod test {
         assert_eq!(ft.find_last_existing(&txt_path).0, txt);
 
         let baz = ft.find_last_existing(Path::new("./bar/baz")).0;
-        assert_eq!(txt_entry.parent.unwrap(), baz);
+        assert_eq!(*txt_entry.parent.as_ref().unwrap(), baz);
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 1);
-        assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("bar")).0);
+        assert_eq!(*baz_entry.parent.as_ref().unwrap(), ft.find_last_existing(Path::new("bar")).0);
         assert!(baz_entry.is_directory);
 
         let mov_path = Path::new("bar/baz/mov.mp4");
@@ -468,7 +476,7 @@ mod test {
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 2);
-        assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("bar")).0);
+        assert_eq!(*baz_entry.parent.as_ref().unwrap(), ft.find_last_existing(Path::new("bar")).0);
         assert!(baz_entry.is_directory);
 
         let bin_path = Path::new("bar/file.bin");
@@ -516,11 +524,11 @@ mod test {
         assert_eq!(ft.find_last_existing(&txt_path).0, txt);
 
         let baz = ft.find_last_existing(Path::new("./bar/baz")).0;
-        assert_eq!(txt_entry.parent.unwrap(), baz);
+        assert_eq!(*txt_entry.parent.as_ref().unwrap(), baz);
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 1);
-        assert_eq!(baz_entry.parent.unwrap(), ft.find_last_existing(Path::new("bar")).0);
+        assert_eq!(*baz_entry.parent.as_ref().unwrap(), ft.find_last_existing(Path::new("bar")).0);
         assert!(baz_entry.is_directory);
     }
 
@@ -530,10 +538,11 @@ mod test {
 
         let txt = ft.add(
             Path::new("./bar/baz/file.txt"), false).unwrap();
-        let txt_entry = ft.entry(&txt);
 
         let two = ft.add(
             Path::new("bar/baz/foo/xer.txt"), false).unwrap();
+
+        let txt_entry = ft.entry(&txt);
         let two_entry = ft.entry(&two);
 
         let foo = ft.find_last_existing(Path::new("bar/baz/foo")).0;

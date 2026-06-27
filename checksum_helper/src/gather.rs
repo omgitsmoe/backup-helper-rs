@@ -5,7 +5,9 @@ use std::fs;
 use std::iter::Iterator;
 use std::path;
 
-#[derive(Debug)]
+type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone)]
 pub enum Error {
     ReadDirectory((path::PathBuf, String, std::io::ErrorKind)),
     ReadFileInfo((path::PathBuf, String, std::io::ErrorKind)),
@@ -31,9 +33,23 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub struct VisitData {
-    pub depth: u32,
-    pub entry: fs::DirEntry,
+    pub entry: StoredEntry,
     pub relative_to_root: path::PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredEntry {
+    pub path: path::PathBuf,
+    pub ty: fs::FileType,
+    pub depth: u32,
+}
+
+impl StoredEntry {
+    // File name of the path or the whole path if it doesn't have a filename.
+    // E.g. { path: "/" }.file_name() -> "/"
+    pub fn file_name(&self) -> &std::ffi::OsStr {
+        self.path.file_name().unwrap_or_else(|| self.path.as_os_str())
+    }
 }
 
 pub enum VisitType {
@@ -50,12 +66,21 @@ pub struct Entry<'a> {
     pub depth: u32,
     pub is_directory: bool,
     pub file_type: std::fs::FileType,
-    pub dir_entry: &'a fs::DirEntry,
+    pub path: &'a path::Path,
     /// Path relative to the start path passed into [`Gather::new`]
     pub relative_to_root: &'a path::Path,
 }
 
-type ReadDirItem = Result<std::fs::DirEntry, std::io::Error>;
+struct StackEntry {
+    depth: u32,
+    // next idx to visit in entries
+    // None -> directory not "started" yet
+    next_idx: Option<usize>,
+    // sorted entries of the directory
+    entries: Vec<Result<StoredEntry>>,
+}
+
+type ReadDirItem = std::result::Result<std::fs::DirEntry, std::io::Error>;
 type ReadDirIter = std::vec::IntoIter<ReadDirItem>;
 
 // TODO use lexical order and visit child directories first before
@@ -78,88 +103,150 @@ type ReadDirIter = std::vec::IntoIter<ReadDirItem>;
 /// **Note**: Symlinks to directories are NOT followed!
 pub struct Gather<P> {
     predicate: P,
-    // Whether a fatal error was returned and iteration should end on the next call.
-    has_fatal_error: bool,
     root: path::PathBuf,
-    directory_stack: Vec<(u32, path::PathBuf)>,
-    current_depth: u32,
-    current_dir_iter: Option<ReadDirIter>,
+    directory_stack: Vec<StackEntry>,
 }
 
 impl<P> Gather<P>
 where
     P: FnMut(Entry) -> bool,
 {
-    pub fn new(start: impl AsRef<path::Path>, predicate: P) -> Self {
+    pub fn new(start: impl AsRef<path::Path>, predicate: P) -> Result<Self> {
         let root = start.as_ref().to_owned();
-        Gather {
+        Ok(Gather {
             predicate,
-            has_fatal_error: false,
-            directory_stack: vec![(0, root.clone())],
-            current_depth: 0,
-            current_dir_iter: None,
+            directory_stack: vec![StackEntry {
+                depth: 0,
+                next_idx: None,
+                entries: Self::dir_entries(0, start)?,
+            }],
             root,
-        }
+        })
     }
 
-    fn next_dir_entry(&mut self) -> Option<Result<VisitType, Error>> {
-        let iter = &mut self
-            .current_dir_iter
-            .as_mut()
-            .expect("should've been checked in next");
+    /// depth: new depth of the returned entries of [`directory`]
+    fn dir_entries(depth: u32, directory: impl AsRef<path::Path>) -> Result<Vec<Result<StoredEntry>>> {
+        let directory = directory.as_ref();
+        // TODO: for dfs stable order: extract what we need to
+        //       restore dfs state when popping the stack
+        //       if we keep the DirEntry around it'd be holding
+        //       onto one file handle per depth level
+        let dir = fs::read_dir(directory).map_err(|e| {
+            Error::ReadDirectory((
+                    directory.to_owned(),
+                    format!("{}", e),
+                    e.kind(),
+            ))
+        })?;
+
+        // NOTE: we could return on first error, but that would break pretty
+        //       quickly when trying to checksum certain paths.
+        //       instead, keep the error and give that as iterator item
+        let mut entries: Vec<Result<StoredEntry>> = dir
+            .map(|entry| {
+                let d = entry.map_err(|e| Error::Iteration(format!("{:?}", e), e.kind()))?;
+                let ft = d.file_type().map_err(|e| {
+                    Error::ReadFileInfo((
+                        d.path(),
+                        format!("{:?}", e),
+                        e.kind(),
+                    ))
+                })?;
+
+                Ok(StoredEntry{
+                    path: d.path(),
+                    ty: ft,
+                    depth,
+                })
+            })
+            .collect();
+
+        // Sort lexically by path preserving errors
+        entries.sort_by(|a, b| match (a, b) {
+            (Ok(a), Ok(b)) => a.path.cmp(&b.path),
+            (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+            (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+            (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+        });
+
+        Ok(entries)
+    }
+
+    fn next_dir_entry(&mut self) -> Option<Result<VisitType>> {
+        // TODO: also emit ignored items, then we don't need the loop and callbacks become easier
         loop {
-            let result = match iter.next() {
-                Some(Ok(e)) => match e.file_type() {
-                    Ok(file_type) => {
-                        let is_dir = file_type.is_dir();
-                        let relative_to_root = e
-                            .path()
-                            .strip_prefix(&self.root)
-                            .expect("paths under root must be relative to root")
-                            .to_owned();
+            let current = {
+                let StackEntry { depth, next_idx, entries } = self.directory_stack.last_mut()?;
 
-                        if !(self.predicate)(Entry {
-                            depth: self.current_depth,
-                            is_directory: is_dir,
-                            file_type,
-                            dir_entry: &e,
-                            relative_to_root: &relative_to_root,
-                        }) {
-                            continue;
+                match next_idx {
+                    Some(next_idx) => {
+                        if *next_idx == entries.len() {
+                            let finished_dir = self.directory_stack.pop()
+                                .expect("checked above");
+                            return Some(Ok(VisitType::ListDirStop(finished_dir.depth)));
                         }
 
-                        if is_dir {
-                            self.directory_stack
-                                .push((self.current_depth + 1, e.path()));
-                            Ok(VisitType::Directory(VisitData {
-                                depth: self.current_depth,
-                                entry: e,
-                                relative_to_root,
-                            }))
-                        } else if file_type.is_file() {
-                            Ok(VisitType::File(VisitData {
-                                depth: self.current_depth,
-                                entry: e,
-                                relative_to_root,
-                            }))
-                        } else {
-                            Ok(VisitType::SpecialFile((e.path(), file_type)))
-                        }
+                        let current_idx = *next_idx;
+                        *next_idx += 1;
+                        entries[current_idx].clone()
                     }
-                    Err(err) => Err(Error::ReadFileInfo((
-                        e.path(),
-                        format!("{:?}", err),
-                        err.kind(),
-                    ))),
-                },
-                Some(Err(e)) => Err(Error::Iteration(format!("{:?}", e), e.kind())),
-                None => {
-                    self.current_dir_iter = None;
-                    Ok(VisitType::ListDirStop(self.current_depth))
+                    None => {
+                        *next_idx = Some(0);
+                        return Some(Ok(VisitType::ListDirStart(*depth)));
+                    }
                 }
             };
 
-            return Some(result);
+            let iter_item = match current {
+                Ok(c) => {
+                    let is_dir = c.ty.is_dir();
+                    let relative_to_root = c
+                        .path
+                        .strip_prefix(&self.root)
+                        .expect("paths under root must be relative to root")
+                        .to_owned();
+
+                    if !(self.predicate)(Entry {
+                        depth: c.depth,
+                        is_directory: is_dir,
+                        file_type: c.ty,
+                        path: &c.path,
+                        relative_to_root: &relative_to_root,
+                    }) {
+                        continue;
+                    }
+
+                    if is_dir {
+                        match Self::dir_entries(c.depth + 1, &c.path) {
+                            Ok(entries) => {
+                                self.directory_stack.push(
+                                    StackEntry{
+                                        depth: c.depth + 1,
+                                        next_idx: None,
+                                        entries,
+                                    }
+                                );
+                            },
+                            Err(e) => return Some(Err(e)),
+                        }
+
+                        Ok(VisitType::Directory(VisitData {
+                            entry: c.clone(),
+                            relative_to_root,
+                        }))
+                    } else if c.ty.is_file() {
+                        Ok(VisitType::File(VisitData {
+                            entry: c.clone(),
+                            relative_to_root,
+                        }))
+                    } else {
+                        Ok(VisitType::SpecialFile((c.path.clone(), c.ty)))
+                    }
+                },
+                Err(e) => return Some(Err(e.clone()))
+            };
+
+            return Some(iter_item);
         }
     }
 }
@@ -168,45 +255,10 @@ impl<P> Iterator for Gather<P>
 where
     P: FnMut(Entry) -> bool,
 {
-    type Item = Result<VisitType, Error>;
+    type Item = Result<VisitType>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.has_fatal_error {
-            return None;
-        }
-
-        if self.current_dir_iter.is_some() {
-            return self.next_dir_entry();
-        }
-
-        if let Some((depth, directory)) = self.directory_stack.pop() {
-            let mut entries: Vec<_> = match fs::read_dir(&directory) {
-                Ok(iter) => iter.collect::<Vec<_>>(),
-                Err(e) => {
-                    self.has_fatal_error = true;
-                    return Some(Err(Error::ReadDirectory((
-                        directory.clone(),
-                        format!("{}", e),
-                        e.kind(),
-                    ))));
-                }
-            };
-
-            // Sort lexically by filename preserving errors
-            entries.sort_by(|a, b| match (a, b) {
-                (Ok(a), Ok(b)) => a.file_name().cmp(&b.file_name()),
-                (Err(_), Err(_)) => std::cmp::Ordering::Equal,
-                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
-                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
-            });
-
-            self.current_depth = depth;
-            self.current_dir_iter = Some(entries.into_iter());
-
-            Some(Ok(VisitType::ListDirStart(depth)))
-        } else {
-            None
-        }
+        self.next_dir_entry()
     }
 }
 
@@ -227,7 +279,7 @@ pub fn filtered<'a, P>(
     start: impl AsRef<path::Path>,
     filter: &'a PathMatcher,
     mut predicate: P,
-) -> Gather<impl FnMut(Entry) -> bool + 'a>
+) -> Result<Gather<impl FnMut(Entry) -> bool + 'a>>
 where
     P: FnMut(FilteredEntry) -> bool + 'a,
 {
@@ -289,7 +341,7 @@ mod test {
     fn gather_into_file_tree<F>(
         file_tree: &mut FileTree,
         include_fn: F,
-    ) -> Result<Vec<EntryHandle>, Error>
+    ) -> Result<Vec<EntryHandle>>
     where
         F: FnMut(Entry) -> bool,
     {
@@ -299,7 +351,7 @@ mod test {
 
         let mut directories = vec![file_tree.root()];
         let mut handle = file_tree.root();
-        let iter = Gather::new(file_tree.absolute_path(&handle), include_fn);
+        let iter = Gather::new(file_tree.absolute_path(&handle), include_fn).unwrap();
 
         for visit_type in iter {
             match visit_type {
@@ -307,6 +359,9 @@ mod test {
                     handle = directories
                         .pop()
                         .expect("there should be a directory queued");
+                }
+                Ok(VisitType::ListDirStop(_)) => {
+                    handle = file_tree.parent(&handle);
                 }
                 Ok(VisitType::Directory(v)) => {
                     let new_handle = file_tree.add_child(&handle, v.entry.file_name(), true);
@@ -434,7 +489,7 @@ mod test {
     // TODO benchmark FileTree vs storing full paths vs interning
 
     fn include_mem(e: Entry) -> bool {
-        let path = e.dir_entry.path();
+        let path = e.path;
         let valid_prefixes = [
             "/home",
             "/tmp",
@@ -455,14 +510,14 @@ mod test {
     fn _file_tree_mem_usage() {
         let root = std::path::Path::new("/");
         let mut ft = FileTree::new(root).unwrap();
-        let iter = Gather::new(root, include_mem);
+        let iter = Gather::new(root, include_mem).unwrap();
 
         use std::collections::HashMap;
         let mut map = HashMap::new();
         for visit_type in iter {
             match visit_type {
                 Ok(VisitType::File(v)) => {
-                    let path = v.entry.path();
+                    let path = v.entry.path;
                     let path = path.strip_prefix("/").unwrap();
                     let handle = ft.add_file(path).unwrap();
                     map.insert(handle.clone(), handle.clone());
@@ -491,14 +546,14 @@ mod test {
 
     // #[test]
     fn _path_memusage() {
-        let iter = Gather::new("/", include_mem);
+        let iter = Gather::new("/", include_mem).unwrap();
 
         use std::collections::HashMap;
         let mut map = HashMap::new();
         for visit_type in iter {
             match visit_type {
                 Ok(VisitType::File(v)) => {
-                    let path = v.entry.path();
+                    let path = v.entry.path;
                     map.insert(path.clone(), path);
                 }
                 Err(e) => println!("err: {}", e),
@@ -532,7 +587,7 @@ mod test {
         );
 
         let mut visits = vec![];
-        let gather = Gather::new(&test_path, |_| true);
+        let gather = Gather::new(&test_path, |_| true).unwrap();
         for v in gather {
             let v = v.unwrap();
             match v {
@@ -540,9 +595,9 @@ mod test {
                 VisitType::ListDirStop(d) => visits.push(format!("stop d{}", d)),
                 VisitType::File(v) => visits.push(format!(
                     "file d{} {:?} r{:?}",
-                    v.depth,
+                    v.entry.depth,
                     v.entry
-                        .path()
+                        .path
                         .strip_prefix(&test_path)
                         .unwrap()
                         .to_str()
@@ -552,9 +607,9 @@ mod test {
                 )),
                 VisitType::Directory(v) => visits.push(format!(
                     "dir d{} {:?} r{:?}",
-                    v.depth,
+                    v.entry.depth,
                     v.entry
-                        .path()
+                        .path
                         .strip_prefix(&test_path)
                         .unwrap()
                         .to_str()
@@ -567,37 +622,41 @@ mod test {
         }
         let actual = visits.join("\n");
         println!("actual:\n{}", actual);
-        assert_eq!(
-            actual,
-            r#"start d0
+
+        let order_dfs =
+r#"start d0
 dir d0 "abc" r"abc"
+start d1
+file d1 "abc/boo.txt" r"abc/boo.txt"
+file d1 "abc/other.txt" r"abc/other.txt"
+stop d1
 file d0 "file.txt" r"file.txt"
 dir d0 "subdir" r"subdir"
-file d0 "vid.mp4" r"vid.mp4"
-stop d0
 start d1
 file d1 "subdir/chksum.md5" r"subdir/chksum.md5"
 file d1 "subdir/foo.txt" r"subdir/foo.txt"
 dir d1 "subdir/nested" r"subdir/nested"
-dir d1 "subdir/other" r"subdir/other"
-stop d1
-start d2
-file d2 "subdir/other/chksms.md5" r"subdir/other/chksms.md5"
-file d2 "subdir/other/file.txt" r"subdir/other/file.txt"
-stop d2
 start d2
 file d2 "subdir/nested/bar.txt" r"subdir/nested/bar.txt"
 dir d2 "subdir/nested/nested" r"subdir/nested/nested"
-file d2 "subdir/nested/vid.mov" r"subdir/nested/vid.mov"
-stop d2
 start d3
 file d3 "subdir/nested/nested/cgi.bin" r"subdir/nested/nested/cgi.bin"
 file d3 "subdir/nested/nested/chksum.md5" r"subdir/nested/nested/chksum.md5"
 stop d3
-start d1
-file d1 "abc/boo.txt" r"abc/boo.txt"
-file d1 "abc/other.txt" r"abc/other.txt"
-stop d1"#
+file d2 "subdir/nested/vid.mov" r"subdir/nested/vid.mov"
+stop d2
+dir d1 "subdir/other" r"subdir/other"
+start d2
+file d2 "subdir/other/chksms.md5" r"subdir/other/chksms.md5"
+file d2 "subdir/other/file.txt" r"subdir/other/file.txt"
+stop d2
+stop d1
+file d0 "vid.mp4" r"vid.mp4"
+stop d0"#;
+
+        assert_eq!(
+            actual,
+            order_dfs
         );
     }
 
@@ -665,7 +724,7 @@ stop d1"#
         let test_path = setup_symlink_testdir();
 
         let mut visits = vec![];
-        let gather = Gather::new(&test_path, |_| true);
+        let gather = Gather::new(&test_path, |_| true).unwrap();
 
         for v in gather {
             let v = v.unwrap();
@@ -676,14 +735,14 @@ stop d1"#
 
                 VisitType::File(v) => visits.push(format!(
                     "file d{} {}",
-                    v.depth,
-                    normalize(&test_path, v.entry.path())
+                    v.entry.depth,
+                    normalize(&test_path, v.entry.path)
                 )),
 
                 VisitType::Directory(v) => visits.push(format!(
                     "dir d{} {}",
-                    v.depth,
-                    normalize(&test_path, v.entry.path())
+                    v.entry.depth,
+                    normalize(&test_path, v.entry.path)
                 )),
                 VisitType::SpecialFile((p, file_type)) => visits.push(format!(
                     "special {} islink: {}",
@@ -702,13 +761,13 @@ stop d1"#
         //       traverse into symlinked directories
         let expected = r#"start d0
 dir d0 dir
+start d1
+stop d1
 file d0 file.txt
 special link_to_dir islink: true
 special link_to_file islink: true
 special link_to_link islink: true
-stop d0
-start d1
-stop d1"#;
+stop d0"#;
 
         assert_eq!(actual, expected);
     }
@@ -759,7 +818,7 @@ vid.mp4"
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the filename
             //       -> use extension or str::ends_with
-            e.is_directory || e.dir_entry.path().to_string_lossy().ends_with(".md5")
+            e.is_directory || e.path.to_string_lossy().ends_with(".md5")
         })
         .unwrap();
         let str = to_file_list(&file_tree);
@@ -788,7 +847,7 @@ subdir/other/chksms.md5"
             // NOTE: Path::ends_with matches the whole final component,
             //       so including the filename
             //       -> use extension or str::ends_with
-            !e.is_directory || !e.dir_entry.path().ends_with("other")
+            !e.is_directory || !e.path.ends_with("other")
         })
         .unwrap();
         let str = to_file_list(&file_tree);
@@ -898,15 +957,15 @@ vid.mp4"
             // NOTE: IMPRORTANT! need to return the reversed, since it's used
             //       to determine whether to descent into e.entry
             !e.ignored
-        });
+        }).unwrap();
 
         for v in iter {
             match v {
                 Ok(VisitType::File(v)) => {
-                    visited.push((v.relative_to_root, v.entry.path()));
+                    visited.push((v.relative_to_root, v.entry.path));
                 }
                 Ok(VisitType::Directory(v)) => {
-                    visited.push((v.relative_to_root, v.entry.path()));
+                    visited.push((v.relative_to_root, v.entry.path));
                 }
                 Err(_) => assert!(false),
                 _ => {}
@@ -951,15 +1010,15 @@ vid.mp4"
             } else {
                 true
             }
-        });
+        }).unwrap();
 
         for v in iter {
             match v {
                 Ok(VisitType::File(v)) => {
-                    visited.push((v.relative_to_root, v.entry.path()));
+                    visited.push((v.relative_to_root, v.entry.path));
                 }
                 Ok(VisitType::Directory(v)) => {
-                    visited.push((v.relative_to_root, v.entry.path()));
+                    visited.push((v.relative_to_root, v.entry.path));
                 }
                 Err(_) => assert!(false),
                 _ => {}
@@ -1005,15 +1064,15 @@ vid.mp4"
             } else {
                 false
             }
-        });
+        }).unwrap();
 
         for v in iter {
             match v {
                 Ok(VisitType::File(v)) => {
-                    visited.push((v.relative_to_root, v.entry.path()));
+                    visited.push((v.relative_to_root, v.entry.path));
                 }
                 Ok(VisitType::Directory(v)) => {
-                    visited.push((v.relative_to_root, v.entry.path()));
+                    visited.push((v.relative_to_root, v.entry.path));
                 }
                 Err(_) => assert!(false),
                 _ => {}
@@ -1052,7 +1111,7 @@ vid.mp4"
             }
 
             true
-        });
+        }).unwrap();
 
         for v in iter {
             let v = v.unwrap();
@@ -1085,7 +1144,7 @@ vid.mp4"
             }
 
             true
-        });
+        }).unwrap();
 
         let mut visited_special_file = false;
         for v in iter {
