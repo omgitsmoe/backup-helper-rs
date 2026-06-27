@@ -743,17 +743,23 @@ file.rs",
 1765124822.2685325,11,sha512,847f8f7a2df6539773aa192eb7e449b26cb765aeea13e66010be6ae14a447bfcea4ef99628dffd2dbcd17c624164c521692f43e5e8894955d0fa393b86112b44 foo/foo.bin
 1765124822.269339,7,sha512,d0fa60060582bca8845761653d41a4e60f13d00c458c745adc7b16e4c05afbc873fcce18fa37338d6ad65bbd6c4f4bd98f8fbfc8d9065237a7f739314ec1585d vid.mp4\
 ";
-        std::fs::write(testdir.join("root.cshd"), root_cshd_contents).unwrap();
+        let root_cshd_path = testdir.join("root.cshd");
+        std::fs::write(&root_cshd_path, root_cshd_contents).unwrap();
+        filetime::set_file_mtime(&root_cshd_path, filetime::FileTime::from_unix_time(100, 0))
+            .unwrap();
 
         let foo_bar_file_md5_contents = "\
 d4ca4c74d827424ca5e6cb552cc039d3 *bar.mp4
 ac06ffd974d80119666da2b17d1595c9 *baz/file.txt\
 ";
+        let foo_bar_file_md5_path = testdir.join("foo").join("bar").join("file.md5");
         std::fs::write(
-            testdir.join("foo").join("bar").join("file.md5"),
+            &foo_bar_file_md5_path,
             foo_bar_file_md5_contents,
         )
         .unwrap();
+        filetime::set_file_mtime(&foo_bar_file_md5_path, filetime::FileTime::from_unix_time(200, 0))
+            .unwrap();
 
         let deleted = vec![
             "bar/other.txt",
