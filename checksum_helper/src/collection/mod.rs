@@ -13,7 +13,7 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io::{BufReader, Cursor, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 mod parser;
@@ -193,20 +193,8 @@ impl HashCollection {
         self.map.get(path_handle)
     }
 
-    pub(crate) fn get_mut(&mut self, path_handle: &EntryHandle) -> Option<&mut FileRaw> {
-        self.map.get_mut(path_handle)
-    }
-
     pub(crate) fn remove(&mut self, path_handle: &EntryHandle) -> Option<FileRaw> {
         self.map.remove(path_handle)
-    }
-
-    pub(crate) fn from_str(
-        str: &str,
-        collection_path: impl AsRef<Path>,
-        file_tree: &mut FileTree,
-    ) -> Result<HashCollection> {
-        parser::parse(Cursor::new(str), collection_path, file_tree)
     }
 
     // TODO separate into Reader?
@@ -253,6 +241,7 @@ impl HashCollection {
         self.serialize(&mut file, file_tree)
     }
 
+    #[cfg(test)]
     pub(crate) fn to_str(&self, file_tree: &FileTree) -> Result<String> {
         let mut buf = vec![];
         self.serialize(&mut buf, file_tree)?;

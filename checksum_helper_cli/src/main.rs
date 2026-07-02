@@ -1,12 +1,7 @@
-// TODO remove
-#![allow(dead_code)]
-
 use checksum_helper::pathmatcher::{PathMatcher, PathMatcherBuilder, PathMatcherError};
 use checksum_helper::ChecksumHelperOptions;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
-
-use std::io::prelude::*;
 
 use checksum_helper::hash_type::HashType as HashTypeLib;
 
@@ -15,18 +10,6 @@ mod incremental;
 mod modify;
 mod verify;
 mod progress;
-
-fn pause() {
-    let mut stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-
-    // We want the cursor to stay at the end of the line, so we print without a newline and flush manually.
-    write!(stdout, "Press any key to continue...").unwrap();
-    stdout.flush().unwrap();
-
-    // Read a single byte and discard
-    let _ = stdin.read(&mut [0u8]).unwrap();
-}
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]

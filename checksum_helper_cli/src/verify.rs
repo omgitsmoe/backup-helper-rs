@@ -43,14 +43,6 @@ impl std::fmt::Display for VerifySummaryResult {
 }
 
 impl VerifySummaryResult {
-    pub fn exit_code(&self) -> i32 {
-        match self {
-            Self::Success => 0,
-            Self::WithWarnings => 1,
-            Self::WithErrors => 2,
-        }
-    }
-
     pub fn as_result(&self) -> Result<(), String> {
         if *self == Self::Success {
             Ok(())

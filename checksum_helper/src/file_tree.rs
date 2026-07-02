@@ -60,10 +60,12 @@ impl FileTree {
         }
     }
 
+    #[cfg(test)]
     fn entry(&self, entry: &EntryHandle) -> &Entry {
         &self.nodes[entry.0]
     }
 
+    #[allow(dead_code)]
     pub fn parent(&self, entry: &EntryHandle) -> EntryHandle {
         if let Some(p) = &self.nodes[entry.0].parent {
             *p
@@ -157,6 +159,7 @@ impl FileTree {
         self.add(path, false)
     }
 
+    #[allow(dead_code)]
     pub fn add_directory(&mut self, path: impl AsRef<Path>) -> Result<EntryHandle, ErrorKind> {
         self.add(path, true)
     }
@@ -248,6 +251,7 @@ impl FileTree {
         EntryHandle(0)
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize { self.nodes.len() }
 
     pub fn iter(&self) -> FileTreeIter<'_> {

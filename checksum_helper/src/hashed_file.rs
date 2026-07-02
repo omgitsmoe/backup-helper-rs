@@ -189,18 +189,6 @@ impl<'a> FileMut<'a> {
         Ok(())
     }
 
-    pub fn update_mtime_from_disk(&mut self) -> Result<()> {
-        let (_, mtime) = self.as_file().fetch_size_and_mtime()?;
-        self.file.set_mtime(Some(mtime));
-        Ok(())
-    }
-
-    pub fn update_size_from_disk(&mut self) -> Result<()> {
-        let (size, _) = self.as_file().fetch_size_and_mtime()?;
-        self.file.size = Some(size);
-        Ok(())
-    }
-
     pub fn update_hash_from_disk<P>(&mut self, progress: P) -> Result<()>
     where
         P: FnMut((u64, u64))
@@ -212,6 +200,7 @@ impl<'a> FileMut<'a> {
 }
 
 impl<'a> File<'a> {
+    #[allow(dead_code)]
     fn relative_path(&self) -> path::PathBuf {
         self.file.relative_path(self.context)
     }
@@ -245,6 +234,7 @@ impl<'a> File<'a> {
         Ok((metadata.len(), FileTime::from_last_modification_time(&metadata)))
     }
 
+    #[allow(dead_code)]
     fn mtime_to_disk(&self) -> Result<()> {
         let path = self.absolute_path();
         filetime::set_file_mtime(&path, self.file.mtime.ok_or(HashedFileError::MissingMTime)?)
@@ -317,6 +307,7 @@ impl<'a> File<'a> {
     }
 
     // NOTE: Use a closure here so we don't run into borrow/lifetime issues
+    #[allow(dead_code)]
     pub(crate) fn raw_mut<C, R>(&mut self, func: C) -> R
     where
         C: FnOnce(&FileRaw) -> R,

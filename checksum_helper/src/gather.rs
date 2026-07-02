@@ -47,14 +47,18 @@ pub struct StoredEntry {
 impl StoredEntry {
     // File name of the path or the whole path if it doesn't have a filename.
     // E.g. { path: "/" }.file_name() -> "/"
+    #[cfg(test)]
     pub fn file_name(&self) -> &std::ffi::OsStr {
         self.path.file_name().unwrap_or_else(|| self.path.as_os_str())
     }
 }
 
 pub enum VisitType {
+    #[allow(dead_code)]
     ListDirStart(u32),
+    #[allow(dead_code)]
     ListDirStop(u32),
+    #[allow(dead_code)]
     Directory(VisitData),
     File(VisitData),
     SpecialFile((path::PathBuf, std::fs::FileType)),
@@ -79,9 +83,6 @@ struct StackEntry {
     // sorted entries of the directory
     entries: Vec<Result<StoredEntry>>,
 }
-
-type ReadDirItem = std::result::Result<std::fs::DirEntry, std::io::Error>;
-type ReadDirIter = std::vec::IntoIter<ReadDirItem>;
 
 /// Visits directories in DFS order, where children are sorted lexically:
 /// ./file.txt
@@ -372,33 +373,33 @@ mod test {
         Ok(result_handles)
     }
 
-    fn memsize() -> std::io::Result<String> {
-        use std::fs::File;
-        use std::io::{BufRead, BufReader};
+    // fn memsize() -> std::io::Result<String> {
+    //     use std::fs::File;
+    //     use std::io::{BufRead, BufReader};
 
-        let pid = std::process::id();
-        let path = format!("/proc/{}/smaps", pid);
+    //     let pid = std::process::id();
+    //     let path = format!("/proc/{}/smaps", pid);
 
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+    //     let file = File::open(path)?;
+    //     let reader = BufReader::new(file);
 
-        let mut total_kb: u64 = 0;
+    //     let mut total_kb: u64 = 0;
 
-        for line in reader.lines() {
-            let line = line?;
+    //     for line in reader.lines() {
+    //         let line = line?;
 
-            if line.starts_with("Pss:") {
-                // Format: "Pss:   123 kB"
-                if let Some(value) = line.split_whitespace().nth(1) {
-                    if let Ok(kb) = value.parse::<u64>() {
-                        total_kb += kb;
-                    }
-                }
-            }
-        }
+    //         if line.starts_with("Pss:") {
+    //             // Format: "Pss:   123 kB"
+    //             if let Some(value) = line.split_whitespace().nth(1) {
+    //                 if let Ok(kb) = value.parse::<u64>() {
+    //                     total_kb += kb;
+    //                 }
+    //             }
+    //         }
+    //     }
 
-        Ok(format!("{:.6} KB", total_kb))
-    }
+    //     Ok(format!("{:.6} KB", total_kb))
+    // }
 
     // TODO change filetree: the tree-like storage is not worh it,
     //      as seen below. Either just use full paths
@@ -481,94 +482,94 @@ mod test {
     //       (may not work since we need the path->id and id->path lookup :/)
     // TODO benchmark FileTree vs storing full paths vs interning
 
-    fn include_mem(e: Entry) -> bool {
-        let path = e.path;
-        let valid_prefixes = [
-            "/home",
-            "/tmp",
-            "/usr",
-            "/etc",
-            "/mnt",
-            "/opt",
-            "/proc",
-        ];
-        if valid_prefixes.iter().any(|p| path.starts_with(p)) {
-            return true;
-        }
+    // fn include_mem(e: Entry) -> bool {
+    //     let path = e.path;
+    //     let valid_prefixes = [
+    //         "/home",
+    //         "/tmp",
+    //         "/usr",
+    //         "/etc",
+    //         "/mnt",
+    //         "/opt",
+    //         "/proc",
+    //     ];
+    //     if valid_prefixes.iter().any(|p| path.starts_with(p)) {
+    //         return true;
+    //     }
 
-        false
-    }
-
-    // #[test]
-    fn _file_tree_mem_usage() {
-        let root = std::path::Path::new("/");
-        let mut ft = FileTree::new(root).unwrap();
-        let iter = Gather::new(root, include_mem).unwrap();
-
-        use std::collections::HashMap;
-        let mut map = HashMap::new();
-        for visit_type in iter {
-            match visit_type {
-                Ok(VisitType::File(v)) => {
-                    let path = v.entry.path;
-                    let path = path.strip_prefix("/").unwrap();
-                    let handle = ft.add_file(path).unwrap();
-                    map.insert(handle.clone(), handle.clone());
-                }
-                Err(e) => println!("err: {}", e),
-                _ => {}
-            }
-        }
-
-        let size = memsize().unwrap();
-
-        let mut files = 0;
-        let mut pathlensum = 0;
-        for f in ft.iter() {
-            let path = ft.absolute_path(&f);
-            // println!("{:?}", path);
-            files += 1;
-            pathlensum += path.to_string_lossy().len();
-        }
-
-        println!("Files: {}, PathsSum: {}", files, pathlensum);
-        println!("SIZE: {}", size);
-
-        panic!()
-    }
+    //     false
+    // }
 
     // #[test]
-    fn _path_memusage() {
-        let iter = Gather::new("/", include_mem).unwrap();
+    // fn _file_tree_mem_usage() {
+    //     let root = std::path::Path::new("/");
+    //     let mut ft = FileTree::new(root).unwrap();
+    //     let iter = Gather::new(root, include_mem).unwrap();
 
-        use std::collections::HashMap;
-        let mut map = HashMap::new();
-        for visit_type in iter {
-            match visit_type {
-                Ok(VisitType::File(v)) => {
-                    let path = v.entry.path;
-                    map.insert(path.clone(), path);
-                }
-                Err(e) => println!("err: {}", e),
-                _ => {}
-            }
-        }
+    //     use std::collections::HashMap;
+    //     let mut map = HashMap::new();
+    //     for visit_type in iter {
+    //         match visit_type {
+    //             Ok(VisitType::File(v)) => {
+    //                 let path = v.entry.path;
+    //                 let path = path.strip_prefix("/").unwrap();
+    //                 let handle = ft.add_file(path).unwrap();
+    //                 map.insert(handle.clone(), handle.clone());
+    //             }
+    //             Err(e) => println!("err: {}", e),
+    //             _ => {}
+    //         }
+    //     }
 
-        let size = memsize().unwrap();
+    //     let size = memsize().unwrap();
 
-        let mut files = 0;
-        let mut pathlensum = 0;
-        for (p, _) in map {
-            files += 1;
-            pathlensum += p.to_string_lossy().len();
-            // println!("{:?}", p);
-        }
+    //     let mut files = 0;
+    //     let mut pathlensum = 0;
+    //     for f in ft.iter() {
+    //         let path = ft.absolute_path(&f);
+    //         // println!("{:?}", path);
+    //         files += 1;
+    //         pathlensum += path.to_string_lossy().len();
+    //     }
 
-        println!("Files: {}, PathsSum: {}", files, pathlensum);
-        println!("SIZE: {}", size);
+    //     println!("Files: {}, PathsSum: {}", files, pathlensum);
+    //     println!("SIZE: {}", size);
 
-        panic!()
-    }
+    //     panic!()
+    // }
+
+    // #[test]
+    // fn _path_memusage() {
+    //     let iter = Gather::new("/", include_mem).unwrap();
+
+    //     use std::collections::HashMap;
+    //     let mut map = HashMap::new();
+    //     for visit_type in iter {
+    //         match visit_type {
+    //             Ok(VisitType::File(v)) => {
+    //                 let path = v.entry.path;
+    //                 map.insert(path.clone(), path);
+    //             }
+    //             Err(e) => println!("err: {}", e),
+    //             _ => {}
+    //         }
+    //     }
+
+    //     let size = memsize().unwrap();
+
+    //     let mut files = 0;
+    //     let mut pathlensum = 0;
+    //     for (p, _) in map {
+    //         files += 1;
+    //         pathlensum += p.to_string_lossy().len();
+    //         // println!("{:?}", p);
+    //     }
+
+    //     println!("Files: {}, PathsSum: {}", files, pathlensum);
+    //     println!("SIZE: {}", size);
+
+    //     panic!()
+    // }
 
     #[test]
     fn gather_visit_no_filter() {
