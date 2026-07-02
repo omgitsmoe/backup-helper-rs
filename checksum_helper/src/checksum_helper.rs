@@ -347,9 +347,9 @@ impl ChecksumHelper {
         destination_directory: impl AsRef<path::Path>,
     ) -> Result<()> {
         if collection.root().is_none() {
-            return Err(ChecksumHelperError::HashCollectionError(
+            return Err(ChecksumHelperError::HashCollectionError(Box::new(
                 HashCollectionError::InvalidCollectionRoot(collection.root().cloned()),
-            ));
+            )));
         }
 
         let old_directory = collection.root().expect("checked above");
@@ -563,15 +563,14 @@ pub struct CheckMissingResult {
     pub files: Vec<path::PathBuf>,
 }
 
-// TODO switch some to a Box err, since some of the error variants bloat my return type size
 #[derive(Debug)]
 pub enum ChecksumHelperError {
     RootIsRelative(path::PathBuf),
     InvalidMostCurrentHashFile,
     InvalidRebaseDestination((path::PathBuf, path::PathBuf)),
-    HashCollectionError(crate::collection::HashCollectionError),
-    HashedFileError(crate::hashed_file::HashedFileError),
-    GatherError(crate::gather::Error),
+    HashCollectionError(Box<crate::collection::HashCollectionError>),
+    HashedFileError(Box<crate::hashed_file::HashedFileError>),
+    GatherError(Box<crate::gather::Error>),
     // TODO error Trait
     FileTreeError(crate::file_tree::ErrorKind),
 }
@@ -620,12 +619,11 @@ impl fmt::Display for ChecksumHelperError {
 }
 
 impl Error for ChecksumHelperError {
-    // return the source for this error, e.g. std::io::Eror if we wrapped it
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match *self {
-            ChecksumHelperError::HashCollectionError(ref e) => Some(e),
-            ChecksumHelperError::HashedFileError(ref e) => Some(e),
-            ChecksumHelperError::GatherError(ref e) => Some(e),
+        match self {
+            ChecksumHelperError::HashCollectionError(e) => Some(e.as_ref()),
+            ChecksumHelperError::HashedFileError(e) => Some(e.as_ref()),
+            ChecksumHelperError::GatherError(e) => Some(e.as_ref()),
             _ => None,
         }
     }
@@ -633,13 +631,13 @@ impl Error for ChecksumHelperError {
 
 impl From<HashCollectionError> for ChecksumHelperError {
     fn from(value: HashCollectionError) -> Self {
-        ChecksumHelperError::HashCollectionError(value)
+        ChecksumHelperError::HashCollectionError(Box::new(value))
     }
 }
 
 impl From<crate::gather::Error> for ChecksumHelperError {
     fn from(value: crate::gather::Error) -> Self {
-        ChecksumHelperError::GatherError(value)
+        ChecksumHelperError::GatherError(Box::new(value))
     }
 }
 
@@ -651,7 +649,7 @@ impl From<crate::file_tree::ErrorKind> for ChecksumHelperError {
 
 impl From<crate::hashed_file::HashedFileError> for ChecksumHelperError {
     fn from(value: crate::hashed_file::HashedFileError) -> Self {
-        ChecksumHelperError::HashedFileError(value)
+        ChecksumHelperError::HashedFileError(Box::new(value))
     }
 }
 
@@ -1940,13 +1938,13 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         let ch = ChecksumHelper::new(&cwd).unwrap();
         let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
 
-        let result = ch.rebase_into(&mut hc, cwd.join("bar"));
-        assert!(matches!(
-            result,
-            Err(ChecksumHelperError::HashCollectionError(
-                HashCollectionError::InvalidCollectionRoot(None)
-            ))
-        ));
+        let err = ch.rebase_into(&mut hc, cwd.join("bar")).unwrap_err();
+        match err {
+            ChecksumHelperError::HashCollectionError(hce) => {
+                assert_eq!(*hce, HashCollectionError::InvalidCollectionRoot(None));
+            }
+            _ => panic!("expected HashCollectionError, got {:?}", err),
+        }
     }
 
     #[test]

@@ -9,9 +9,9 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
 pub enum Error {
-    ReadDirectory((path::PathBuf, String, std::io::ErrorKind)),
-    ReadFileInfo((path::PathBuf, String, std::io::ErrorKind)),
-    Iteration(String, std::io::ErrorKind),
+    ReadDirectory((path::PathBuf, Box<str>, std::io::ErrorKind)),
+    ReadFileInfo((path::PathBuf, Box<str>, std::io::ErrorKind)),
+    Iteration(Box<str>, std::io::ErrorKind),
 }
 
 impl fmt::Display for Error {
@@ -121,14 +121,14 @@ where
     /// depth: new depth of the returned entries of [`directory`]
     fn dir_entries(depth: u32, directory: impl AsRef<path::Path>) -> Result<Vec<Result<StoredEntry>>> {
         let directory = directory.as_ref();
-        // TODO: for dfs stable order: extract what we need to
+        // NOTE: for dfs stable order: extract what we need to
         //       restore dfs state when popping the stack
         //       if we keep the DirEntry around it'd be holding
         //       onto one file handle per depth level
         let dir = fs::read_dir(directory).map_err(|e| {
             Error::ReadDirectory((
                     directory.to_owned(),
-                    format!("{}", e),
+                    format!("{}", e).into_boxed_str(),
                     e.kind(),
             ))
         })?;
@@ -138,11 +138,11 @@ where
         //       instead, keep the error and give that as iterator item
         let mut entries: Vec<Result<StoredEntry>> = dir
             .map(|entry| {
-                let d = entry.map_err(|e| Error::Iteration(format!("{:?}", e), e.kind()))?;
+                let d = entry.map_err(|e| Error::Iteration(format!("{:?}", e).into_boxed_str(), e.kind()))?;
                 let ft = d.file_type().map_err(|e| {
                     Error::ReadFileInfo((
                         d.path(),
-                        format!("{:?}", e),
+                        format!("{:?}", e).into_boxed_str(),
                         e.kind(),
                     ))
                 })?;
