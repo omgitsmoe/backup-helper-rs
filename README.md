@@ -7,9 +7,9 @@ real-world backup workflows.
 
 - **Incremental checksumming** — Scan a directory, compare files against
   the most recent known checksums, and produce a `.cshd` file containing
-  only new or changed files. Optionally skip files whose mtime and hash
-  match (`--skip-unchanged`) or still include them
-  (`--include-unchanged`).
+  only new or changed files. Unchanged files are included by default; pass
+  `--no-include-unchanged` to exclude them. Pass `--skip-unchanged` to skip
+  files whose mtime and hash both match.
 - **Most-current merging** — Automatically discover all checksum files
   (`.cshd`, `.md5`, `.sha*`, etc.) under a root directory and merge them
   into a single up-to-date view. When multiple files cover the same
@@ -58,8 +58,8 @@ checksum-helper incremental /mnt/backups/photos --hash-type sha256
 # Skip files whose mtime matches (assume unchanged, skip hashing entirely)
 checksum-helper incremental /mnt/backups/photos --skip-unchanged
 
-# Include unchanged files in the output too (not just new/changed)
-checksum-helper incremental /mnt/backups/photos --include-unchanged
+# Exclude unchanged files from the output (only new/changed)
+checksum-helper incremental /mnt/backups/photos --no-include-unchanged
 
 # Flush partial results every 300 seconds to avoid losing progress
 checksum-helper incremental /mnt/backups/photos \

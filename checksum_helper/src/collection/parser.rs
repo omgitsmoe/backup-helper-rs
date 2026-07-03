@@ -11,7 +11,6 @@ use log::{error, warn};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-// TODO separate parser that just has a feed/feed_line method -> more flexible?
 pub fn parse<R: BufRead>(reader: R, collection_path: impl AsRef<Path>, file_tree: &mut FileTree) -> Result<HashCollection> {
     let mut lines = reader.lines();
     let mut result =

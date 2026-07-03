@@ -38,7 +38,6 @@ pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tre
     Ok(())
 }
 
-// TODO test that an entry gets its correct path when the FT has a different root than the collection
 fn serialize_entry<W: Write>(
     writer: &mut W,
     path_prefix: &path::Path,

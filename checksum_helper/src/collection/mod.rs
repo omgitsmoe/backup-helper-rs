@@ -267,6 +267,8 @@ impl HashCollection {
         // TODO: decide on a file by file basis based on the stored mtime
         //       and only fall back to the collection mtime if no mtime
         //       is stored
+        //       -> does this make sense?
+        //          what if you overwrite sth. with an older file?
         let keep_ours = match (self.mtime, other.mtime) {
             (Some(our_mtime), Some(their_mtime)) => our_mtime >= their_mtime,
             (None, Some(_)) => false,

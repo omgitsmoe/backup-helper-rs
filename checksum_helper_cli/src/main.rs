@@ -165,9 +165,9 @@ struct IncrementalArgs {
     #[arg(long, default_value = "sha512")]
     hash_type: HashType,
 
-    /// Whether to include unchanged files in the incremental checksum output file.
-    #[arg(short, long)]
-    include_unchanged: bool,
+    /// Whether to exclude unchanged files from the incremental checksum output file.
+    #[arg(long)]
+    no_include_unchanged: bool,
 
     /// Whether to skip a file based on the recorded modification time, if the
     /// modification time matches that of the file on disk.
@@ -203,7 +203,7 @@ impl IncrementalArgs {
 
         Ok(self.most_current.apply(options)?
             .hash_type(self.hash_type.into())
-            .incremental_include_unchanged_files(self.include_unchanged)
+            .incremental_include_unchanged_files(!self.no_include_unchanged)
             .incremental_skip_unchanged(self.skip_unchanged)
             .incremental_periodic_write_interval(
                 self.periodic_write_interval_seconds
