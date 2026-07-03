@@ -802,4 +802,112 @@ abcdefff foo/xer.mp4
             )))
         );
     }
+
+    #[test]
+    fn test_parse_skips_empty_lines() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        let hc = parse(
+            Cursor::new(
+                "\
+# version 1
+
+1337,10,sha512,abcdefff foo/bar/baz
+
+
+42,5,sha256,abcdef01 foo/xer.mp4
+",
+            ),
+            abs("foo/hc.cshd"),
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .unwrap();
+
+        assert_eq!(hc.map.len(), 2);
+        let key = ft.find("foo/bar/baz").unwrap();
+        assert!(hc.map.contains_key(&key));
+        let key = ft.find("foo/xer.mp4").unwrap();
+        assert!(hc.map.contains_key(&key));
+    }
+
+    #[test]
+    fn test_parse_garbage_line_returns_error() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        let result = parse(
+            Cursor::new(
+                "\
+# version 1
+1337,10,sha512,abcdefff foo/bar/baz
+garbage_line
+42,5,sha256,abcdef01 foo/xer.mp4
+",
+            ),
+            abs("foo/hc.cshd"),
+            &mut ft,
+        );
+        assert!(result.is_err(), "expected error for garbage line");
+    }
+
+    #[test]
+    fn test_parse_rejects_embedded_dotdot_path() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        // Paths with ".." components are rejected because FileTree requires
+        // canonical paths.  This is distinct from is_path_above_hash_file,
+        // which only warns when ".." escapes above the hash file's directory.
+        let result = parse(
+            Cursor::new(
+                "\
+# version 1
+1337,10,sha512,abcdefff foo/../bar/baz.txt
+",
+            ),
+            abs("foo/hc.cshd"),
+            &mut ft,
+        );
+        assert!(result.is_err(), "dotdot paths should be rejected");
+    }
+
+    #[test]
+    fn test_parse_single_hash_empty_line_returns_error() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        let result = parse_single_hash(
+            Cursor::new(
+                "\
+abcdefff foo/bar/baz
+
+abcdefff foo/xer.mp4
+",
+            ),
+            HashType::Sha512,
+            abs("foo/hc.cshd"),
+            &mut ft,
+        );
+        assert!(
+            matches!(result, Err(HashCollectionError::InvalidSingleHashLine(..))),
+            "expected InvalidSingleHashLine, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_parse_single_hash_garbage_line_returns_error() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        let result = parse_single_hash(
+            Cursor::new(
+                "\
+abcdefff foo/bar/baz
+garbage_line
+abcdefff foo/xer.mp4
+",
+            ),
+            HashType::Sha512,
+            abs("foo/hc.cshd"),
+            &mut ft,
+        );
+        assert!(
+            matches!(result, Err(HashCollectionError::InvalidSingleHashLine(..))),
+            "expected InvalidSingleHashLine, got {:?}",
+            result
+        );
+    }
 }
