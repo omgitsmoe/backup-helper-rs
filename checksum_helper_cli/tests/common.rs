@@ -33,6 +33,7 @@ pub fn run_cli(args: &[&str]) -> (String, String, bool) {
 /// parallel test execution).
 pub fn testdir() -> PathBuf {
     let base = std::env::temp_dir().join("ch_e2e");
+    std::fs::create_dir_all(&base).expect("could not create base test directory");
     for i in 0..10000u32 {
         let path = base.join(format!("test_{}", i));
         if std::fs::create_dir(&path).is_ok() {
