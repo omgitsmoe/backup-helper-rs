@@ -4,6 +4,9 @@ use std::error::Error;
 use clap::{Args, Parser, Subcommand};
 
 mod reconcile;
+mod source;
+mod target;
+mod parse;
 
 #[derive(Debug)]
 enum BackupHelperError {
