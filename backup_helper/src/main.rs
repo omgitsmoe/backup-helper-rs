@@ -7,6 +7,7 @@ mod reconcile;
 mod source;
 mod target;
 mod parse;
+mod disks;
 
 #[derive(Debug)]
 enum BackupHelperError {

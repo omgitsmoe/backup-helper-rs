@@ -1,9 +1,8 @@
+use std::path;
 use kdl::{KdlDocument, KdlNode};
 
 use crate::{
-    BackupHelperError,
-    source::Source,
-    target::{Target, TransferMode},
+    BackupHelperError, disks::Disk, source::Source, target::{Target, TransferMode}
 };
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
@@ -11,6 +10,7 @@ type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 #[derive(Debug, Clone)]
 pub struct Parsed {
     pub sources: Vec<Source>,
+    pub disks: Vec<Disk>,
 }
 
 pub fn parse(contents: &str) -> Result<Parsed> {
@@ -18,17 +18,36 @@ pub fn parse(contents: &str) -> Result<Parsed> {
 
     let mut result = Parsed{
         sources: vec![],
+        disks: vec![],
     };
     for node in doc.nodes() {
-        if node.name().value() != "source" {
-            return Err(BackupHelperError::InvalidConfig(format!(
-                "Invalid top-level node. Expected 'source', got '{}'",
+        match node.name().value() {
+            "source" => {
+                let source = parse_source(contents, node)?;
+                result.sources.push(source);
+            },
+            "disks" => {
+                for child in node.iter_children() {
+                    let name = child.name().value();
+                    match name {
+                        "disk" => {
+                            let disk = parse_disk(child, contents)?;
+                            result.disks.push(disk);
+                        },
+                        _ => {
+                            return Err(BackupHelperError::InvalidConfig(format!(
+                                "Expected `disk` as child nodes of `disks`, got `{}`",
+                                name
+                            )));
+                        },
+                    }
+                }
+            },
+            _ => return Err(BackupHelperError::InvalidConfig(format!(
+                "Invalid top-level node. Expected `source` or `disk`, got '{}'",
                 node.name().value()
-            )));
+            ))),
         }
-
-        let source = parse_source(contents, node)?;
-        result.sources.push(source);
     }
 
     Ok(result)
@@ -167,6 +186,58 @@ fn parse_target(node: &KdlNode, contents: &str) -> Result<Target> {
     };
 
     Ok(Target::new(path, transfer_mode, verify))
+}
+
+fn parse_disk(node: &KdlNode, contents: &str) -> Result<Disk> {
+    let name = node.get(0).and_then(|a| a.as_string());
+    if name.is_none() {
+        let line_nr = span_to_line_number(contents, node.span().offset());
+        return Err(BackupHelperError::InvalidConfig(format!(
+            "Expected positional string argument `name`, got `{:?}` for `disk` on line {}",
+            node.get(0),
+            line_nr
+        )));
+    }
+    let name = name.expect("checked above");
+
+    let mut path = None;
+    for child in node.iter_children() {
+        let name = child.name().value();
+        match name {
+            "path" => {
+                path = child.get(0).and_then(|a| a.as_string());
+                if path.is_none() {
+                    let line_nr = span_to_line_number(contents, child.span().offset());
+                    return Err(BackupHelperError::InvalidConfig(format!(
+                        "Expected positional string argument for `path`, got `{:?}` on line {}",
+                        child.get(0),
+                        line_nr
+                    )));
+                }
+            }
+            _ => {
+                let line_nr = span_to_line_number(contents, child.span().offset());
+                return Err(BackupHelperError::InvalidConfig(format!(
+                    "Expected `path` as child node of `disk`, got `{}` on line {}",
+                    name, line_nr
+                )));
+            }
+        }
+    }
+
+    if path.is_none() {
+        let line_nr = span_to_line_number(contents, node.span().offset());
+        return Err(BackupHelperError::InvalidConfig(format!(
+            "Missing mandatory child node `path` for `disk` on line {}",
+            line_nr
+        )));
+    }
+    let path = path.expect("we exit early above if none");
+
+    Ok(Disk{
+        name: name.to_string(),
+        path: path::PathBuf::from(path),
+    })
 }
 
 fn span_to_line_number(input: &str, offset_bytes: usize) -> u32 {
