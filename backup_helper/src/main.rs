@@ -8,11 +8,14 @@ mod source;
 mod target;
 mod parse;
 mod disks;
+mod backup_helper;
 
 #[derive(Debug)]
 enum BackupHelperError {
     IoError(String),
     InvalidConfig(String),
+    InvalidState(String),
+    ReconcileConflict(String),
 }
 
 impl Error for BackupHelperError {
@@ -26,6 +29,12 @@ impl std::fmt::Display for BackupHelperError {
             },
             BackupHelperError::InvalidConfig(e) => {
                 write!(f, "InvalidConfig: {}", e)
+            },
+            BackupHelperError::InvalidState(e) => {
+                write!(f, "InvalidState: {}", e)
+            },
+            BackupHelperError::ReconcileConflict(e) => {
+                write!(f, "ReconcileConflict: {}", e)
             },
         }
     }
@@ -50,6 +59,12 @@ impl From<kdl::KdlError> for BackupHelperError {
         }
 
         BackupHelperError::InvalidConfig(result)
+    }
+}
+
+impl From<serde_json::Error> for BackupHelperError {
+    fn from(value: serde_json::Error) -> Self {
+        BackupHelperError::InvalidState(value.to_string())
     }
 }
 
