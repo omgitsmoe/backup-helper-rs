@@ -247,3 +247,314 @@ fn span_to_line_number(input: &str, offset_bytes: usize) -> u32 {
         .fold(0, |acc, c| acc + (c == b'\n') as u32)
         + 1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_config_err(result: Result<Parsed>, expected_substring: &str) {
+        match result {
+            Err(crate::BackupHelperError::InvalidConfig(msg)) => {
+                assert!(
+                    msg.contains(expected_substring),
+                    "Expected error containing '{}', got: {}",
+                    expected_substring,
+                    msg
+                );
+            }
+            Err(e) => panic!("Expected InvalidConfig error, got: {:?}", e),
+            Ok(_) => panic!("Expected error containing '{}', but got Ok", expected_substring),
+        }
+    }
+
+    #[test]
+    fn test_parse_full_config() {
+        let input = r#"
+            disks {
+                disk "main" {
+                    path "/mnt/main"
+                }
+            }
+
+            source "/mnt/main/photos" {
+                hash_file "/mnt/main/photos.hsh"
+
+                target "/mnt/backup/photos" {
+                    transfer_mode copy
+                    verify #true
+                }
+
+                target "/mnt/remote/photos" {
+                    transfer_mode sync
+                    verify #false
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+
+        assert_eq!(parsed.disks.len(), 1);
+        assert_eq!(parsed.disks[0].name, "main");
+        assert_eq!(parsed.disks[0].path, path::PathBuf::from("/mnt/main"));
+
+        assert_eq!(parsed.sources.len(), 1);
+        let source = &parsed.sources[0];
+        assert_eq!(source.path(), &path::PathBuf::from("/mnt/main/photos"));
+
+        let v = serde_json::to_value(source).unwrap();
+        let targets = v.get("targets").unwrap().as_array().unwrap();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].get("path").unwrap().as_str().unwrap(), "/mnt/backup/photos");
+        assert_eq!(targets[0].get("transfer_mode").unwrap().as_str().unwrap(), "Copy");
+        assert!(targets[0].get("verify").unwrap().as_bool().unwrap());
+        assert_eq!(targets[1].get("path").unwrap().as_str().unwrap(), "/mnt/remote/photos");
+        assert_eq!(targets[1].get("transfer_mode").unwrap().as_str().unwrap(), "Sync");
+        assert!(!targets[1].get("verify").unwrap().as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_minimal_source() {
+        let input = r#"
+            source "/data" {
+                target "/backup/data" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+
+        assert_eq!(parsed.sources.len(), 1);
+        assert_eq!(parsed.disks.len(), 0);
+        let source = &parsed.sources[0];
+        assert_eq!(source.path(), &path::PathBuf::from("/data"));
+
+        let v = serde_json::to_value(source).unwrap();
+        let targets = v.get("targets").unwrap().as_array().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].get("transfer_mode").unwrap().as_str().unwrap(), "Copy");
+        assert!(targets[0].get("verify").unwrap().as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_sync_transfer_mode() {
+        let input = r#"
+            source "/data" {
+                target "/backup/data" {
+                    transfer_mode sync
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+
+        let v = serde_json::to_value(&parsed.sources[0]).unwrap();
+        let targets = v.get("targets").unwrap().as_array().unwrap();
+        assert_eq!(targets[0].get("transfer_mode").unwrap().as_str().unwrap(), "Sync");
+    }
+
+    // parse() errors
+
+    #[test]
+    fn test_parse_invalid_kdl_syntax() {
+        let input = "this is not valid kdl {{{{";
+        let result = parse(input);
+        assert_config_err(result, "");
+    }
+
+    #[test]
+    fn test_parse_unknown_top_level_node() {
+        let input = r#"foo "bar""#;
+        let result = parse(input);
+        assert_config_err(result, "Invalid top-level node");
+    }
+
+    #[test]
+    fn test_parse_unknown_child_of_disks() {
+        let input = r#"
+            disks {
+                thing "hello"
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected `disk` as child nodes of `disks`");
+    }
+
+    // parse_source() errors
+
+    #[test]
+    fn test_parse_source_missing_path() {
+        let input = r#"source {
+            target "/backup" {
+                transfer_mode copy
+            }
+        }"#;
+        let result = parse(input);
+        assert_config_err(result, "Missing positional argument path on `source`");
+    }
+
+    #[test]
+    fn test_parse_source_non_string_path() {
+        let input = r#"source 42 {
+            target "/backup" {
+                transfer_mode copy
+            }
+        }"#;
+        let result = parse(input);
+        assert_config_err(result, "Expected positional string argument `path`");
+    }
+
+    #[test]
+    fn test_parse_source_unknown_child() {
+        let input = r#"
+            source "/data" {
+                foo "bar"
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected `hash_file` or `target` as child nodes of `source`");
+    }
+
+    #[test]
+    fn test_parse_source_hash_file_missing_path() {
+        let input = r#"
+            source "/data" {
+                hash_file 42
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected positional string argument `path`, got");
+    }
+
+    // parse_target() errors
+
+    #[test]
+    fn test_parse_target_missing_path() {
+        let input = r#"
+            source "/data" {
+                target {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected positional string argument `path`, got");
+    }
+
+    #[test]
+    fn test_parse_target_transfer_mode_missing_value() {
+        let input = r#"
+            source "/data" {
+                target "/backup" {
+                    transfer_mode
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected positional string argument for `transfer_mode`");
+    }
+
+    #[test]
+    fn test_parse_target_transfer_mode_invalid_value() {
+        let input = r#"
+            source "/data" {
+                target "/backup" {
+                    transfer_mode "invalid"
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Invalid transfer_mode `invalid`, expected `copy` or `sync`");
+    }
+
+    #[test]
+    fn test_parse_target_verify_not_bool() {
+        let input = r#"
+            source "/data" {
+                target "/backup" {
+                    transfer_mode copy
+                    verify "notbool"
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected boolean argument for `verify`");
+    }
+
+    #[test]
+    fn test_parse_target_unknown_child() {
+        let input = r#"
+            source "/data" {
+                target "/backup" {
+                    transfer_mode copy
+                    foobar "baz"
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected `transfer_mode` or `verify` as child nodes of `target`");
+    }
+
+    #[test]
+    fn test_parse_target_missing_transfer_mode() {
+        let input = r#"
+            source "/data" {
+                target "/backup" {
+                    verify #true
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Missing mandatory child node `transfer_mode` for `target`");
+    }
+
+    // parse_disk() errors
+
+    #[test]
+    fn test_parse_disk_missing_name() {
+        let input = r#"
+            disks {
+                disk {
+                    path "/mnt/disk"
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected positional string argument `name`, got");
+    }
+
+    #[test]
+    fn test_parse_disk_path_missing_value() {
+        let input = r#"
+            disks {
+                disk "mydisk" {
+                    path
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected positional string argument for `path`");
+    }
+
+    #[test]
+    fn test_parse_disk_unknown_child() {
+        let input = r#"
+            disks {
+                disk "mydisk" {
+                    foo "bar"
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected `path` as child node of `disk`");
+    }
+
+    #[test]
+    fn test_parse_disk_missing_path() {
+        let input = r#"
+            disks {
+                disk "mydisk" {
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Missing mandatory child node `path` for `disk`");
+    }
+}

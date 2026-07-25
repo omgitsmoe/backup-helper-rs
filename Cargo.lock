@@ -125,6 +125,7 @@ dependencies = [
  "checksum_helper",
  "clap",
  "kdl",
+ "pretty_assertions",
  "serde",
  "serde_json",
 ]
