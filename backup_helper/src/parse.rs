@@ -2,7 +2,7 @@ use std::path;
 use kdl::{KdlDocument, KdlNode};
 
 use crate::{
-    BackupHelperError, disks::Disk, source::Source, target::{Target, TransferMode}
+    BackupHelperError, disks::Disk, source, source::{ChecksumOptions, Source}, target::{Target, TransferMode}
 };
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
@@ -74,15 +74,18 @@ fn parse_source(contents: &str, node: &KdlNode) -> Result<Source> {
 
     let path = path.as_string().expect("checked above");
 
-    let mut hash_file = None;
+    let mut source = Source::new(path, None::<&str>);
     let mut targets = vec![];
     for child in node.iter_children() {
         let name = child.name().value();
         match name {
+            "checksums" => {
+                *source.checksum_options_mut() = parse_checksum_options(child, contents)?;
+            },
             "hash_file" => {
                 let path = child.get(0).and_then(|a| a.as_string());
                 if let Some(p) = path {
-                    hash_file = Some(p);
+                    source.set_hash_file(p);
                 } else {
                     let line_nr = span_to_line_number(contents, child.span().offset());
                     return Err(BackupHelperError::InvalidConfig(format!(
@@ -97,19 +100,93 @@ fn parse_source(contents: &str, node: &KdlNode) -> Result<Source> {
             }
             _ => {
                 return Err(BackupHelperError::InvalidConfig(format!(
-                    "Expected `hash_file` or `target` as child nodes of `source`, got `{}`",
+                    "Expected `checksums`, `hash_file` or `target` as child nodes of `source`, got `{}`",
                     name
                 )));
             }
         }
     }
 
-    let mut source = Source::new(path, hash_file);
     for target in targets {
         source.add_target(target);
     }
 
     Ok(source)
+}
+
+fn parse_checksum_options(node: &KdlNode, contents: &str) -> Result<ChecksumOptions> {
+    let mut result = ChecksumOptions::default();
+
+    for child in node.iter_children() {
+        let name = child.name().value();
+        match name {
+            "files" => result.all_files = parse_checksums_child(child, contents, name)?,
+            "checksum_files" => {
+                result.checksum_files = parse_checksums_child(child, contents, name)?
+            }
+            _ => {
+                return Err(BackupHelperError::InvalidConfig(format!(
+                    "Expected `files` or `checksum_files` as child nodes of `source.checksums`, got `{}`",
+                    name
+                )));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_checksums_child(node: &KdlNode, contents: &str, child_name: &str) -> Result<source::GlobFilter> {
+    let mut result = source::GlobFilter::default();
+
+    for child in node.iter_children() {
+        let name = child.name().value();
+        match name {
+            "allow" => {
+                result.allow = parse_string_nodes(
+                    child,
+                    contents,
+                    &format!("source.checksums.{}.allow", child_name),
+                )?;
+            }
+            "block" => {
+                result.block = parse_string_nodes(
+                    child,
+                    contents,
+                    &format!("source.checksums.{}.block", child_name),
+                )?;
+            }
+            _ => {
+                return Err(BackupHelperError::InvalidConfig(format!(
+                    "Expected `allow` or `block` as child nodes of `source.checksums.{}`, got `{}`",
+                    child_name,
+                    name
+                )));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_string_nodes(node: &KdlNode, contents: &str, node_name: &str) -> Result<Vec<String>> {
+    let mut result = vec![];
+
+    for child in node.iter_children() {
+        if child.children().is_some() || !child.entries().is_empty() {
+            let line_nr = span_to_line_number(contents, child.span().offset());
+            return Err(BackupHelperError::InvalidConfig(format!(
+                "Expected only strings as child nodes of `{}`, got `{}` on line {}",
+                node_name,
+                child,
+                line_nr,
+            )));
+        }
+
+        result.push(child.name().value().to_string());
+    }
+
+    Ok(result)
 }
 
 fn parse_target(node: &KdlNode, contents: &str) -> Result<Target> {
@@ -279,6 +356,26 @@ mod tests {
             source "/mnt/main/photos" {
                 hash_file "/mnt/main/photos.hsh"
 
+                checksums {
+                    files {
+                        allow {
+                            "**/*.zip"
+                            "**/*.bin"
+                        }
+                        block {
+                            "**/*.tmp"
+                        }
+                    }
+                    checksum_files {
+                        allow {
+                            "**/*.cshd"
+                        }
+                        block {
+                            "**/*.md5"
+                        }
+                    }
+                }
+
                 target "/mnt/backup/photos" {
                     transfer_mode copy
                     verify #true
@@ -299,6 +396,12 @@ mod tests {
         assert_eq!(parsed.sources.len(), 1);
         let source = &parsed.sources[0];
         assert_eq!(source.path(), &path::PathBuf::from("/mnt/main/photos"));
+
+        let opts = source.checksum_options();
+        assert_eq!(opts.all_files.allow, vec!["**/*.zip", "**/*.bin"]);
+        assert_eq!(opts.all_files.block, vec!["**/*.tmp"]);
+        assert_eq!(opts.checksum_files.allow, vec!["**/*.cshd"]);
+        assert_eq!(opts.checksum_files.block, vec!["**/*.md5"]);
 
         let v = serde_json::to_value(source).unwrap();
         let targets = v.get("targets").unwrap().as_array().unwrap();
@@ -409,7 +512,7 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `hash_file` or `target` as child nodes of `source`");
+        assert_config_err(result, "Expected `checksums`, `hash_file` or `target` as child nodes of `source`");
     }
 
     #[test]
@@ -421,6 +524,137 @@ mod tests {
         "#;
         let result = parse(input);
         assert_config_err(result, "Expected positional string argument `path`, got");
+    }
+
+    // checksums parsing
+
+    #[test]
+    fn test_parse_checksums_default_empty() {
+        let input = r#"
+            source "/data" {
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+        let opts = parsed.sources[0].checksum_options();
+        assert!(opts.all_files.allow.is_empty());
+        assert!(opts.all_files.block.is_empty());
+        assert!(opts.checksum_files.allow.is_empty());
+        assert!(opts.checksum_files.block.is_empty());
+    }
+
+    #[test]
+    fn test_parse_checksums_files_only() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    files {
+                        allow {
+                            "**/*.zip"
+                            "**/*.bin"
+                        }
+                        block {
+                            "**/*.tmp"
+                        }
+                    }
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+        let opts = parsed.sources[0].checksum_options();
+        assert_eq!(opts.all_files.allow, vec!["**/*.zip", "**/*.bin"]);
+        assert_eq!(opts.all_files.block, vec!["**/*.tmp"]);
+        assert!(opts.checksum_files.allow.is_empty());
+        assert!(opts.checksum_files.block.is_empty());
+    }
+
+    #[test]
+    fn test_parse_checksums_checksum_files_only() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    checksum_files {
+                        allow {
+                            "**/*.cshd"
+                        }
+                        block {
+                            "**/*.md5"
+                            "**/*.sha1"
+                        }
+                    }
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+        let opts = parsed.sources[0].checksum_options();
+        assert!(opts.all_files.allow.is_empty());
+        assert!(opts.all_files.block.is_empty());
+        assert_eq!(opts.checksum_files.allow, vec!["**/*.cshd"]);
+        assert_eq!(opts.checksum_files.block, vec!["**/*.md5", "**/*.sha1"]);
+    }
+
+    #[test]
+    fn test_parse_checksums_unknown_child() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    unknown_node {
+                    }
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected `files` or `checksum_files` as child nodes of `source.checksums`");
+    }
+
+    #[test]
+    fn test_parse_checksums_files_unknown_grandchild() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    files {
+                        bad_node {
+                        }
+                    }
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected `allow` or `block` as child nodes of `source.checksums.files`");
+    }
+
+    #[test]
+    fn test_parse_string_nodes_rejects_argued_node() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    files {
+                        allow {
+                            node_with_arg "value"
+                        }
+                    }
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected only strings as child nodes of `source.checksums.files.allow`");
     }
 
     // parse_target() errors

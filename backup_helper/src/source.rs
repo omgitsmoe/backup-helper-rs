@@ -10,6 +10,7 @@ pub struct Source {
     path: path::PathBuf,
     hash_file: Option<path::PathBuf>,
     hash_log_file: Option<path::PathBuf>,
+    checksums: ChecksumOptions,
     targets: Vec<Target>,
     disk: Option<DiskHandle>,
     // TODO glob filters, separate for hash/all?
@@ -21,9 +22,17 @@ impl Source {
             path: path.as_ref().to_path_buf(),
             hash_file: hash_file.map(|p| path::PathBuf::from(p.as_ref())),
             hash_log_file: None,
+            checksums: ChecksumOptions{
+                checksum_files: Default::default(),
+                all_files: Default::default(),
+            },
             targets: vec![],
             disk: None,
         }
+    }
+
+    pub fn set_hash_file(&mut self, path: impl AsRef<path::Path>) {
+        self.hash_file = Some(path.as_ref().to_path_buf());
     }
 
     pub fn add_target(&mut self, target: Target) {
@@ -55,6 +64,14 @@ impl Source {
             .find(|target| target.path() == target_path)
             .map(|v| v as _)
     }
+
+    pub(crate) fn checksum_options_mut(&mut self) -> &mut ChecksumOptions {
+        &mut self.checksums
+    }
+
+    pub fn checksum_options(&self) -> &ChecksumOptions {
+        &self.checksums
+    }
 }
 
 impl Reconcile for Source {
@@ -67,6 +84,16 @@ impl Reconcile for Source {
             other.disk.is_none(),
             "these fields must not come from a config reconciliation"
         );
+
+        if self.hash_file.is_some() && other.checksums.has_globs()
+            && self.checksums != other.checksums {
+            return Err(crate::BackupHelperError::ReconcileConflict(format!(
+                "can't change source {:?} checksum options, since it already has a `hash_file`",
+                other.path
+            )));
+        }
+
+        self.checksums = other.checksums;
 
         // prefer other if set, otherwise self
         self.hash_file = other.hash_file.or(self.hash_file.take());
@@ -101,4 +128,25 @@ impl Reconcile for Source {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChecksumOptions {
+    pub(crate) checksum_files: GlobFilter,
+    pub(crate) all_files: GlobFilter,
+}
+
+impl ChecksumOptions {
+    pub fn has_globs(&self) -> bool {
+        !self.checksum_files.allow.is_empty()
+            || !self.checksum_files.block.is_empty()
+            || !self.all_files.allow.is_empty()
+            || !self.all_files.block.is_empty()
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GlobFilter {
+    pub(crate) allow: Vec<String>,
+    pub(crate) block: Vec<String>,
 }
