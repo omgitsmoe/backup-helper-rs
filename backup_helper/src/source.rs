@@ -1,5 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path;
+
+use checksum_helper::hash_type;
 
 use crate::{backup_helper::DiskHandle, disks::Disk, reconcile::Reconcile, target::Target};
 
@@ -13,7 +15,6 @@ pub struct Source {
     checksums: ChecksumOptions,
     targets: Vec<Target>,
     disk: Option<DiskHandle>,
-    // TODO glob filters, separate for hash/all?
 }
 
 impl Source {
@@ -23,6 +24,7 @@ impl Source {
             hash_file: hash_file.map(|p| path::PathBuf::from(p.as_ref())),
             hash_log_file: None,
             checksums: ChecksumOptions{
+                hash_type: HashType(hash_type::HashType::Sha512),
                 checksum_files: Default::default(),
                 all_files: Default::default(),
             },
@@ -85,12 +87,21 @@ impl Reconcile for Source {
             "these fields must not come from a config reconciliation"
         );
 
-        if self.hash_file.is_some() && other.checksums.has_globs()
-            && self.checksums != other.checksums {
-            return Err(crate::BackupHelperError::ReconcileConflict(format!(
-                "can't change source {:?} checksum options, since it already has a `hash_file`",
-                other.path
-            )));
+        if self.hash_file.is_some() {
+            if self.checksums.hash_type != other.checksums.hash_type {
+                return Err(crate::BackupHelperError::ReconcileConflict(format!(
+                            "can't change source {:?} `hash_type`, since it already has a `hash_file`",
+                            other.path
+                )));
+            }
+
+            if other.checksums.has_globs()
+                && self.checksums != other.checksums {
+                return Err(crate::BackupHelperError::ReconcileConflict(format!(
+                            "can't change source {:?} checksum options, since it already has a `hash_file`",
+                            other.path
+                )));
+            }
         }
 
         self.checksums = other.checksums;
@@ -132,6 +143,7 @@ impl Reconcile for Source {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChecksumOptions {
+    pub(crate) hash_type: HashType,
     pub(crate) checksum_files: GlobFilter,
     pub(crate) all_files: GlobFilter,
 }
@@ -149,4 +161,36 @@ impl ChecksumOptions {
 pub struct GlobFilter {
     pub(crate) allow: Vec<String>,
     pub(crate) block: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashType(pub hash_type::HashType);
+
+impl Default for HashType {
+    fn default() -> Self {
+        Self(hash_type::HashType::Sha512)
+    }
+}
+
+impl Serialize for HashType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.to_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HashType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        hash_type::HashType::try_from(s.as_str())
+            .map(HashType)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<&str> for HashType {
+    type Error = String;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        Ok(HashType(hash_type::HashType::try_from(value)?))
+    }
 }

@@ -2,7 +2,7 @@ use std::path;
 use kdl::{KdlDocument, KdlNode};
 
 use crate::{
-    BackupHelperError, disks::Disk, source, source::{ChecksumOptions, Source}, target::{Target, TransferMode}
+    BackupHelperError, disks::Disk, source::{self, ChecksumOptions, HashType, Source}, target::{Target, TransferMode}
 };
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
@@ -124,9 +124,26 @@ fn parse_checksum_options(node: &KdlNode, contents: &str) -> Result<ChecksumOpti
             "checksum_files" => {
                 result.checksum_files = parse_checksums_child(child, contents, name)?
             }
+            "hash_type" => {
+                let hash_type = child.get(0).and_then(|a| a.as_string());
+                if let Some(hash_type) = hash_type {
+                    result.hash_type = HashType::try_from(hash_type).map_err(|e| {
+                        BackupHelperError::InvalidConfig(format!(
+                            "invalid source.hash_type: {}", e
+                        ))
+                    })?;
+                } else {
+                    let line_nr = span_to_line_number(contents, child.span().offset());
+                    return Err(BackupHelperError::InvalidConfig(format!(
+                        "Expected positional string argument `hash_type`, got `{:?}` for `hash_type` on line {}",
+                        child.get(0),
+                        line_nr
+                    )));
+                }
+            },
             _ => {
                 return Err(BackupHelperError::InvalidConfig(format!(
-                    "Expected `files` or `checksum_files` as child nodes of `source.checksums`, got `{}`",
+                    "Expected `hash_type`, `files` or `checksum_files` as child nodes of `source.checksums`, got `{}`",
                     name
                 )));
             }
@@ -357,6 +374,7 @@ mod tests {
                 hash_file "/mnt/main/photos.hsh"
 
                 checksums {
+                    hash_type "sha256"
                     files {
                         allow {
                             "**/*.zip"
@@ -398,6 +416,7 @@ mod tests {
         assert_eq!(source.path(), &path::PathBuf::from("/mnt/main/photos"));
 
         let opts = source.checksum_options();
+        assert_eq!(opts.hash_type.0.to_str(), "sha256");
         assert_eq!(opts.all_files.allow, vec!["**/*.zip", "**/*.bin"]);
         assert_eq!(opts.all_files.block, vec!["**/*.tmp"]);
         assert_eq!(opts.checksum_files.allow, vec!["**/*.cshd"]);
@@ -539,6 +558,7 @@ mod tests {
         "#;
         let parsed = parse(input).expect("should parse successfully");
         let opts = parsed.sources[0].checksum_options();
+        assert_eq!(opts.hash_type.0.to_str(), "sha512");
         assert!(opts.all_files.allow.is_empty());
         assert!(opts.all_files.block.is_empty());
         assert!(opts.checksum_files.allow.is_empty());
@@ -602,6 +622,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_checksums_hash_type_valid() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    hash_type "sha256"
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+        let opts = parsed.sources[0].checksum_options();
+        assert_eq!(opts.hash_type.0.to_str(), "sha256");
+    }
+
+    #[test]
+    fn test_parse_checksums_hash_type_invalid() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    hash_type "notahash"
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "invalid source.hash_type");
+    }
+
+    #[test]
+    fn test_parse_checksums_hash_type_missing_value() {
+        let input = r#"
+            source "/data" {
+                checksums {
+                    hash_type
+                }
+                target "/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected positional string argument `hash_type`");
+    }
+
+    #[test]
     fn test_parse_checksums_unknown_child() {
         let input = r#"
             source "/data" {
@@ -615,7 +684,7 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `files` or `checksum_files` as child nodes of `source.checksums`");
+        assert_config_err(result, "Expected `hash_type`, `files` or `checksum_files` as child nodes of `source.checksums`");
     }
 
     #[test]
