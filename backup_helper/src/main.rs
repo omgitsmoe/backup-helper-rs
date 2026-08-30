@@ -3,12 +3,16 @@ use std::error::Error;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::{backup_helper::BackupHelper, scheduler::{Scheduler, SchedulerShared}};
+
 mod reconcile;
 mod source;
 mod target;
 mod parse;
 mod disks;
 mod backup_helper;
+mod task;
+mod scheduler;
 
 #[derive(Debug)]
 enum BackupHelperError {
@@ -16,6 +20,7 @@ enum BackupHelperError {
     InvalidConfig(String),
     InvalidState(String),
     ReconcileConflict(String),
+    SchedulerError(String),
 }
 
 impl Error for BackupHelperError {
@@ -35,6 +40,9 @@ impl std::fmt::Display for BackupHelperError {
             },
             BackupHelperError::ReconcileConflict(e) => {
                 write!(f, "ReconcileConflict: {}", e)
+            },
+            BackupHelperError::SchedulerError(e) => {
+                write!(f, "Scheduler: {}", e)
             },
         }
     }
@@ -97,7 +105,7 @@ struct ReconcileArgs {
 enum Commands {
     Reconcile(ReconcileArgs),
 
-    Start,
+    Start(CommonArgs),
 }
 
 fn main() -> std::result::Result<(), BackupHelperError> {
@@ -105,6 +113,17 @@ fn main() -> std::result::Result<(), BackupHelperError> {
 
     match cli.command {
         Commands::Reconcile(reconcile_args) => reconcile::reconcile(reconcile_args),
-        Commands::Start => todo!(),
+        Commands::Start(common_args) => start(common_args),
     }
+}
+
+fn start(args: CommonArgs) -> std::result::Result<(), BackupHelperError> {
+    let bh = BackupHelper::from_file(&args.state)?;
+    let schedulder = Scheduler::new(SchedulerShared::new(bh)?);
+    scheduler::run(&schedulder);
+
+    let bh = schedulder.close()?;
+    bh.persist(&args.state)?;
+
+    Ok(())
 }

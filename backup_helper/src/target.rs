@@ -53,8 +53,20 @@ impl Target {
         Ok(())
     }
 
+    pub fn disk(&self) -> &Option<DiskHandle> {
+        &self.disk
+    }
+
     pub fn is_transferred(&self) -> bool {
         self.transfered
+    }
+
+    pub fn verify(&self) -> bool {
+        self.verify
+    }
+
+    pub fn is_verified(&self) -> bool {
+        self.verified.is_some()
     }
 }
 

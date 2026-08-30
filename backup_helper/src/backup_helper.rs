@@ -5,7 +5,7 @@ use crate::{BackupHelperError, disks::Disk, parse::Parsed, reconcile::Reconcile,
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DiskHandle(pub(crate) usize);
 
 #[derive(Default, Debug, Clone)]
@@ -125,6 +125,14 @@ impl BackupHelper {
         }
 
         Ok(())
+    }
+
+    pub fn disks(&self) -> &[Disk] {
+        &self.disks[..]
+    }
+
+    pub fn sources(&self) -> &Vec<Source> {
+        &self.sources
     }
 }
 

@@ -33,6 +33,10 @@ impl Source {
         }
     }
 
+    pub fn hash_file(&self) -> &Option<path::PathBuf> {
+        &self.hash_file
+    }
+
     pub fn set_hash_file(&mut self, path: impl AsRef<path::Path>) {
         self.hash_file = Some(path.as_ref().to_path_buf());
     }
@@ -49,6 +53,10 @@ impl Source {
         }
 
         Ok(())
+    }
+
+    pub fn disk(&self) -> &Option<DiskHandle> {
+        &self.disk
     }
 
     pub fn path(&self) -> &path::PathBuf {
@@ -73,6 +81,10 @@ impl Source {
 
     pub fn checksum_options(&self) -> &ChecksumOptions {
         &self.checksums
+    }
+
+    pub fn targets(&self) -> &Vec<Target> {
+        &self.targets
     }
 }
 
