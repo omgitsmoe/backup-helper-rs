@@ -41,6 +41,14 @@ impl Source {
         self.hash_file = Some(path.as_ref().to_path_buf());
     }
 
+    pub fn hash_log_file(&self) -> &Option<path::PathBuf> {
+        &self.hash_log_file
+    }
+
+    pub fn set_hash_log_file(&mut self, path: impl AsRef<path::Path>) {
+        self.hash_log_file = Some(path.as_ref().to_path_buf());
+    }
+
     pub fn add_target(&mut self, target: Target) {
         self.targets.push(target);
     }
@@ -85,6 +93,10 @@ impl Source {
 
     pub fn targets(&self) -> &Vec<Target> {
         &self.targets
+    }
+
+    pub fn target_mut(&mut self, idx: usize) -> &mut Target {
+        &mut self.targets[idx]
     }
 }
 
@@ -141,7 +153,7 @@ impl Reconcile for Source {
             if !seen.contains(existing_target.path()) && existing_target.is_transferred()
             {
                 return Err(crate::BackupHelperError::ReconcileConflict(format!(
-                    "reconciliation would drop transfered target {:?}",
+                    "reconciliation would drop transferred target {:?}",
                     existing_target.path()
                 )));
             }

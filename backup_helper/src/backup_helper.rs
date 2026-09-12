@@ -134,6 +134,10 @@ impl BackupHelper {
     pub fn sources(&self) -> &Vec<Source> {
         &self.sources
     }
+
+    pub fn source_mut(&mut self, idx: usize) -> &mut Source {
+        &mut self.sources[idx]
+    }
 }
 
 #[derive(Deserialize)]

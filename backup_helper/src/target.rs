@@ -5,13 +5,13 @@ use crate::{backup_helper::DiskHandle, disks::Disk, reconcile::Reconcile};
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerifiedInfo {
-    checked: u64,
-    errors: u64,
-    missing: u64,
-    crc_errors: u64,
-    log_file: path::PathBuf,
+    pub(crate) checked: u64,
+    pub(crate) errors: u64,
+    pub(crate) missing: u64,
+    pub(crate) crc_errors: u64,
+    pub(crate) log_file: path::PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub enum TransferMode {
 pub struct Target {
     path: path::PathBuf,
     transfer_mode: TransferMode,
-    transfered: bool,
+    transferred: bool,
     verify: bool,
     verified: Option<VerifiedInfo>,
     disk: Option<DiskHandle>,
@@ -36,7 +36,7 @@ impl Target {
         Target {
             path: path.as_ref().to_path_buf(),
             transfer_mode,
-            transfered: false,
+            transferred: false,
             verify,
             verified: None,
             disk: None,
@@ -58,7 +58,11 @@ impl Target {
     }
 
     pub fn is_transferred(&self) -> bool {
-        self.transfered
+        self.transferred
+    }
+
+    pub fn transferred(&mut self) {
+        self.transferred = true;
     }
 
     pub fn verify(&self) -> bool {
@@ -67,6 +71,10 @@ impl Target {
 
     pub fn is_verified(&self) -> bool {
         self.verified.is_some()
+    }
+
+    pub fn verified(&mut self, info: VerifiedInfo) {
+        self.verified = Some(info);
     }
 }
 
@@ -77,11 +85,11 @@ impl Reconcile for Target {
             "paths must match, since it's the identity used to do the reconcile step"
         );
         debug_assert!(
-            !other.transfered && other.verified.is_none() && other.disk.is_none(),
+            !other.transferred && other.verified.is_none() && other.disk.is_none(),
             "these fields must not come from a config reconciliation"
         );
 
-        if self.transfered && self.transfered != other.transfered {
+        if self.transferred && self.transferred != other.transferred {
             return Err(crate::BackupHelperError::ReconcileConflict(format!(
                 "transferred target {:?} may not have its `transfer_mode` changed",
                 self.path

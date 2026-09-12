@@ -1,6 +1,7 @@
 use std::path;
 use std::error::Error;
 
+use checksum_helper::{ChecksumHelperError, collection::HashCollectionError};
 use clap::{Args, Parser, Subcommand};
 
 use crate::{backup_helper::BackupHelper, scheduler::{Scheduler, SchedulerShared}};
@@ -21,6 +22,8 @@ enum BackupHelperError {
     InvalidState(String),
     ReconcileConflict(String),
     SchedulerError(String),
+    ChecksumHelperError(ChecksumHelperError),
+    CopyError(String),
 }
 
 impl Error for BackupHelperError {
@@ -44,7 +47,27 @@ impl std::fmt::Display for BackupHelperError {
             BackupHelperError::SchedulerError(e) => {
                 write!(f, "Scheduler: {}", e)
             },
+            BackupHelperError::ChecksumHelperError(e) => {
+                write!(f, "ChecksumHelper: {}", e)
+            },
+            BackupHelperError::CopyError(e) => {
+                write!(f, "CopyError: {}", e)
+            },
         }
+    }
+}
+
+impl From<ChecksumHelperError> for BackupHelperError {
+    fn from(value: ChecksumHelperError) -> Self {
+        BackupHelperError::ChecksumHelperError(value)
+    }
+}
+
+impl From<HashCollectionError> for BackupHelperError {
+    fn from(value: HashCollectionError) -> Self {
+        BackupHelperError::ChecksumHelperError(ChecksumHelperError::HashCollectionError(Box::new(
+            value,
+        )))
     }
 }
 
@@ -120,10 +143,10 @@ fn main() -> std::result::Result<(), BackupHelperError> {
 fn start(args: CommonArgs) -> std::result::Result<(), BackupHelperError> {
     let bh = BackupHelper::from_file(&args.state)?;
     let schedulder = Scheduler::new(SchedulerShared::new(bh)?);
-    scheduler::run(&schedulder);
+    let result = scheduler::run(&schedulder);
 
     let bh = schedulder.close()?;
     bh.persist(&args.state)?;
 
-    Ok(())
+    result
 }

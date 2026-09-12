@@ -1,6 +1,8 @@
+use std::fmt::Write;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
+use crate::task::{TaskContext, TaskOutcome};
 use crate::{
     BackupHelperError,
     backup_helper::{BackupHelper, DiskHandle},
@@ -19,6 +21,7 @@ pub struct SchedulerCore {
     // dependents indexed by TaskId
     // e.g. dependents[1] lists the TaskIds that depend on TaskId 1
     dependents: Vec<Vec<TaskId>>,
+    errors: Vec<BackupHelperError>,
     running: usize,
     done: usize,
     // DiskHandle -> busy bool
@@ -56,6 +59,7 @@ pub enum TaskState {
     Ready,
     Running,
     Done,
+    Failed,
 }
 
 impl SchedulerShared {
@@ -91,6 +95,7 @@ impl SchedulerCore {
             state,
             tasks: vec![],
             dependents: vec![],
+            errors: vec![],
             disks_busy,
             running: 0,
             done: 0,
@@ -158,19 +163,21 @@ impl SchedulerCore {
                     priority: 1,
                 });
 
-                self.tasks.push(TaskEntry {
-                    task: Task::TargetVerify(TargetVerify{
-                        common: CommonData {
-                            involved_disks: Box::<[DiskHandle; 1]>::new([target_disk]),
-                        },
-                        source_idx: source_index,
-                        target_idx: target_index,
-                    }),
-                    state: TaskState::Pending,
-                    dependencies: vec![source_task_id, target_copy_task_id],
-                    remaining_deps: 2,
-                    priority: 0,
-                });
+                if target.verify() {
+                    self.tasks.push(TaskEntry {
+                        task: Task::TargetVerify(TargetVerify{
+                            common: CommonData {
+                                involved_disks: Box::<[DiskHandle; 1]>::new([target_disk]),
+                            },
+                            source_idx: source_index,
+                            target_idx: target_index,
+                        }),
+                        state: TaskState::Pending,
+                        dependencies: vec![source_task_id, target_copy_task_id],
+                        remaining_deps: 2,
+                        priority: 0,
+                    });
+                }
             }
         }
 
@@ -184,6 +191,8 @@ impl SchedulerCore {
         Ok(())
     }
 
+    // TODO needs more conditions, e.g. for copy both source needs to exist and
+    //      the target disk must be present
     pub fn pick_next(&self) -> Option<TaskId> {
         self.tasks.iter().enumerate()
             .filter(|(_, t)| t.state == TaskState::Ready)
@@ -206,7 +215,7 @@ impl SchedulerCore {
         task.task.clone()
     }
 
-    pub fn finish_task(&mut self, task_id: TaskId) {
+    pub fn finish_task(&mut self, task_id: TaskId, outcome: Result<TaskOutcome>) {
         let task = &mut self.tasks[task_id];
         for disk_id in task.involved_disks() {
             let busy = self.disks_busy[disk_id.0];
@@ -215,26 +224,121 @@ impl SchedulerCore {
         }
 
         self.running -= 1;
-        self.done += 1;
-        task.state = TaskState::Done;
 
-        // update other tasks that might have become ready
-        for &dependent in &self.dependents[task_id] {
-            let entry = &mut self.tasks[dependent];
-            debug_assert!(
-                entry.state == TaskState::Pending,
-                "dependent must be `Pending` before this dep finished"
-            );
+        match outcome {
+            Ok(o) => {
+                self.done += 1;
+                task.state = TaskState::Done;
 
-            entry.remaining_deps -= 1;
-            if entry.remaining_deps == 0 {
-                entry.state = TaskState::Ready;
+                self.update_state(task_id, o);
+
+                // update other tasks that might have become ready
+                for &dependent in &self.dependents[task_id] {
+                    let entry = &mut self.tasks[dependent];
+                    if entry.state != TaskState::Pending { continue; }
+
+                    entry.remaining_deps -= 1;
+                    if entry.remaining_deps == 0 {
+                        entry.state = TaskState::Ready;
+                    }
+                }
+            },
+            Err(e) => {
+                task.state = TaskState::Failed;
+                self.errors.push(e);
+                self.mark_failed_dependents(task_id);
+            },
+        }
+    }
+
+    fn update_state(&mut self, task_id: TaskId, outcome: TaskOutcome) {
+        let task = &mut self.tasks[task_id].task;
+        match outcome {
+            TaskOutcome::SourceHash { hash_file, hash_log_file } => {
+                let Task::SourceHash(task) = task else {
+                    unreachable!("outcome doesn't match task");
+                };
+
+                let source = self.state.source_mut(task.source_idx);
+                source.set_hash_file(hash_file);
+                source.set_hash_log_file(hash_log_file);
+            },
+            TaskOutcome::SourceToTargetCopy => {
+                let Task::SourceToTargetCopy(task) = task else {
+                    unreachable!("outcome doesn't match task");
+                };
+
+                let source = self.state.source_mut(task.source_idx);
+                let target = source.target_mut(task.target_idx);
+                target.transferred();
+            },
+            TaskOutcome::SourceToTargetSync => {
+                let Task::SourceToTargetSync(task) = task else {
+                    unreachable!("outcome doesn't match task");
+                };
+
+                let source = self.state.source_mut(task.source_idx);
+                let target = source.target_mut(task.target_idx);
+                target.transferred();
+            },
+            TaskOutcome::TargetVerify(verified_info) => {
+                let Task::TargetVerify(task) = task else {
+                    unreachable!("outcome doesn't match task");
+                };
+
+                let source = self.state.source_mut(task.source_idx);
+                let target = source.target_mut(task.target_idx);
+                target.verified(verified_info);
+            },
+        }
+    }
+
+    fn mark_failed_dependents(&mut self, task_id: TaskId) {
+        for i in 0..self.dependents[task_id].len() {
+            let dependent = self.dependents[task_id][i];
+            if self.tasks[dependent].state != TaskState::Pending { continue; }
+
+            self.tasks[dependent].state = TaskState::Failed;
+            self.mark_failed_dependents(dependent);
+        }
+    }
+
+    pub fn context(&self, task: &Task) -> TaskContext {
+        match task {
+            Task::SourceHash(t) => TaskContext {
+                source_path: Some(self.state.sources()[t.source_idx].path().to_path_buf()),
+                target_path: None,
+                hash_file: None,
+            },
+            Task::SourceToTargetCopy(t) => {
+                let source = &self.state.sources()[t.source_idx];
+                TaskContext {
+                    source_path: Some(source.path().to_path_buf()),
+                    target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
+                    hash_file: None,
+                }
+            }
+            Task::SourceToTargetSync(t) => {
+                let source = &self.state.sources()[t.source_idx];
+                TaskContext {
+                    source_path: Some(source.path().to_path_buf()),
+                    target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
+                    hash_file: None,
+                }
+            }
+            Task::TargetVerify(t) => {
+                let source = &self.state.sources()[t.source_idx];
+                TaskContext {
+                    source_path: Some(source.path().to_path_buf()),
+                    target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
+                    hash_file: source.hash_file().to_owned(),
+                }
             }
         }
     }
 
-    pub fn all_done(&self) -> bool {
-        self.tasks.iter().all(|t| t.state == TaskState::Done)
+    pub fn finished(&self) -> bool {
+        self.running == 0 && self.tasks.iter().all(|t| t.state != TaskState::Ready)
     }
 
     pub fn close(self) -> BackupHelper {
@@ -251,7 +355,7 @@ fn worker(scheduler: &Scheduler) {
                 break id;
             }
 
-            if core.all_done() {
+            if core.finished() {
                 return;
             }
 
@@ -259,16 +363,16 @@ fn worker(scheduler: &Scheduler) {
         };
 
         let task = core.start_task(task_id);
+        let ctx = core.context(&task);
 
         drop(core);
 
-        // TODO return a result and update BackupHelper state
-        task.execute();
+        let outcome = task.execute(&ctx);
 
         let guard = scheduler.core.lock().unwrap();
         let mut core = guard;
-        core.finish_task(task_id);
-        let done = core.all_done();
+        core.finish_task(task_id, outcome);
+        let done = core.finished();
         drop(core);
 
         // task is done, others might become runnable
@@ -278,7 +382,7 @@ fn worker(scheduler: &Scheduler) {
     }
 }
 
-pub fn run(scheduler: &Scheduler) {
+pub fn run(scheduler: &Scheduler) -> Result<()> {
     let handles = (0..scheduler.worker_count())
         .map(|i| {
             let sched = Arc::clone(scheduler);
@@ -291,5 +395,22 @@ pub fn run(scheduler: &Scheduler) {
 
     for h in handles {
         h.join().expect("worker panicked");
+    }
+
+    let guard = scheduler.core.lock().unwrap();
+    if guard.errors.is_empty() {
+        Ok(())
+    } else {
+        let mut combined = String::new();
+        let mut first = true;
+        for err in &guard.errors {
+            if !first {
+                combined.push('\n');
+            }
+            write!(combined, "Task failed: {}", err).unwrap();
+
+            first = false;
+        }
+        Err(BackupHelperError::SchedulerError(combined))
     }
 }
