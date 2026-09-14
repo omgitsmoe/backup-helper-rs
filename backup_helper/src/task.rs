@@ -1,6 +1,6 @@
 use std::path;
 
-use checksum_helper::{ChecksumHelper, collection, hashed_file::{self, VerifyResult}};
+use checksum_helper::{ChecksumHelper, collection, hashed_file::VerifyResult};
 
 use crate::{
     BackupHelperError, backup_helper::DiskHandle, source::ChecksumOptions, target::VerifiedInfo,
@@ -101,7 +101,7 @@ impl TaskExecutor for SourceToTargetCopy {
         let output = std::process::Command::new("cp")
             .args([
                 "-r",
-                &source_path.to_string_lossy(),
+                &source_path.join(".").to_string_lossy(),
                 &target_path.to_string_lossy(),
             ])
             .output()?;
@@ -218,4 +218,167 @@ pub(crate) enum TaskOutcome {
     SourceToTargetCopy,
     SourceToTargetSync,
     TargetVerify(VerifiedInfo),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use testdir::testdir;
+
+    fn common(disks: &[usize]) -> CommonData {
+        CommonData {
+            involved_disks: disks
+                .iter()
+                .copied()
+                .map(DiskHandle)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    #[test]
+    fn involved_disks_returns_disks_for_each_task_variant() {
+        let tasks = [
+            Task::SourceHash(SourceHash {
+                common: common(&[1]),
+                source_idx: 0,
+                options: ChecksumOptions::default(),
+            }),
+            Task::SourceToTargetCopy(SourceToTargetCopy {
+                common: common(&[2, 3]),
+                source_idx: 0,
+                target_idx: 0,
+            }),
+            Task::SourceToTargetSync(SourceToTargetSync {
+                common: common(&[4, 5]),
+                source_idx: 0,
+                target_idx: 0,
+            }),
+            Task::TargetVerify(TargetVerify {
+                common: common(&[6]),
+                source_idx: 0,
+                target_idx: 0,
+            }),
+        ];
+
+        assert_eq!(tasks[0].involved_disks(), &[DiskHandle(1)]);
+        assert_eq!(tasks[1].involved_disks(), &[DiskHandle(2), DiskHandle(3)]);
+        assert_eq!(tasks[2].involved_disks(), &[DiskHandle(4), DiskHandle(5)]);
+        assert_eq!(tasks[3].involved_disks(), &[DiskHandle(6)]);
+    }
+
+    #[test]
+    fn execute_source_hash_writes_hash_collection() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        fs::create_dir(&source_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let task = Task::SourceHash(SourceHash {
+            common: common(&[0]),
+            source_idx: 0,
+            options: ChecksumOptions::default(),
+        });
+        let outcome = task
+            .execute(&TaskContext {
+                source_path: Some(source_path),
+                target_path: None,
+                hash_file: None,
+            })
+            .unwrap();
+
+        let TaskOutcome::SourceHash { hash_file, .. } = outcome else {
+            panic!("SourceHash task returned the wrong outcome");
+        };
+        assert!(hash_file.is_file());
+    }
+
+    #[test]
+    fn execute_copy_puts_source_contents_in_existing_target() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::create_dir(source_path.join("nested")).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+        fs::write(source_path.join(".hidden"), "hidden content").unwrap();
+        fs::write(source_path.join("nested/file.txt"), "nested content").unwrap();
+
+        let task = Task::SourceToTargetCopy(SourceToTargetCopy {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+        });
+        let outcome = task.execute(&TaskContext {
+            source_path: Some(source_path),
+            target_path: Some(target_path.clone()),
+            hash_file: None,
+        });
+        assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
+
+        assert_eq!(fs::read_to_string(target_path.join("file.txt")).unwrap(), "content");
+        assert_eq!(
+            fs::read_to_string(target_path.join(".hidden")).unwrap(),
+            "hidden content"
+        );
+        assert_eq!(
+            fs::read_to_string(target_path.join("nested/file.txt")).unwrap(),
+            "nested content"
+        );
+        assert!(!target_path.join("source").exists());
+    }
+
+    #[test]
+    fn execute_target_verify_reports_matching_files() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let source_hash = Task::SourceHash(SourceHash {
+            common: common(&[0]),
+            source_idx: 0,
+            options: ChecksumOptions::default(),
+        })
+        .execute(&TaskContext {
+            source_path: Some(source_path.clone()),
+            target_path: None,
+            hash_file: None,
+        })
+        .unwrap();
+        let TaskOutcome::SourceHash { hash_file, .. } = source_hash else {
+            panic!("SourceHash task returned the wrong outcome");
+        };
+
+        fs::copy(source_path.join("file.txt"), target_path.join("file.txt")).unwrap();
+        fs::copy(
+            &hash_file,
+            target_path.join(hash_file.file_name().unwrap()),
+        )
+        .unwrap();
+
+        let outcome = Task::TargetVerify(TargetVerify {
+            common: common(&[1]),
+            source_idx: 0,
+            target_idx: 0,
+        })
+        .execute(&TaskContext {
+            source_path: None,
+            target_path: Some(target_path),
+            hash_file: Some(hash_file),
+        })
+        .unwrap();
+
+        let TaskOutcome::TargetVerify(verified) = outcome else {
+            panic!("TargetVerify task returned the wrong outcome");
+        };
+        assert_eq!(verified.checked, 1);
+        assert_eq!(verified.errors, 0);
+        assert_eq!(verified.missing, 0);
+        assert_eq!(verified.crc_errors, 0);
+    }
 }
