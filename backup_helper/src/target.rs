@@ -14,7 +14,7 @@ pub struct VerifiedInfo {
     pub(crate) log_file: path::PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransferMode {
     Copy,
     // TODO settings?
@@ -89,7 +89,7 @@ impl Reconcile for Target {
             "these fields must not come from a config reconciliation"
         );
 
-        if self.transferred && self.transferred != other.transferred {
+        if self.transferred && self.transfer_mode != other.transfer_mode {
             return Err(crate::BackupHelperError::ReconcileConflict(format!(
                 "transferred target {:?} may not have its `transfer_mode` changed",
                 self.path
