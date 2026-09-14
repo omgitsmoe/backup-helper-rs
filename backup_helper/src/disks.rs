@@ -1,6 +1,9 @@
 use crate::{BackupHelperError, backup_helper::DiskHandle, reconcile::Reconcile};
 use serde::{Serialize, Deserialize};
-use std::{os::unix::fs::MetadataExt, path};
+use std::path;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 
@@ -95,8 +98,8 @@ impl Disk {
     }
 
     #[cfg(windows)]
-    fn is_mounted(&self) -> std::io::Result<bool> {
-        if !existing(&self.path)? {
+    pub fn is_mounted(&self) -> std::io::Result<bool> {
+        if !Self::existing(&self.path)? {
             return Ok(false);
         }
 
@@ -104,19 +107,20 @@ impl Disk {
             return Ok(true);
         };
 
-        if !existing(parent)? {
+        if !Self::existing(parent)? {
             return Ok(false);
         }
 
-        let path_volume = volume_path(&self.path)?;
-        let parent_volume = volume_path(parent)?;
+        let path_volume = Self::volume_path(&self.path)?;
+        let parent_volume = Self::volume_path(parent)?;
 
         let path_volume = path_volume.to_string_lossy();
         let parent_volume = parent_volume.to_string_lossy();
 
-        let normalize = |path: &str| path.trim_end_matches(['\\', '/']);
+        let path_volume = path_volume.trim_end_matches(['\\', '/']);
+        let parent_volume = parent_volume.trim_end_matches(['\\', '/']);
 
-        Ok(!normalize(&path_volume).eq_ignore_ascii_case(normalize(&parent_volume)))
+        Ok(!path_volume.eq_ignore_ascii_case(parent_volume))
     }
 }
 
