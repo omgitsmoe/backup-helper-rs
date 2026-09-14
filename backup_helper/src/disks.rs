@@ -131,3 +131,99 @@ impl Reconcile for Disk {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use testdir::testdir;
+
+    fn disk(path: &str) -> Disk {
+        Disk {
+            name: path.to_string(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn matching_disk_accepts_an_exact_path() {
+        let disks = vec![disk("/mnt/data"), disk("/mnt/backup")];
+
+        assert_eq!(Disk::matching_disk(Path::new("/mnt/data"), &disks).unwrap(), DiskHandle(0));
+    }
+
+    #[test]
+    fn matching_disk_prefers_the_longest_matching_prefix() {
+        let disks = vec![disk("/mnt"), disk("/mnt/data"), disk("/mnt/data/photos")];
+
+        assert_eq!(
+            Disk::matching_disk(Path::new("/mnt/data/photos/raw"), &disks).unwrap(),
+            DiskHandle(2)
+        );
+    }
+
+    #[test]
+    fn matching_disk_does_not_match_a_similar_textual_prefix() {
+        let disks = vec![disk("/mnt/a")];
+
+        let result = Disk::matching_disk(Path::new("/mnt/abc/file"), &disks);
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::ReconcileConflict(message))
+                if message.contains("no declared disk matching path")
+        ));
+    }
+
+    #[test]
+    fn matching_disk_reports_a_reconcile_conflict_when_no_disk_matches() {
+        let disks = vec![disk("/mnt/data")];
+
+        let result = Disk::matching_disk(Path::new("/archive/file"), &disks);
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::ReconcileConflict(message))
+                if message.contains("no declared disk matching path")
+        ));
+    }
+
+    #[test]
+    fn missing_disk_path_is_not_mounted() {
+        let root = testdir!();
+        let disk = Disk {
+            name: "missing".into(),
+            path: root.join("missing-disk"),
+        };
+
+        assert!(!disk.is_mounted().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_directory_on_the_same_device_is_not_mounted() {
+        let root = testdir!();
+        let path = root.join("disk");
+        std::fs::create_dir(&path).unwrap();
+        let disk = Disk {
+            name: "same-device".into(),
+            path,
+        };
+
+        assert!(!disk.is_mounted().unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_on_the_same_volume_is_not_mounted() {
+        let root = testdir!();
+        let path = root.join("disk");
+        std::fs::create_dir(&path).unwrap();
+        let disk = Disk {
+            name: "same-volume".into(),
+            path,
+        };
+
+        assert!(!disk.is_mounted().unwrap());
+    }
+}
