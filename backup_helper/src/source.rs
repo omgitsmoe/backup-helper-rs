@@ -23,7 +23,7 @@ impl Source {
             path: path.as_ref().to_path_buf(),
             hash_file: hash_file.map(|p| path::PathBuf::from(p.as_ref())),
             hash_log_file: None,
-            checksums: ChecksumOptions{
+            checksums: ChecksumOptions {
                 hash_type: HashType(hash_type::HashType::Sha512),
                 checksum_files: Default::default(),
                 all_files: Default::default(),
@@ -114,16 +114,15 @@ impl Reconcile for Source {
         if self.hash_file.is_some() {
             if self.checksums.hash_type != other.checksums.hash_type {
                 return Err(crate::BackupHelperError::ReconcileConflict(format!(
-                            "can't change source {:?} `hash_type`, since it already has a `hash_file`",
-                            other.path
+                    "can't change source {:?} `hash_type`, since it already has a `hash_file`",
+                    other.path
                 )));
             }
 
-            if other.checksums.has_globs()
-                && self.checksums != other.checksums {
+            if other.checksums.has_globs() && self.checksums != other.checksums {
                 return Err(crate::BackupHelperError::ReconcileConflict(format!(
-                            "can't change source {:?} checksum options, since it already has a `hash_file`",
-                            other.path
+                    "can't change source {:?} checksum options, since it already has a `hash_file`",
+                    other.path
                 )));
             }
         }
@@ -150,8 +149,7 @@ impl Reconcile for Source {
         }
 
         for existing_target in &self.targets {
-            if !seen.contains(existing_target.path()) && existing_target.is_transferred()
-            {
+            if !seen.contains(existing_target.path()) && existing_target.is_transferred() {
                 return Err(crate::BackupHelperError::ReconcileConflict(format!(
                     "reconciliation would drop transferred target {:?}",
                     existing_target.path()
@@ -216,5 +214,111 @@ impl TryFrom<&str> for HashType {
 
     fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
         Ok(HashType(hash_type::HashType::try_from(value)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::disks::Disk;
+    use crate::reconcile::Reconcile;
+    use crate::target::TransferMode;
+    use pretty_assertions::assert_eq;
+
+    fn target(path: &str) -> Target {
+        Target::new(path, TransferMode::Copy, true)
+    }
+
+    fn conflict(result: Result<()>, expected: &str) {
+        match result {
+            Err(crate::BackupHelperError::ReconcileConflict(message)) => {
+                assert!(message.contains(expected), "{message}");
+            }
+            other => panic!("expected reconciliation conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hash_type_cannot_change_after_hash_file_is_set() {
+        let mut existing = Source::new("/data", Some("/data.sha512"));
+        let mut incoming = Source::new("/data", None::<&str>);
+        incoming.checksum_options_mut().hash_type = HashType::try_from("sha256").unwrap();
+
+        conflict(existing.reconcile(incoming), "hash_type");
+    }
+
+    #[test]
+    fn checksum_globs_cannot_change_after_hash_file_is_set() {
+        let mut existing = Source::new("/data", Some("/data.sha512"));
+        let mut incoming = Source::new("/data", None::<&str>);
+        incoming.checksum_options_mut().all_files.allow = vec!["*.jpg".into()];
+
+        conflict(existing.reconcile(incoming), "checksum options");
+    }
+
+    #[test]
+    fn source_reconcile_adds_and_removes_untransferred_targets() {
+        let mut existing = Source::new("/data", None::<&str>);
+        existing.add_target(target("/old"));
+
+        let mut incoming = Source::new("/data", None::<&str>);
+        incoming.add_target(target("/new"));
+
+        existing.reconcile(incoming).unwrap();
+
+        assert_eq!(existing.targets().len(), 1);
+        assert_eq!(
+            existing.targets()[0].path(),
+            &std::path::PathBuf::from("/new")
+        );
+    }
+
+    #[test]
+    fn transferred_target_cannot_be_removed() {
+        let mut existing = Source::new("/data", None::<&str>);
+        existing.add_target(target("/backup"));
+        existing.target_mut(0).transferred();
+
+        let incoming = Source::new("/data", None::<&str>);
+        conflict(existing.reconcile(incoming), "drop transferred target");
+    }
+
+    #[test]
+    fn source_reconcile_preserves_hash_paths_when_config_omits_them() {
+        let mut existing = Source::new("/data", Some("/data.sha512"));
+        existing.set_hash_log_file("/data.log");
+
+        let incoming = Source::new("/data", None::<&str>);
+        existing.reconcile(incoming).unwrap();
+
+        assert_eq!(
+            existing.hash_file(),
+            &Some(std::path::PathBuf::from("/data.sha512"))
+        );
+        assert_eq!(
+            existing.hash_log_file(),
+            &Some(std::path::PathBuf::from("/data.log"))
+        );
+    }
+
+    #[test]
+    fn assign_disk_assigns_source_and_target_disks() {
+        let disks = vec![
+            Disk {
+                name: "source".into(),
+                path: "/data".into(),
+            },
+            Disk {
+                name: "backup".into(),
+                path: "/backup".into(),
+            },
+        ];
+        let mut source = Source::new("/data/files", None::<&str>);
+        source.add_target(target("/backup/files"));
+
+        source.assign_disk(&disks).unwrap();
+
+        assert_eq!(source.disk(), &Some(DiskHandle(0)));
+        assert_eq!(source.targets()[0].disk(), &Some(DiskHandle(1)));
     }
 }

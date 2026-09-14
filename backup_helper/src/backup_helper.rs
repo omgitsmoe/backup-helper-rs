@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path;
 
-use crate::{BackupHelperError, disks::Disk, parse::Parsed, reconcile::Reconcile, source::Source};
+use crate::{disks::Disk, parse::Parsed, reconcile::Reconcile, source::Source, BackupHelperError};
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 
@@ -18,7 +18,7 @@ impl BackupHelper {
     pub fn from_file(path: impl AsRef<path::Path>) -> Result<Self> {
         let path = path.as_ref();
         if !std::fs::exists(path)? {
-            return Ok(Self::default())
+            return Ok(Self::default());
         }
 
         let json = std::fs::read_to_string(path)?;
@@ -35,13 +35,15 @@ impl BackupHelper {
                     disks: state.disks,
                     sources: state.sources,
                 })
-            },
-            v => Err(BackupHelperError::InvalidState(format!("unsupported version {v}"))),
+            }
+            v => Err(BackupHelperError::InvalidState(format!(
+                "unsupported version {v}"
+            ))),
         }
     }
 
     pub fn serialize(&self) -> Result<String> {
-        let state = BackupStateV1Ref{
+        let state = BackupStateV1Ref {
             version: 1,
             disks: &self.disks,
             sources: &self.sources,
@@ -66,7 +68,8 @@ impl BackupHelper {
                     continue;
                 }
 
-                let existing_disk = self.get_disk_mut(&incoming_disk.name)
+                let existing_disk = self
+                    .get_disk_mut(&incoming_disk.name)
                     .expect("checked above");
                 existing_disk.reconcile(incoming_disk)?;
             }
@@ -91,7 +94,16 @@ impl BackupHelper {
             }
 
             for existing_source in &self.sources {
-                if !seen.contains(existing_source.path()) && existing_source.has_transferred_target() {
+                if !seen.contains(existing_source.path()) && existing_source.hash_file().is_some() {
+                    return Err(BackupHelperError::ReconcileConflict(format!(
+                        "reconciliation would drop hashed source {:?}",
+                        existing_source.path()
+                    )));
+                }
+
+                if !seen.contains(existing_source.path())
+                    && existing_source.has_transferred_target()
+                {
                     return Err(BackupHelperError::ReconcileConflict(format!(
                         "reconciliation would drop source {:?} with transferred targets",
                         existing_source.path()
@@ -156,4 +168,329 @@ struct BackupStateV1Ref<'a> {
 struct BackupStateV1Owned {
     disks: Vec<Disk>,
     sources: Vec<Source>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse;
+    use pretty_assertions::assert_eq;
+    use serde_json::Value;
+    use testdir::testdir;
+
+    fn reconcile_state(state: &str, config: &str) -> Result<Value> {
+        let mut helper = BackupHelper::from_state(state)?;
+        helper.reconcile(parse::parse(config)?)?;
+        Ok(serde_json::from_str(&helper.serialize()?)?)
+    }
+
+    fn json_state(state: &str) -> Value {
+        serde_json::from_str(state).unwrap()
+    }
+
+    fn conflict(result: Result<Value>, expected: &str) {
+        match result {
+            Err(BackupHelperError::ReconcileConflict(message)) => {
+                assert!(message.contains(expected), "{message}");
+            }
+            other => panic!("expected reconciliation conflict, got {other:?}"),
+        }
+    }
+
+    const EMPTY_STATE: &str = r#"{
+        "version": 1,
+        "disks": [],
+        "sources": []
+    }"#;
+
+    #[test]
+    fn reconcile_from_empty_state_assigns_nested_disks_and_updates_state() {
+        let config = r#"
+            disks {
+                disk "main" { path "/mnt" }
+                disk "photos" { path "/mnt/photos" }
+            }
+            source "/mnt/photos/raw" {
+                hash_file "/mnt/photos/raw.sha512"
+                target "/mnt/backup/photos" { transfer_mode copy verify #true }
+            }
+        "#;
+
+        let actual = reconcile_state(EMPTY_STATE, config).unwrap();
+        let expected = json_state(
+            r#"{
+                "version": 1,
+                "disks": [
+                    {"name": "main", "path": "/mnt"},
+                    {"name": "photos", "path": "/mnt/photos"}
+                ],
+                "sources": [{
+                    "path": "/mnt/photos/raw",
+                    "hash_file": "/mnt/photos/raw.sha512",
+                    "hash_log_file": null,
+                    "checksums": {
+                        "hash_type": "sha512",
+                        "checksum_files": {"allow": [], "block": []},
+                        "all_files": {"allow": [], "block": []}
+                    },
+                    "targets": [{
+                        "path": "/mnt/backup/photos",
+                        "transfer_mode": "Copy",
+                        "transferred": false,
+                        "verify": true,
+                        "verified": null,
+                        "disk": 0
+                    }],
+                    "disk": 1
+                }]
+            }"#,
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn reconcile_updates_existing_entries_adds_new_entries_and_removes_stale_entries() {
+        let state = r#"
+            {
+                "version": 1,
+                "disks": [
+                    {"name": "main", "path": "/mnt/old"},
+                    {"name": "stale", "path": "/mnt/stale"}
+                ],
+                "sources": [{
+                    "path": "/mnt/new/source",
+                    "hash_file": null,
+                    "hash_log_file": null,
+                    "checksums": {
+                        "hash_type": "sha512",
+                        "checksum_files": {"allow": [], "block": []},
+                        "all_files": {"allow": [], "block": []}
+                    },
+                    "targets": [{
+                        "path": "/archive/old-target",
+                        "transfer_mode": "Copy",
+                        "transferred": false,
+                        "verify": true,
+                        "verified": null,
+                        "disk": 1
+                    }],
+                    "disk": 0
+                }]
+            }
+        "#;
+        let config = r#"
+            disks {
+                disk "main" { path "/mnt/new" }
+                disk "archive" { path "/archive" }
+            }
+            source "/mnt/new/source" {
+                target "/archive/old-target" {
+                    transfer_mode sync
+                    verify #false
+                }
+                target "/archive/new-target" { transfer_mode copy }
+            }
+            source "/archive/source" {
+                target "/archive/second-target" { transfer_mode copy }
+            }
+        "#;
+
+        let actual = reconcile_state(state, config).unwrap();
+        let expected = json_state(
+            r#"{
+                "version": 1,
+                "disks": [
+                    {"name": "main", "path": "/mnt/new"},
+                    {"name": "archive", "path": "/archive"}
+                ],
+                "sources": [{
+                    "path": "/mnt/new/source",
+                    "hash_file": null,
+                    "hash_log_file": null,
+                    "checksums": {
+                        "hash_type": "sha512",
+                        "checksum_files": {"allow": [], "block": []},
+                        "all_files": {"allow": [], "block": []}
+                    },
+                    "targets": [
+                        {
+                            "path": "/archive/old-target",
+                            "transfer_mode": "Sync",
+                            "transferred": false,
+                            "verify": false,
+                            "verified": null,
+                            "disk": 1
+                        },
+                        {
+                            "path": "/archive/new-target",
+                            "transfer_mode": "Copy",
+                            "transferred": false,
+                            "verify": true,
+                            "verified": null,
+                            "disk": 1
+                        }
+                    ],
+                    "disk": 0
+                }, {
+                    "path": "/archive/source",
+                    "hash_file": null,
+                    "hash_log_file": null,
+                    "checksums": {
+                        "hash_type": "sha512",
+                        "checksum_files": {"allow": [], "block": []},
+                        "all_files": {"allow": [], "block": []}
+                    },
+                    "targets": [{
+                        "path": "/archive/second-target",
+                        "transfer_mode": "Copy",
+                        "transferred": false,
+                        "verify": true,
+                        "verified": null,
+                        "disk": 1
+                    }],
+                    "disk": 1
+                }]
+            }"#,
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn missing_source_or_target_disk_is_a_reconcile_conflict() {
+        let config = r#"
+            disks { disk "main" { path "/mnt/source" } }
+            source "/outside/source" {
+                target "/mnt/target" { transfer_mode copy }
+            }
+        "#;
+
+        conflict(
+            reconcile_state(EMPTY_STATE, config),
+            "no declared disk matching path",
+        );
+    }
+
+    #[test]
+    fn removed_source_with_transferred_target_is_rejected() {
+        let state = r#"
+            {
+                "version": 1,
+                "disks": [{"name":"main","path":"/mnt"}],
+                "sources": [{
+                    "path":"/mnt/source", "hash_file":null, "hash_log_file":null,
+                    "checksums":{"hash_type":"sha512","checksum_files":{"allow":[],"block":[]},"all_files":{"allow":[],"block":[]}},
+                    "targets":[{"path":"/mnt/backup","transfer_mode":"Copy","transferred":true,"verify":true,"verified":null,"disk":0}],
+                    "disk":0
+                }]
+            }
+        "#;
+
+        conflict(
+            reconcile_state(state, "disks { disk \"main\" { path \"/mnt\" } }"),
+            "drop source",
+        );
+    }
+
+    #[test]
+    fn changing_path_of_hashed_source_is_rejected() {
+        let state = r#"
+            {
+                "version": 1,
+                "disks": [{"name":"main","path":"/mnt"}],
+                "sources": [{
+                    "path":"/mnt/old-source", "hash_file":"/mnt/old-source.sha512", "hash_log_file":null,
+                    "checksums":{"hash_type":"sha512","checksum_files":{"allow":[],"block":[]},"all_files":{"allow":[],"block":[]}},
+                    "targets":[], "disk":0
+                }]
+            }
+        "#;
+        let config = r#"
+            disks { disk "main" { path "/mnt" } }
+            source "/mnt/new-source" { target "/mnt/backup" { transfer_mode copy } }
+        "#;
+
+        conflict(reconcile_state(state, config), "drop hashed source");
+    }
+
+    #[test]
+    fn removed_untransferred_source_is_dropped() {
+        let state = r#"
+            {
+                "version": 1,
+                "disks": [{"name":"main","path":"/mnt"}],
+                "sources": [{
+                    "path":"/mnt/source", "hash_file":null, "hash_log_file":null,
+                    "checksums":{"hash_type":"sha512","checksum_files":{"allow":[],"block":[]},"all_files":{"allow":[],"block":[]}},
+                    "targets":[], "disk":0
+                }]
+            }
+        "#;
+
+        let actual = reconcile_state(state, "disks { disk \"main\" { path \"/mnt\" } }").unwrap();
+        let expected = json_state(
+            r#"{
+                "version": 1,
+                "disks": [{"name": "main", "path": "/mnt"}],
+                "sources": []
+            }"#,
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn unknown_json_properties_are_ignored() {
+        let state = r#"{
+            "version": 1,
+            "future_property": true,
+            "disks": [],
+            "sources": [],
+            "another_future_property": {"value": 42}
+        }"#;
+
+        let helper = BackupHelper::from_state(state).unwrap();
+        let actual = json_state(&helper.serialize().unwrap());
+        let expected = json_state(EMPTY_STATE);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn unsupported_state_version_is_rejected() {
+        match BackupHelper::from_state(r#"{"version":2,"disks":[],"sources":[]}"#) {
+            Err(BackupHelperError::InvalidState(message)) => {
+                assert_eq!(message, "unsupported version 2");
+            }
+            other => panic!("expected unsupported version error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_file_loads_existing_state() {
+        let testdir = testdir!();
+        let path = testdir.join("state.json");
+        let state = r#"{"version":1,"disks":[],"sources":[]}"#;
+        std::fs::write(&path, state).unwrap();
+
+        let helper = BackupHelper::from_file(&path).unwrap();
+
+        assert_eq!(
+            json_state(&helper.serialize().unwrap()),
+            json_state(EMPTY_STATE)
+        );
+    }
+
+    #[test]
+    fn from_file_rejects_invalid_state_json() {
+        let testdir = testdir!();
+        let path = testdir.join("invalid-state.json");
+        std::fs::write(&path, "not json").unwrap();
+
+        assert!(matches!(
+            BackupHelper::from_file(&path),
+            Err(BackupHelperError::InvalidState(_))
+        ));
+    }
 }
