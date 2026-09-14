@@ -752,6 +752,33 @@ mod tests {
     }
 
     #[test]
+    fn reloaded_transferred_target_only_schedules_verification() {
+        let root = testdir!();
+        let source_disk = path_literal(&root.join("source-disk"));
+        let target_disk = path_literal(&root.join("target-disk"));
+        let source = path_literal(&root.join("source-disk/source"));
+        let hash_file = path_literal(&root.join("source.sha512"));
+        let target = path_literal(&root.join("target-disk/target"));
+        let config = format!(
+            r#"
+            disks {{
+                disk "source" {{ path {source_disk} }}
+                disk "target" {{ path {target_disk} }}
+            }}
+            source {source} {{
+                hash_file {hash_file}
+                target {target} {{ transfer_mode copy verify #true }}
+            }}
+        "#
+        );
+        let core = SchedulerCore::new(completed_state(&config, true, false)).unwrap();
+
+        assert_eq!(core.tasks.len(), 1);
+        assert!(matches!(core.tasks[0].task, Task::TargetVerify(_)));
+        assert!(core.tasks[0].dependencies.is_empty());
+    }
+
+    #[test]
     fn existing_source_hash_makes_copy_ready_without_a_dependency() {
         let root = testdir!();
         let source_disk = path_literal(&root.join("source-disk"));

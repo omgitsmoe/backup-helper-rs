@@ -174,6 +174,7 @@ struct BackupStateV1Owned {
 mod tests {
     use super::*;
     use crate::parse;
+    use crate::target::VerifiedInfo;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
     use testdir::testdir;
@@ -186,6 +187,23 @@ mod tests {
 
     fn json_state(state: &str) -> Value {
         serde_json::from_str(state).unwrap()
+    }
+
+    fn parsed_target(transfer_mode: crate::target::TransferMode, verify: bool) -> parse::Parsed {
+        let mut source = crate::source::Source::new("/mnt/source", None::<&str>);
+        source.add_target(crate::target::Target::new(
+            "/mnt/backup",
+            transfer_mode,
+            verify,
+        ));
+
+        parse::Parsed {
+            disks: vec![crate::disks::Disk {
+                name: "main".into(),
+                path: "/mnt".into(),
+            }],
+            sources: vec![source],
+        }
     }
 
     fn conflict(result: Result<Value>, expected: &str) {
@@ -438,6 +456,60 @@ mod tests {
         );
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn reconcile_allows_target_changes_before_transfer() {
+        let mut helper = BackupHelper::default();
+        helper
+            .reconcile(parsed_target(crate::target::TransferMode::Copy, true))
+            .unwrap();
+
+        helper
+            .reconcile(parsed_target(crate::target::TransferMode::Sync, false))
+            .unwrap();
+
+        let json: Value = serde_json::from_str(&helper.serialize().unwrap()).unwrap();
+        assert_eq!(json["sources"][0]["targets"][0]["transfer_mode"], "Sync");
+        assert_eq!(json["sources"][0]["targets"][0]["verify"], false);
+    }
+
+    #[test]
+    fn reconcile_rejects_transfer_mode_change_after_transfer() {
+        let mut helper = BackupHelper::default();
+        helper
+            .reconcile(parsed_target(crate::target::TransferMode::Copy, true))
+            .unwrap();
+        helper.source_mut(0).target_mut(0).transferred();
+
+        conflict(
+            helper
+                .reconcile(parsed_target(crate::target::TransferMode::Sync, true))
+                .map(|_| serde_json::json!(null)),
+            "transfer_mode",
+        );
+    }
+
+    #[test]
+    fn reconcile_rejects_verify_change_after_verification() {
+        let mut helper = BackupHelper::default();
+        helper
+            .reconcile(parsed_target(crate::target::TransferMode::Copy, true))
+            .unwrap();
+        helper.source_mut(0).target_mut(0).verified(VerifiedInfo {
+            checked: 1,
+            errors: 0,
+            missing: 0,
+            crc_errors: 0,
+            log_file: "/mnt/verify.log".into(),
+        });
+
+        conflict(
+            helper
+                .reconcile(parsed_target(crate::target::TransferMode::Copy, false))
+                .map(|_| serde_json::json!(null)),
+            "`verify` option",
+        );
     }
 
     #[test]
