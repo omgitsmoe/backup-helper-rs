@@ -556,6 +556,16 @@ mod tests {
         BackupHelper::from_state(&serde_json::to_string(&json).unwrap()).unwrap()
     }
 
+    fn state_with_verify(config: &str, verify: bool) -> BackupHelper {
+        let serialized = state(config).serialize().unwrap();
+        let mut json: Value = serde_json::from_str(&serialized).unwrap();
+        for target in json["sources"][0]["targets"].as_array_mut().unwrap() {
+            target["verify"] = verify.into();
+        }
+
+        BackupHelper::from_state(&serde_json::to_string(&json).unwrap()).unwrap()
+    }
+
     fn path_literal(path: &Path) -> String {
         serde_json::to_string(&path.to_string_lossy().to_string()).unwrap()
     }
@@ -574,6 +584,28 @@ mod tests {
             }}
             source {source} {{
                 target {target} {{ transfer_mode copy verify #true }}
+            }}
+        "#
+        )
+    }
+
+    fn two_target_config(root: &Path, verify: bool) -> String {
+        let source_disk = path_literal(&root.join("source-disk"));
+        let target_disk = path_literal(&root.join("target-disk"));
+        let source = path_literal(&root.join("source-disk/source"));
+        let first_target = path_literal(&root.join("target-disk/first"));
+        let second_target = path_literal(&root.join("target-disk/second"));
+        let verify = if verify { "#true" } else { "#false" };
+
+        format!(
+            r#"
+            disks {{
+                disk "source" {{ path {source_disk} }}
+                disk "target" {{ path {target_disk} }}
+            }}
+            source {source} {{
+                target {first_target} {{ transfer_mode copy verify {verify} }}
+                target {second_target} {{ transfer_mode copy verify {verify} }}
             }}
         "#
         )
@@ -616,12 +648,49 @@ mod tests {
 
         core.start_task(1);
         core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+        assert!(core.state.sources()[0].targets()[0].is_transferred());
         assert_eq!(core.tasks[2].state, TaskState::Ready);
 
         core.start_task(2);
         core.finish_task(2, Ok(verify_outcome(&root)));
         assert!(core.tasks.iter().all(|task| task.state == TaskState::Done));
         assert!(core.finished());
+    }
+
+    #[test]
+    fn finish_target_verify_persists_verified_info() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+
+        core.start_task(0);
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        core.start_task(1);
+        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+
+        let verified = VerifiedInfo {
+            checked: 4,
+            errors: 2,
+            missing: 1,
+            crc_errors: 1,
+            log_file: root.join("verification.log"),
+        };
+        core.start_task(2);
+        core.finish_task(2, Ok(TaskOutcome::TargetVerify(verified.clone())));
+
+        assert!(core.state.sources()[0].targets()[0].is_verified());
+
+        let state = core.close();
+        let json: Value = serde_json::from_str(&state.serialize().unwrap()).unwrap();
+        assert_eq!(
+            json["sources"][0]["targets"][0]["verified"],
+            serde_json::json!({
+                "checked": verified.checked,
+                "errors": verified.errors,
+                "missing": verified.missing,
+                "crc_errors": verified.crc_errors,
+                "log_file": verified.log_file,
+            })
+        );
     }
 
     #[test]
@@ -653,6 +722,7 @@ mod tests {
         assert_eq!(core.tasks[0].state, TaskState::Done);
         assert_eq!(core.tasks[1].state, TaskState::Failed);
         assert_eq!(core.tasks[2].state, TaskState::Failed);
+        assert!(!core.state.sources()[0].targets()[0].is_transferred());
         assert_eq!(core.errors.len(), 1);
     }
 
@@ -708,6 +778,164 @@ mod tests {
         assert!(matches!(core.tasks[0].task, Task::SourceToTargetCopy(_)));
         assert!(core.tasks[0].dependencies.is_empty());
         assert_eq!(core.tasks[1].dependencies, vec![0]);
+    }
+
+    #[test]
+    fn verification_is_not_scheduled_when_disabled() {
+        let root = testdir!();
+        let config = normal_config(&root).replace("verify #true", "verify #false");
+        let core = SchedulerCore::new(state_with_verify(&config, false)).unwrap();
+
+        assert_eq!(core.tasks.len(), 2);
+        assert!(matches!(core.tasks[0].task, Task::SourceHash(_)));
+        assert!(matches!(core.tasks[1].task, Task::SourceToTargetCopy(_)));
+        assert_eq!(core.tasks[1].dependencies, vec![0]);
+    }
+
+    #[test]
+    fn verification_is_not_scheduled_when_target_is_already_verified() {
+        let root = testdir!();
+        let config = normal_config(&root);
+        let mut helper = state(&config);
+        helper.source_mut(0).target_mut(0).verified(VerifiedInfo {
+            checked: 1,
+            errors: 0,
+            missing: 0,
+            crc_errors: 0,
+            log_file: root.join("verify.log"),
+        });
+
+        let core = SchedulerCore::new(helper).unwrap();
+
+        assert_eq!(core.tasks.len(), 2);
+        assert!(matches!(core.tasks[0].task, Task::SourceHash(_)));
+        assert!(matches!(core.tasks[1].task, Task::SourceToTargetCopy(_)));
+    }
+
+    #[test]
+    fn copy_is_not_scheduled_when_target_is_already_transferred() {
+        let root = testdir!();
+        let source_disk = path_literal(&root.join("source-disk"));
+        let target_disk = path_literal(&root.join("target-disk"));
+        let source = path_literal(&root.join("source-disk/source"));
+        let hash_file = path_literal(&root.join("source.sha512"));
+        let target = path_literal(&root.join("target-disk/target"));
+        let config = format!(
+            r#"
+            disks {{
+                disk "source" {{ path {source_disk} }}
+                disk "target" {{ path {target_disk} }}
+            }}
+            source {source} {{
+                hash_file {hash_file}
+                target {target} {{ transfer_mode copy verify #true }}
+            }}
+        "#
+        );
+        let mut helper = state(&config);
+        helper.source_mut(0).target_mut(0).transferred();
+
+        let core = SchedulerCore::new(helper).unwrap();
+
+        assert_eq!(core.tasks.len(), 1);
+        assert!(matches!(core.tasks[0].task, Task::TargetVerify(_)));
+        assert!(core.tasks[0].dependencies.is_empty());
+    }
+
+    #[test]
+    fn multiple_targets_have_independent_copy_and_verify_tasks() {
+        let root = testdir!();
+        let core = SchedulerCore::new(state(&two_target_config(&root, true))).unwrap();
+
+        assert_eq!(core.tasks.len(), 5);
+        assert_eq!(core.tasks[1].dependencies, vec![0]);
+        assert_eq!(core.tasks[2].dependencies, vec![0, 1]);
+        assert_eq!(core.tasks[3].dependencies, vec![0]);
+        assert_eq!(core.tasks[4].dependencies, vec![0, 3]);
+    }
+
+    #[test]
+    fn failed_copy_does_not_mark_unrelated_target_transferred() {
+        let root = testdir!();
+        let mut core =
+            SchedulerCore::new(state_with_verify(&two_target_config(&root, true), false)).unwrap();
+
+        core.start_task(0);
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        core.start_task(1);
+        core.finish_task(1, Err(BackupHelperError::CopyError("copy failed".into())));
+
+        assert_eq!(core.tasks[1].state, TaskState::Failed);
+        assert_eq!(core.tasks[2].state, TaskState::Ready);
+        assert!(!core.state.sources()[0].targets()[0].is_transferred());
+        assert!(!core.state.sources()[0].targets()[1].is_transferred());
+
+        core.start_task(2);
+        core.finish_task(2, Ok(TaskOutcome::SourceToTargetCopy));
+
+        assert!(core.state.sources()[0].targets()[1].is_transferred());
+        assert!(!core.state.sources()[0].targets()[0].is_transferred());
+    }
+
+    #[test]
+    fn failed_task_marks_all_dependent_tasks_failed() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+
+        core.start_task(0);
+        core.finish_task(
+            0,
+            Err(BackupHelperError::TaskError("source failed".into())),
+        );
+
+        assert!(core
+            .tasks
+            .iter()
+            .all(|task| task.state == TaskState::Failed));
+        assert!(core.finished());
+    }
+
+    #[test]
+    fn filesystem_tasks_update_and_persist_scheduler_state() {
+        let root = testdir!();
+        let source_path = root.join("source-disk/source");
+        let target_path = root.join("target-disk/target");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+
+        let source_task = core.start_task(0);
+        let source_context = core.context(&source_task);
+        let source_outcome = source_task.execute(&source_context).unwrap();
+        let hash_file = match &source_outcome {
+            TaskOutcome::SourceHash { hash_file, .. } => hash_file.clone(),
+            _ => panic!("source task returned the wrong outcome"),
+        };
+        core.finish_task(0, Ok(source_outcome));
+        assert_eq!(core.state.sources()[0].hash_file(), &Some(hash_file.clone()));
+
+        let copy_task = core.start_task(1);
+        let copy_context = core.context(&copy_task);
+        let copy_outcome = copy_task.execute(&copy_context).unwrap();
+        std::fs::copy(&hash_file, target_path.join(hash_file.file_name().unwrap())).unwrap();
+        core.finish_task(1, Ok(copy_outcome));
+        assert!(core.state.sources()[0].targets()[0].is_transferred());
+
+        let verify_task = core.start_task(2);
+        let verify_context = core.context(&verify_task);
+        let verify_outcome = verify_task.execute(&verify_context).unwrap();
+        core.finish_task(2, Ok(verify_outcome));
+        assert!(core.state.sources()[0].targets()[0].is_verified());
+
+        let state = core.close();
+        let serialized = state.serialize().unwrap();
+        let reloaded = BackupHelper::from_state(&serialized).unwrap();
+        assert_eq!(reloaded.sources()[0].hash_file(), &Some(hash_file));
+        assert!(reloaded.sources()[0].targets()[0].is_transferred());
+        assert!(reloaded.sources()[0].targets()[0].is_verified());
+        let reloaded_core = SchedulerCore::new(reloaded).unwrap();
+        assert!(reloaded_core.tasks.is_empty());
     }
 
     #[test]

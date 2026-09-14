@@ -66,6 +66,7 @@ impl TaskExecutor for SourceHash {
             )));
         }
 
+        // TODO: respect checksum_options
         let mut ch = ChecksumHelper::new(source_path)?;
         // TODO progress
         let collection = ch.incremental(|_p| {})?;
@@ -237,6 +238,7 @@ pub(crate) enum TaskOutcome {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use testdir::testdir;
 
     fn common(disks: &[usize]) -> CommonData {
@@ -248,6 +250,48 @@ mod tests {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         }
+    }
+
+    fn hash_source(source_path: &Path) -> path::PathBuf {
+        let outcome = Task::SourceHash(SourceHash {
+            common: common(&[0]),
+            source_idx: 0,
+            options: ChecksumOptions::default(),
+        })
+        .execute(&TaskContext {
+            source_path: Some(source_path.to_path_buf()),
+            target_path: None,
+            hash_file: None,
+        })
+        .unwrap();
+
+        let TaskOutcome::SourceHash { hash_file, .. } = outcome else {
+            panic!("SourceHash task returned the wrong outcome");
+        };
+        hash_file
+    }
+
+    fn verify_target(target_path: &Path, hash_file: &Path) -> VerifiedInfo {
+        let outcome = Task::TargetVerify(TargetVerify {
+            common: common(&[1]),
+            source_idx: 0,
+            target_idx: 0,
+        })
+        .execute(&TaskContext {
+            source_path: None,
+            target_path: Some(target_path.to_path_buf()),
+            hash_file: Some(hash_file.to_path_buf()),
+        })
+        .unwrap();
+
+        let TaskOutcome::TargetVerify(verified) = outcome else {
+            panic!("TargetVerify task returned the wrong outcome");
+        };
+        verified
+    }
+
+    fn copy_collection(hash_file: &Path, target_path: &Path) {
+        fs::copy(hash_file, target_path.join(hash_file.file_name().unwrap())).unwrap();
     }
 
     #[test]
@@ -338,6 +382,7 @@ mod tests {
         let target_path = testdir.join("target");
         fs::create_dir(&source_path).unwrap();
         fs::create_dir(&target_path).unwrap();
+        fs::write(target_path.join("existing.txt"), "existing content").unwrap();
         fs::create_dir(source_path.join("nested")).unwrap();
         fs::write(source_path.join("file.txt"), "content").unwrap();
         fs::write(source_path.join(".hidden"), "hidden content").unwrap();
@@ -364,7 +409,60 @@ mod tests {
             fs::read_to_string(target_path.join("nested/file.txt")).unwrap(),
             "nested content"
         );
+        assert_eq!(
+            fs::read_to_string(target_path.join("existing.txt")).unwrap(),
+            "existing content"
+        );
         assert!(!target_path.join("source").exists());
+    }
+
+    #[test]
+    fn execute_copy_creates_missing_destination_parent() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("missing/parents/target");
+        fs::create_dir(&source_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let task = Task::SourceToTargetCopy(SourceToTargetCopy {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+        });
+        let outcome = task.execute(&TaskContext {
+            source_path: Some(source_path),
+            target_path: Some(target_path.clone()),
+            hash_file: None,
+        });
+
+        assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
+        assert_eq!(
+            fs::read_to_string(target_path.join("file.txt")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn execute_copy_returns_copy_error_for_command_failure() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+        fs::write(&target_path, "not a directory").unwrap();
+
+        let task = Task::SourceToTargetCopy(SourceToTargetCopy {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+        });
+        let outcome = task.execute(&TaskContext {
+            source_path: Some(source_path),
+            target_path: Some(target_path),
+            hash_file: None,
+        });
+
+        assert!(matches!(outcome, Err(BackupHelperError::CopyError(_))));
     }
 
     #[test]
@@ -402,43 +500,127 @@ mod tests {
         fs::create_dir(&target_path).unwrap();
         fs::write(source_path.join("file.txt"), "content").unwrap();
 
-        let source_hash = Task::SourceHash(SourceHash {
-            common: common(&[0]),
-            source_idx: 0,
-            options: ChecksumOptions::default(),
-        })
-        .execute(&TaskContext {
-            source_path: Some(source_path.clone()),
-            target_path: None,
-            hash_file: None,
-        })
-        .unwrap();
-        let TaskOutcome::SourceHash { hash_file, .. } = source_hash else {
-            panic!("SourceHash task returned the wrong outcome");
-        };
+        let hash_file = hash_source(&source_path);
 
         fs::copy(source_path.join("file.txt"), target_path.join("file.txt")).unwrap();
+        copy_collection(&hash_file, &target_path);
+
+        let verified = verify_target(&target_path, &hash_file);
+        assert_eq!(verified.checked, 1);
+        assert_eq!(verified.errors, 0);
+        assert_eq!(verified.missing, 0);
+        assert_eq!(verified.crc_errors, 0);
+    }
+
+    #[test]
+    fn execute_target_verify_reports_missing_file() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("present.txt"), "present").unwrap();
+        fs::write(source_path.join("missing.txt"), "missing").unwrap();
+
+        let hash_file = hash_source(&source_path);
         fs::copy(
-            &hash_file,
-            target_path.join(hash_file.file_name().unwrap()),
+            source_path.join("present.txt"),
+            target_path.join("present.txt"),
+        )
+        .unwrap();
+        copy_collection(&hash_file, &target_path);
+
+        let verified = verify_target(&target_path, &hash_file);
+        assert_eq!(verified.checked, 2);
+        assert_eq!(verified.errors, 1);
+        assert_eq!(verified.missing, 1);
+        assert_eq!(verified.crc_errors, 0);
+    }
+
+    #[test]
+    fn execute_target_verify_reports_size_mismatch() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("file.txt"), "source content").unwrap();
+
+        let hash_file = hash_source(&source_path);
+        fs::write(target_path.join("file.txt"), "different size").unwrap();
+        copy_collection(&hash_file, &target_path);
+
+        let verified = verify_target(&target_path, &hash_file);
+        assert_eq!(verified.checked, 1);
+        assert_eq!(verified.errors, 1);
+        assert_eq!(verified.missing, 0);
+        assert_eq!(verified.crc_errors, 1);
+    }
+
+    #[test]
+    fn execute_target_verify_reports_hash_mismatch() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("file.txt"), "source content").unwrap();
+
+        let hash_file = hash_source(&source_path);
+        fs::write(target_path.join("file.txt"), "target content").unwrap();
+        copy_collection(&hash_file, &target_path);
+
+        let verified = verify_target(&target_path, &hash_file);
+        assert_eq!(verified.checked, 1);
+        assert_eq!(verified.errors, 1);
+        assert_eq!(verified.missing, 0);
+        assert_eq!(verified.crc_errors, 1);
+    }
+
+    #[test]
+    fn execute_target_verify_aggregates_multiple_failures() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("matching.txt"), "matching").unwrap();
+        fs::write(source_path.join("missing.txt"), "missing").unwrap();
+        fs::write(source_path.join("size.txt"), "source size").unwrap();
+        fs::write(source_path.join("hash.txt"), "source hash").unwrap();
+
+        let hash_file = hash_source(&source_path);
+        fs::write(target_path.join("matching.txt"), "matching").unwrap();
+        fs::write(target_path.join("size.txt"), "different size").unwrap();
+        fs::write(target_path.join("hash.txt"), "target hash").unwrap();
+        copy_collection(&hash_file, &target_path);
+
+        let verified = verify_target(&target_path, &hash_file);
+        assert_eq!(verified.checked, 4);
+        assert_eq!(verified.errors, 3);
+        assert_eq!(verified.missing, 1);
+        assert_eq!(verified.crc_errors, 2);
+    }
+
+    #[test]
+    fn execute_target_verify_uses_source_hash_filename_on_target() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let generated_hash_file = hash_source(&source_path);
+        fs::copy(source_path.join("file.txt"), target_path.join("file.txt")).unwrap();
+        let source_hash_file = testdir.join("manifest.cshd");
+        fs::copy(
+            &generated_hash_file,
+            target_path.join(source_hash_file.file_name().unwrap()),
         )
         .unwrap();
 
-        let outcome = Task::TargetVerify(TargetVerify {
-            common: common(&[1]),
-            source_idx: 0,
-            target_idx: 0,
-        })
-        .execute(&TaskContext {
-            source_path: None,
-            target_path: Some(target_path),
-            hash_file: Some(hash_file),
-        })
-        .unwrap();
-
-        let TaskOutcome::TargetVerify(verified) = outcome else {
-            panic!("TargetVerify task returned the wrong outcome");
-        };
+        let verified = verify_target(&target_path, &source_hash_file);
         assert_eq!(verified.checked, 1);
         assert_eq!(verified.errors, 0);
         assert_eq!(verified.missing, 0);
