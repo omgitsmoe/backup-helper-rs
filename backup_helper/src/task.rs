@@ -10,6 +10,7 @@ use crate::{
 pub enum Task {
     SourceHash(SourceHash),
     SourceToTargetCopy(SourceToTargetCopy),
+    #[allow(dead_code)]
     SourceToTargetSync(SourceToTargetSync),
     TargetVerify(TargetVerify),
 }
@@ -227,6 +228,7 @@ pub(crate) enum TaskOutcome {
         hash_log_file: path::PathBuf,
     },
     SourceToTargetCopy,
+    #[allow(dead_code)]
     SourceToTargetSync,
     TargetVerify(VerifiedInfo),
 }

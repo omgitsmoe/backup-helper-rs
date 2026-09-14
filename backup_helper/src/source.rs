@@ -41,6 +41,7 @@ impl Source {
         self.hash_file = Some(path.as_ref().to_path_buf());
     }
 
+    #[allow(dead_code)]
     pub fn hash_log_file(&self) -> &Option<path::PathBuf> {
         &self.hash_log_file
     }
