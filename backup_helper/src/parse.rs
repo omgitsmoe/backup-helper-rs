@@ -73,6 +73,12 @@ fn parse_source(contents: &str, node: &KdlNode) -> Result<Source> {
     }
 
     let path = path.as_string().expect("checked above");
+    require_absolute_path(
+        path,
+        "the `path` of a `source`",
+        contents,
+        node.span().offset(),
+    )?;
 
     let mut source = Source::new(path, None::<&str>);
     let mut targets = vec![];
@@ -85,6 +91,12 @@ fn parse_source(contents: &str, node: &KdlNode) -> Result<Source> {
             "hash_file" => {
                 let path = child.get(0).and_then(|a| a.as_string());
                 if let Some(p) = path {
+                    require_absolute_path(
+                        p,
+                        "the path of a `hash_file`",
+                        contents,
+                        child.span().offset(),
+                    )?;
                     source.set_hash_file(p);
                 } else {
                     let line_nr = span_to_line_number(contents, child.span().offset());
@@ -217,6 +229,12 @@ fn parse_target(node: &KdlNode, contents: &str) -> Result<Target> {
         )));
     }
     let path = path.expect("checked above");
+    require_absolute_path(
+        path,
+        "the `path` of a `target`",
+        contents,
+        node.span().offset(),
+    )?;
 
     let mut transfer_mode = None;
     let mut verify = true;
@@ -308,6 +326,12 @@ fn parse_disk(node: &KdlNode, contents: &str) -> Result<Disk> {
                         line_nr
                     )));
                 }
+                require_absolute_path(
+                    path.expect("checked above"),
+                    "the `path` of a `disk`",
+                    contents,
+                    child.span().offset(),
+                )?;
             }
             _ => {
                 let line_nr = span_to_line_number(contents, child.span().offset());
@@ -332,6 +356,22 @@ fn parse_disk(node: &KdlNode, contents: &str) -> Result<Disk> {
         name: name.to_string(),
         path: path::PathBuf::from(path),
     })
+}
+
+fn require_absolute_path(
+    value: &str,
+    field: &str,
+    contents: &str,
+    offset: usize,
+) -> Result<()> {
+    if path::Path::new(value).is_absolute() {
+        return Ok(());
+    }
+
+    let line_nr = span_to_line_number(contents, offset);
+    Err(BackupHelperError::InvalidConfig(format!(
+        "The {field} must be absolute on line {line_nr}"
+    )))
 }
 
 fn span_to_line_number(input: &str, offset_bytes: usize) -> u32 {
@@ -521,6 +561,93 @@ mod tests {
         }"#;
         let result = parse(input);
         assert_config_err(result, "Expected positional string argument `path`");
+    }
+
+    #[test]
+    fn test_parse_rejects_relative_paths_with_field_and_line() {
+        let cases = [
+            (
+                "source",
+                r#"source "relative/source" {
+                    target "/backup" { transfer_mode copy }
+                }"#,
+                "the `path` of a `source`",
+                1,
+            ),
+            (
+                "target",
+                r#"source "/source" {
+                    target "relative/target" { transfer_mode copy }
+                }"#,
+                "the `path` of a `target`",
+                2,
+            ),
+            (
+                "hash_file",
+                r#"source "/source" {
+                    hash_file "relative/checksums.cshd"
+                }"#,
+                "the path of a `hash_file`",
+                2,
+            ),
+            (
+                "disk",
+                r#"disks {
+                    disk "main" {
+                        path "relative/disk"
+                    }
+                }"#,
+                "the `path` of a `disk`",
+                3,
+            ),
+        ];
+
+        for (field, input, expected_field, expected_line) in cases {
+            let result = parse(input);
+            match result {
+                Err(crate::BackupHelperError::InvalidConfig(message)) => {
+                    assert!(
+                        message.contains(expected_field),
+                        "{field} error did not identify its field: {message}"
+                    );
+                    assert!(
+                        message.contains(&format!("line {expected_line}")),
+                        "{field} error did not identify its line: {message}"
+                    );
+                }
+                other => panic!("expected {field} path error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_accepts_absolute_paths_for_all_path_fields() {
+        let input = r#"
+            disks {
+                disk "main" {
+                    path "/mnt/main"
+                }
+            }
+            source "/mnt/source" {
+                hash_file "/mnt/source/checksums.cshd"
+                target "/mnt/backup" {
+                    transfer_mode copy
+                }
+            }
+        "#;
+
+        let parsed = parse(input).expect("absolute paths should be accepted");
+
+        assert_eq!(parsed.disks[0].path, path::PathBuf::from("/mnt/main"));
+        assert_eq!(
+            parsed.sources[0].hash_file(),
+            &Some(path::PathBuf::from("/mnt/source/checksums.cshd"))
+        );
+        assert_eq!(parsed.sources[0].path(), &path::PathBuf::from("/mnt/source"));
+        assert_eq!(
+            parsed.sources[0].targets()[0].path(),
+            &path::PathBuf::from("/mnt/backup")
+        );
     }
 
     #[test]
