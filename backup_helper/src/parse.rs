@@ -386,6 +386,10 @@ fn span_to_line_number(input: &str, offset_bytes: usize) -> u32 {
 mod tests {
     use super::*;
 
+    fn parse(input: &str) -> Result<Parsed> {
+        super::parse(&crate::test_utils::config_with_absolute_paths(input))
+    }
+
     fn assert_config_err(result: Result<Parsed>, expected_substring: &str) {
         match result {
             Err(crate::BackupHelperError::InvalidConfig(msg)) => {
@@ -449,11 +453,11 @@ mod tests {
 
         assert_eq!(parsed.disks.len(), 1);
         assert_eq!(parsed.disks[0].name, "main");
-        assert_eq!(parsed.disks[0].path, path::PathBuf::from("/mnt/main"));
+        assert_eq!(parsed.disks[0].path, crate::test_utils::fixture_path("/mnt/main"));
 
         assert_eq!(parsed.sources.len(), 1);
         let source = &parsed.sources[0];
-        assert_eq!(source.path(), &path::PathBuf::from("/mnt/main/photos"));
+        assert_eq!(source.path(), &crate::test_utils::fixture_path("/mnt/main/photos"));
 
         let opts = source.checksum_options();
         assert_eq!(opts.hash_type.0.to_str(), "sha256");
@@ -465,10 +469,18 @@ mod tests {
         let v = serde_json::to_value(source).unwrap();
         let targets = v.get("targets").unwrap().as_array().unwrap();
         assert_eq!(targets.len(), 2);
-        assert_eq!(targets[0].get("path").unwrap().as_str().unwrap(), "/mnt/backup/photos");
+        assert_eq!(
+            targets[0].get("path").unwrap().as_str().unwrap(),
+            crate::test_utils::fixture_path("/mnt/backup/photos")
+                .to_string_lossy()
+        );
         assert_eq!(targets[0].get("transfer_mode").unwrap().as_str().unwrap(), "Copy");
         assert!(targets[0].get("verify").unwrap().as_bool().unwrap());
-        assert_eq!(targets[1].get("path").unwrap().as_str().unwrap(), "/mnt/remote/photos");
+        assert_eq!(
+            targets[1].get("path").unwrap().as_str().unwrap(),
+            crate::test_utils::fixture_path("/mnt/remote/photos")
+                .to_string_lossy()
+        );
         assert_eq!(targets[1].get("transfer_mode").unwrap().as_str().unwrap(), "Sync");
         assert!(!targets[1].get("verify").unwrap().as_bool().unwrap());
     }
@@ -487,7 +499,7 @@ mod tests {
         assert_eq!(parsed.sources.len(), 1);
         assert_eq!(parsed.disks.len(), 0);
         let source = &parsed.sources[0];
-        assert_eq!(source.path(), &path::PathBuf::from("/data"));
+        assert_eq!(source.path(), &crate::test_utils::fixture_path("/data"));
 
         let v = serde_json::to_value(source).unwrap();
         let targets = v.get("targets").unwrap().as_array().unwrap();
@@ -638,15 +650,15 @@ mod tests {
 
         let parsed = parse(input).expect("absolute paths should be accepted");
 
-        assert_eq!(parsed.disks[0].path, path::PathBuf::from("/mnt/main"));
+        assert_eq!(parsed.disks[0].path, crate::test_utils::fixture_path("/mnt/main"));
         assert_eq!(
             parsed.sources[0].hash_file(),
-            &Some(path::PathBuf::from("/mnt/source/checksums.cshd"))
+            &Some(crate::test_utils::fixture_path("/mnt/source/checksums.cshd"))
         );
-        assert_eq!(parsed.sources[0].path(), &path::PathBuf::from("/mnt/source"));
+        assert_eq!(parsed.sources[0].path(), &crate::test_utils::fixture_path("/mnt/source"));
         assert_eq!(
             parsed.sources[0].targets()[0].path(),
-            &path::PathBuf::from("/mnt/backup")
+            &crate::test_utils::fixture_path("/mnt/backup")
         );
     }
 

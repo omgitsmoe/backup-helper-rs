@@ -16,6 +16,9 @@ mod backup_helper;
 mod task;
 mod scheduler;
 
+#[cfg(test)]
+mod test_utils;
+
 #[derive(Debug)]
 enum BackupHelperError {
     IoError(String),

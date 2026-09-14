@@ -180,13 +180,17 @@ mod tests {
     use testdir::testdir;
 
     fn reconcile_state(state: &str, config: &str) -> Result<Value> {
-        let mut helper = BackupHelper::from_state(state)?;
-        helper.reconcile(parse::parse(config)?)?;
+        let mut helper = BackupHelper::from_state(
+            &crate::test_utils::config_with_absolute_paths(state),
+        )?;
+        helper.reconcile(parse::parse(
+            &crate::test_utils::config_with_absolute_paths(config),
+        )?)?;
         Ok(serde_json::from_str(&helper.serialize()?)?)
     }
 
     fn json_state(state: &str) -> Value {
-        serde_json::from_str(state).unwrap()
+        serde_json::from_str(&crate::test_utils::config_with_absolute_paths(state)).unwrap()
     }
 
     fn parsed_target(transfer_mode: crate::target::TransferMode, verify: bool) -> parse::Parsed {
