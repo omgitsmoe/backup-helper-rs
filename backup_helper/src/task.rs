@@ -56,11 +56,16 @@ impl TaskExecutor for SourceHash {
         let name = thread.name().unwrap_or("<unnamed>");
         println!("{name}: Executing SourceHash");
 
-        let mut ch = ChecksumHelper::new(
-            ctx.source_path
-                .as_ref()
-                .expect("ctx must have a source path for SourceHash task")
-        )?;
+        let source_path = ctx.source_path
+            .as_ref()
+            .expect("ctx must have a source path for SourceHash task");
+        if !source_path.is_dir() {
+            return Err(BackupHelperError::TaskError(String::from(
+                "SourceHash task requires the source path to be a directory!",
+            )));
+        }
+
+        let mut ch = ChecksumHelper::new(source_path)?;
         // TODO progress
         let collection = ch.incremental(|_p| {})?;
         ch.write_collection(&collection)?;
@@ -93,6 +98,12 @@ impl TaskExecutor for SourceToTargetCopy {
             .target_path
             .as_ref()
             .expect("ctx must have a target_path for SourceToTargetCopy task");
+
+        if !source_path.is_dir() {
+            return Err(BackupHelperError::TaskError(String::from(
+                "SourceToTargetCopy task requires the source path to be a directory!",
+            )));
+        }
 
         if let Some(p) = target_path.parent() {
             std::fs::create_dir_all(p)?;
@@ -295,6 +306,30 @@ mod tests {
     }
 
     #[test]
+    fn execute_source_hash_rejects_file_source() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        fs::write(&source_path, "content").unwrap();
+
+        let task = Task::SourceHash(SourceHash {
+            common: common(&[0]),
+            source_idx: 0,
+            options: ChecksumOptions::default(),
+        });
+        let outcome = task.execute(&TaskContext {
+            source_path: Some(source_path),
+            target_path: None,
+            hash_file: None,
+        });
+
+        assert!(matches!(
+            outcome,
+            Err(BackupHelperError::TaskError(message))
+                if message == "SourceHash task requires the source path to be a directory!"
+        ));
+    }
+
+    #[test]
     fn execute_copy_puts_source_contents_in_existing_target() {
         let testdir = testdir!();
         let source_path = testdir.join("source");
@@ -328,6 +363,32 @@ mod tests {
             "nested content"
         );
         assert!(!target_path.join("source").exists());
+    }
+
+    #[test]
+    fn execute_copy_rejects_file_source_before_creating_target() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target/nested/destination");
+        fs::write(&source_path, "content").unwrap();
+
+        let task = Task::SourceToTargetCopy(SourceToTargetCopy {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+        });
+        let outcome = task.execute(&TaskContext {
+            source_path: Some(source_path),
+            target_path: Some(target_path.clone()),
+            hash_file: None,
+        });
+
+        assert!(matches!(
+            outcome,
+            Err(BackupHelperError::TaskError(message))
+                if message == "SourceToTargetCopy task requires the source path to be a directory!"
+        ));
+        assert!(!target_path.parent().unwrap().exists());
     }
 
     #[test]

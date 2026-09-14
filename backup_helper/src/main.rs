@@ -24,6 +24,7 @@ enum BackupHelperError {
     SchedulerError(String),
     ChecksumHelperError(ChecksumHelperError),
     CopyError(String),
+    TaskError(String),
 }
 
 impl Error for BackupHelperError {
@@ -52,6 +53,9 @@ impl std::fmt::Display for BackupHelperError {
             },
             BackupHelperError::CopyError(e) => {
                 write!(f, "CopyError: {}", e)
+            },
+            BackupHelperError::TaskError(e) => {
+                write!(f, "TaskError: {}", e)
             },
         }
     }

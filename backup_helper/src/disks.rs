@@ -1,6 +1,6 @@
 use crate::{BackupHelperError, backup_helper::DiskHandle, reconcile::Reconcile};
 use serde::{Serialize, Deserialize};
-use std::path;
+use std::{os::unix::fs::MetadataExt, path};
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 
@@ -33,6 +33,90 @@ impl Disk {
         }
 
         Ok(DiskHandle(max_idx_components.0))
+    }
+
+    #[cfg(unix)]
+    pub fn is_mounted(&self) -> std::io::Result<bool> {
+        let metadata = match std::fs::metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let parent = self.path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "disk has no parent")
+        })?;
+
+        let parent_metadata = match std::fs::metadata(parent) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+
+        Ok(metadata.dev() != parent_metadata.dev())
+    }
+
+    #[cfg(windows)]
+    fn volume_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+
+        let input: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut output = vec![0u16; 32_768];
+
+        let result =
+            unsafe { GetVolumePathNameW(input.as_ptr(), output.as_mut_ptr(), output.len() as u32) };
+
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let length = output.iter().position(|character| *character == 0).unwrap();
+
+        Ok(std::ffi::OsString::from_wide(&output[..length]).into())
+    }
+
+    #[cfg(windows)]
+    fn existing(path: &std::path::Path) -> std::io::Result<bool> {
+        match std::fs::metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(windows)]
+    fn is_mounted(&self) -> std::io::Result<bool> {
+        if !existing(&self.path)? {
+            return Ok(false);
+        }
+
+        let Some(parent) = self.path.parent() else {
+            return Ok(true);
+        };
+
+        if !existing(parent)? {
+            return Ok(false);
+        }
+
+        let path_volume = volume_path(&self.path)?;
+        let parent_volume = volume_path(parent)?;
+
+        let path_volume = path_volume.to_string_lossy();
+        let parent_volume = parent_volume.to_string_lossy();
+
+        let normalize = |path: &str| path.trim_end_matches(['\\', '/']);
+
+        Ok(!normalize(&path_volume).eq_ignore_ascii_case(normalize(&parent_volume)))
     }
 }
 

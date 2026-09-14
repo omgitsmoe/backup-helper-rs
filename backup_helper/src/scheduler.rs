@@ -22,6 +22,7 @@ pub struct SchedulerCore {
     // e.g. dependents[1] lists the TaskIds that depend on TaskId 1
     dependents: Vec<Vec<TaskId>>,
     errors: Vec<BackupHelperError>,
+    fatal_error: Option<BackupHelperError>,
     running: usize,
     done: usize,
     // DiskHandle -> busy bool
@@ -96,6 +97,7 @@ impl SchedulerCore {
             tasks: vec![],
             dependents: vec![],
             errors: vec![],
+            fatal_error: None,
             disks_busy,
             running: 0,
             done: 0,
@@ -191,14 +193,34 @@ impl SchedulerCore {
         Ok(())
     }
 
-    // TODO needs more conditions, e.g. for copy both source needs to exist and
-    //      the target disk must be present
-    pub fn pick_next(&self) -> Option<TaskId> {
-        self.tasks.iter().enumerate()
-            .filter(|(_, t)| t.state == TaskState::Ready)
-            .filter(|(_, t)| t.involved_disks().iter().all(|d| !self.disks_busy[d.0]))
-            .max_by_key(|(_, t)| t.priority)
-            .map(|(id, _)| id)
+    pub fn pick_next(&self) -> Result<Option<TaskId>> {
+        let mut selected: Option<TaskId> = None;
+
+        for (task_id, task) in self.tasks.iter().enumerate() {
+            if task.state != TaskState::Ready {
+                continue;
+            }
+
+            let can_run = task.involved_disks().iter().try_fold(
+                true,
+                |can_run, disk| {
+                    if !can_run && self.disks_busy[disk.0] {
+                        return Ok(false);
+                    }
+
+                    self.state.disks()[disk.0].is_mounted()
+                })?;
+
+            if can_run &&
+                selected
+                    .map(|id| task.priority > self.tasks[id].priority)
+                    .unwrap_or(true)
+            {
+                selected = Some(task_id);
+            }
+        }
+
+        Ok(selected)
     }
 
     pub fn start_task(&mut self, task: TaskId) -> Task {
@@ -341,6 +363,10 @@ impl SchedulerCore {
         self.running == 0 && self.tasks.iter().all(|t| t.state != TaskState::Ready)
     }
 
+    fn has_ready_tasks(&self) -> bool {
+        self.tasks.iter().any(|task| task.state == TaskState::Ready)
+    }
+
     pub fn close(self) -> BackupHelper {
         self.state
     }
@@ -351,15 +377,35 @@ fn worker(scheduler: &Scheduler) {
         let guard = scheduler.core.lock().unwrap();
         let mut core = guard;
         let task_id = loop {
-            if let Some(id) = core.pick_next() {
-                break id;
-            }
+            match core.pick_next() {
+                Ok(Some(id)) => break id,
 
-            if core.finished() {
-                return;
-            }
+                Ok(None) if core.finished() => {
+                    return;
+                }
 
-            core = scheduler.runnable.wait(core).unwrap();
+                Ok(None) if core.running == 0 && core.has_ready_tasks() => {
+                    core.fatal_error = Some(BackupHelperError::SchedulerError(
+                        "ready tasks cannot run because their disks are unavailable".to_string(),
+                    ));
+
+                    drop(core);
+                    scheduler.runnable.notify_all();
+                    return;
+                }
+
+                Ok(None) => {
+                    core = scheduler.runnable.wait(core).unwrap();
+                }
+
+                Err(error) => {
+                    core.fatal_error = Some(error);
+
+                    drop(core);
+                    scheduler.runnable.notify_all();
+                    return;
+                }
+            }
         };
 
         let task = core.start_task(task_id);
@@ -398,7 +444,7 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
     }
 
     let guard = scheduler.core.lock().unwrap();
-    if guard.errors.is_empty() {
+    if guard.errors.is_empty() && guard.fatal_error.is_none() {
         Ok(())
     } else {
         let mut combined = String::new();
@@ -411,6 +457,18 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
 
             first = false;
         }
+
+        match &guard.fatal_error {
+            None => {},
+            Some(e) => {
+                if !first {
+                    combined.push('\n');
+                }
+
+                write!(combined, "Fatal error: {}", e).unwrap();
+            },
+        }
+
         Err(BackupHelperError::SchedulerError(combined))
     }
 }
