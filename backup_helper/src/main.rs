@@ -150,6 +150,13 @@ fn main() -> std::result::Result<(), BackupHelperError> {
 }
 
 fn start(args: CommonArgs) -> std::result::Result<(), BackupHelperError> {
+    if !std::fs::exists(&args.state)? {
+        return Err(BackupHelperError::IoError(format!(
+            "state file does not exist: {:?}",
+            args.state
+        )));
+    }
+
     let bh = BackupHelper::from_file(&args.state)?;
     let scheduler = Scheduler::new(SchedulerShared::new(bh)?);
 
