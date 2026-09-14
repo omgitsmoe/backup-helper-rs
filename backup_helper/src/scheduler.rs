@@ -1,4 +1,5 @@
 use std::fmt::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
@@ -33,6 +34,7 @@ pub struct SchedulerShared {
     core: Mutex<SchedulerCore>,
     // notified when a task becomes ready
     runnable: Condvar,
+    cancel_requested: AtomicBool,
 }
 
 pub type Scheduler = Arc<SchedulerShared>;
@@ -68,6 +70,7 @@ impl SchedulerShared {
         Ok(Self {
             core: Mutex::new(SchedulerCore::new(state)?),
             runnable: Condvar::new(),
+            cancel_requested: AtomicBool::new(false),
         })
     }
 
@@ -86,6 +89,16 @@ impl SchedulerShared {
         Ok(shared.core.into_inner()
             .expect("worker panicked")
             .close())
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Release);
+        // so waiting workers can see the cancel request
+        self.runnable.notify_all();
+    }
+
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::Acquire)
     }
 }
 
@@ -405,6 +418,10 @@ fn worker(scheduler: &Scheduler) {
         let guard = scheduler.core.lock().unwrap();
         let mut core = guard;
         let task_id = loop {
+            if scheduler.cancel_requested() {
+                return;
+            }
+
             match core.pick_next() {
                 Ok(Some(id)) => break id,
 
@@ -469,6 +486,10 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
 
     for h in handles {
         h.join().expect("worker panicked");
+    }
+
+    if scheduler.cancel_requested() {
+        return Err(BackupHelperError::Interrupted);
     }
 
     let guard = scheduler.core.lock().unwrap();
@@ -701,6 +722,7 @@ mod tests {
         let scheduler = Arc::new(SchedulerShared {
             core: Mutex::new(core),
             runnable: Condvar::new(),
+            cancel_requested: AtomicBool::new(false),
         });
 
         let error = run(&scheduler).unwrap_err();
@@ -708,6 +730,23 @@ mod tests {
             panic!("expected a scheduler error");
         };
         assert!(message.contains("Task failed: TaskError: source failed"));
+    }
+
+    #[test]
+    fn cancellation_prevents_workers_from_starting_tasks() {
+        let root = testdir!();
+        let scheduler = Arc::new(SchedulerShared::new(state(&normal_config(&root))).unwrap());
+
+        scheduler.request_cancel();
+        assert!(scheduler.cancel_requested());
+
+        assert!(matches!(run(&scheduler), Err(BackupHelperError::Interrupted)));
+
+        let core = scheduler.core.lock().unwrap();
+        assert!(core
+            .tasks
+            .iter()
+            .all(|task| matches!(task.state, TaskState::Pending | TaskState::Ready)));
     }
 
     #[test]

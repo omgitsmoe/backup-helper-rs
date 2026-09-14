@@ -1,4 +1,5 @@
-use std::path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{path, sync::Arc};
 use std::error::Error;
 
 use checksum_helper::{ChecksumHelperError, collection::HashCollectionError};
@@ -25,6 +26,7 @@ enum BackupHelperError {
     ChecksumHelperError(ChecksumHelperError),
     CopyError(String),
     TaskError(String),
+    Interrupted,
 }
 
 impl Error for BackupHelperError {
@@ -56,6 +58,9 @@ impl std::fmt::Display for BackupHelperError {
             },
             BackupHelperError::TaskError(e) => {
                 write!(f, "TaskError: {}", e)
+            },
+            BackupHelperError::Interrupted => {
+                write!(f, "UserInterrupt")
             },
         }
     }
@@ -146,10 +151,33 @@ fn main() -> std::result::Result<(), BackupHelperError> {
 
 fn start(args: CommonArgs) -> std::result::Result<(), BackupHelperError> {
     let bh = BackupHelper::from_file(&args.state)?;
-    let schedulder = Scheduler::new(SchedulerShared::new(bh)?);
-    let result = scheduler::run(&schedulder);
+    let scheduler = Scheduler::new(SchedulerShared::new(bh)?);
 
-    let bh = schedulder.close()?;
+    let cancellation_request_count = Arc::new(AtomicUsize::new(0));
+    const EXIT_AFTER_COUNT_CANCEL_REQUESTS: usize = 3;
+    let signal_scheduler = Arc::downgrade(&scheduler);
+    ctrlc::set_handler(move || {
+        let count = cancellation_request_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        if count >= EXIT_AFTER_COUNT_CANCEL_REQUESTS {
+            eprintln!("Forced exit...");
+            std::process::exit(130);
+        }
+
+        if count == 1 {
+            eprintln!("Cancellation requested; waiting for in-progress tasks...");
+            if let Some(scheduler) = signal_scheduler.upgrade() {
+                scheduler.request_cancel();
+            }
+        } else {
+            eprintln!("Cancellation already requested; press Ctrl-C once more to force exit.");
+        }
+    })
+    .expect("Error setting Ctrl-C handler");
+
+    let result = scheduler::run(&scheduler);
+
+    let bh = scheduler.close()?;
     bh.persist(&args.state)?;
 
     result
