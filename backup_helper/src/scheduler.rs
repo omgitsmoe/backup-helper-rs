@@ -128,55 +128,83 @@ impl SchedulerCore {
             ))),
         };
 
-        // TODO: don't add task if already finished, e.g. source already has hash_file
         for (source_index, source) in self.state.sources().iter().enumerate() {
             check_source_disk(source)?;
-            let source_task_id = self.tasks.len();
             let source_disk = source.disk().expect("bug: source disk checked above");
-            self.tasks.push(TaskEntry {
-                task: Task::SourceHash(SourceHash {
-                    common: CommonData {
-                        involved_disks: Box::<[DiskHandle; 1]>::new([source_disk]),
-                    },
-                    source_idx: source_index,
-                    options: source.checksum_options().clone(),
-                }),
-                state: TaskState::Ready,
-                dependencies: vec![],
-                remaining_deps: 0,
-                priority: 0,
-            });
+
+            let mut source_task_id = None;
+            if source.hash_file().is_none() {
+                source_task_id = Some(self.tasks.len());
+                self.tasks.push(TaskEntry {
+                    task: Task::SourceHash(SourceHash {
+                        common: CommonData {
+                            involved_disks: Box::<[DiskHandle; 1]>::new([source_disk]),
+                        },
+                        source_idx: source_index,
+                        options: source.checksum_options().clone(),
+                    }),
+                    state: TaskState::Ready,
+                    dependencies: vec![],
+                    remaining_deps: 0,
+                    priority: 0,
+                });
+            }
 
             for (target_index, target) in source.targets().iter().enumerate() {
                 check_target_disk(target)?;
                 let target_disk = target.disk().expect("bug: target disk checked above");
-                let target_copy_task_id = self.tasks.len();
-                self.tasks.push(TaskEntry {
-                    task: Task::SourceToTargetCopy(SourceToTargetCopy{
-                        common: CommonData {
-                            involved_disks: Box::<[DiskHandle; 2]>::new([source_disk, target_disk]),
-                        },
-                        source_idx: source_index,
-                        target_idx: target_index,
-                    }),
-                    state: TaskState::Pending,
-                    dependencies: vec![source_task_id],
-                    remaining_deps: 1,
-                    priority: 1,
-                });
 
-                if target.verify() {
+                let mut target_copy_task_id = None;
+                if !target.is_transferred() {
+                    target_copy_task_id = Some(self.tasks.len());
+                    let dependencies = match source_task_id {
+                            None => vec![],
+                            Some(source_task_id) => vec![source_task_id],
+                    };
+
                     self.tasks.push(TaskEntry {
-                        task: Task::TargetVerify(TargetVerify{
+                        task: Task::SourceToTargetCopy(SourceToTargetCopy{
+                            common: CommonData {
+                                involved_disks: Box::<[DiskHandle; 2]>::new([source_disk, target_disk]),
+                            },
+                            source_idx: source_index,
+                            target_idx: target_index,
+                        }),
+                        state: match dependencies.len() {
+                            0 => TaskState::Ready,
+                            _ => TaskState::Pending,
+                        },
+                        remaining_deps: dependencies.len(),
+                        dependencies,
+                        priority: 1,
+                    });
+                }
+
+                if target.verify() && !target.is_verified() {
+                    let dependencies = match (source_task_id, target_copy_task_id) {
+                            (None, None) => vec![],
+                            (Some(_), None) => {
+                                unreachable!("source must be done before target copy can be done")
+                            }
+                            (None, Some(target_copy_task_id)) => vec![target_copy_task_id],
+                            (Some(source_task_id), Some(target_copy_task_id)) => {
+                                vec![source_task_id, target_copy_task_id]
+                            }
+                        };
+                    self.tasks.push(TaskEntry {
+                        task: Task::TargetVerify(TargetVerify {
                             common: CommonData {
                                 involved_disks: Box::<[DiskHandle; 1]>::new([target_disk]),
                             },
                             source_idx: source_index,
                             target_idx: target_index,
                         }),
-                        state: TaskState::Pending,
-                        dependencies: vec![source_task_id, target_copy_task_id],
-                        remaining_deps: 2,
+                        state: match dependencies.len() {
+                            0 => TaskState::Ready,
+                            _ => TaskState::Pending,
+                        },
+                        remaining_deps: dependencies.len(),
+                        dependencies,
                         priority: 0,
                     });
                 }
@@ -204,7 +232,7 @@ impl SchedulerCore {
             let can_run = task.involved_disks().iter().try_fold(
                 true,
                 |can_run, disk| {
-                    if !can_run && self.disks_busy[disk.0] {
+                    if !can_run || self.disks_busy[disk.0] {
                         return Ok(false);
                     }
 
@@ -470,5 +498,238 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
         }
 
         Err(BackupHelperError::SchedulerError(combined))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{parse, target::VerifiedInfo};
+    use serde_json::Value;
+    use std::path::Path;
+    use testdir::testdir;
+
+    fn state(config: &str) -> BackupHelper {
+        let mut state = BackupHelper::default();
+        state.reconcile(parse::parse(config).unwrap()).unwrap();
+        state
+    }
+
+    fn completed_state(config: &str, transferred: bool, verified: bool) -> BackupHelper {
+        let serialized = state(config).serialize().unwrap();
+        let mut json: Value = serde_json::from_str(&serialized).unwrap();
+        let target = &mut json["sources"][0]["targets"][0];
+        target["transferred"] = transferred.into();
+        target["verified"] = if verified {
+            serde_json::json!({
+                "checked": 1,
+                "errors": 0,
+                "missing": 0,
+                "crc_errors": 0,
+                "log_file": ""
+            })
+        } else {
+            Value::Null
+        };
+
+        BackupHelper::from_state(&serde_json::to_string(&json).unwrap()).unwrap()
+    }
+
+    fn path_literal(path: &Path) -> String {
+        serde_json::to_string(&path.to_string_lossy().to_string()).unwrap()
+    }
+
+    fn normal_config(root: &Path) -> String {
+        let source_disk = path_literal(&root.join("source-disk"));
+        let target_disk = path_literal(&root.join("target-disk"));
+        let source = path_literal(&root.join("source-disk/source"));
+        let target = path_literal(&root.join("target-disk/target"));
+
+        format!(
+            r#"
+            disks {{
+                disk "source" {{ path {source_disk} }}
+                disk "target" {{ path {target_disk} }}
+            }}
+            source {source} {{
+                target {target} {{ transfer_mode copy verify #true }}
+            }}
+        "#
+        )
+    }
+
+    fn source_hash_outcome(root: &Path) -> TaskOutcome {
+        TaskOutcome::SourceHash {
+            hash_file: root.join("source.sha512"),
+            hash_log_file: root.join("source.log"),
+        }
+    }
+
+    fn verify_outcome(root: &Path) -> TaskOutcome {
+        TaskOutcome::TargetVerify(VerifiedInfo {
+            checked: 1,
+            errors: 0,
+            missing: 0,
+            crc_errors: 0,
+            log_file: root.join("verify.log"),
+        })
+    }
+
+    #[test]
+    fn dependencies_are_released_in_order() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+
+        assert_eq!(core.tasks.len(), 3);
+        assert_eq!(core.tasks[0].state, TaskState::Ready);
+        assert_eq!(core.tasks[1].dependencies, vec![0]);
+        assert_eq!(core.tasks[1].state, TaskState::Pending);
+        assert_eq!(core.tasks[2].dependencies, vec![0, 1]);
+        assert_eq!(core.tasks[2].state, TaskState::Pending);
+
+        core.start_task(0);
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        assert_eq!(core.tasks[0].state, TaskState::Done);
+        assert_eq!(core.tasks[1].state, TaskState::Ready);
+        assert_eq!(core.tasks[2].state, TaskState::Pending);
+
+        core.start_task(1);
+        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+        assert_eq!(core.tasks[2].state, TaskState::Ready);
+
+        core.start_task(2);
+        core.finish_task(2, Ok(verify_outcome(&root)));
+        assert!(core.tasks.iter().all(|task| task.state == TaskState::Done));
+        assert!(core.finished());
+    }
+
+    #[test]
+    fn failed_source_marks_all_dependents_failed() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+        core.start_task(0);
+        core.finish_task(
+            0,
+            Err(BackupHelperError::TaskError("source failed".into())),
+        );
+
+        assert_eq!(core.tasks[0].state, TaskState::Failed);
+        assert_eq!(core.tasks[1].state, TaskState::Failed);
+        assert_eq!(core.tasks[2].state, TaskState::Failed);
+        assert_eq!(core.errors.len(), 1);
+        assert!(core.finished());
+    }
+
+    #[test]
+    fn failed_copy_marks_verification_failed() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+        core.start_task(0);
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        core.start_task(1);
+        core.finish_task(1, Err(BackupHelperError::CopyError("copy failed".into())));
+
+        assert_eq!(core.tasks[0].state, TaskState::Done);
+        assert_eq!(core.tasks[1].state, TaskState::Failed);
+        assert_eq!(core.tasks[2].state, TaskState::Failed);
+        assert_eq!(core.errors.len(), 1);
+    }
+
+    #[test]
+    fn completed_work_is_not_added_to_the_task_graph() {
+        let root = testdir!();
+        let source_disk = path_literal(&root.join("source-disk"));
+        let target_disk = path_literal(&root.join("target-disk"));
+        let source = path_literal(&root.join("source-disk/source"));
+        let hash_file = path_literal(&root.join("source.sha512"));
+        let target = path_literal(&root.join("target-disk/target"));
+        let config = format!(
+            r#"
+            disks {{
+                disk "source" {{ path {source_disk} }}
+                disk "target" {{ path {target_disk} }}
+            }}
+            source {source} {{
+                hash_file {hash_file}
+                target {target} {{ transfer_mode copy verify #true }}
+            }}
+        "#
+        );
+        let core = SchedulerCore::new(completed_state(&config, true, true)).unwrap();
+
+        assert!(core.tasks.is_empty());
+    }
+
+    #[test]
+    fn existing_source_hash_makes_copy_ready_without_a_dependency() {
+        let root = testdir!();
+        let source_disk = path_literal(&root.join("source-disk"));
+        let target_disk = path_literal(&root.join("target-disk"));
+        let source = path_literal(&root.join("source-disk/source"));
+        let hash_file = path_literal(&root.join("source.sha512"));
+        let target = path_literal(&root.join("target-disk/target"));
+        let config = format!(
+            r#"
+            disks {{
+                disk "source" {{ path {source_disk} }}
+                disk "target" {{ path {target_disk} }}
+            }}
+            source {source} {{
+                hash_file {hash_file}
+                target {target} {{ transfer_mode copy verify #true }}
+            }}
+        "#
+        );
+        let core = SchedulerCore::new(state(&config)).unwrap();
+
+        assert_eq!(core.tasks.len(), 2);
+        assert_eq!(core.tasks[0].state, TaskState::Ready);
+        assert!(matches!(core.tasks[0].task, Task::SourceToTargetCopy(_)));
+        assert!(core.tasks[0].dependencies.is_empty());
+        assert_eq!(core.tasks[1].dependencies, vec![0]);
+    }
+
+    #[test]
+    fn run_reports_task_failures_and_exits() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+        core.start_task(0);
+        core.finish_task(
+            0,
+            Err(BackupHelperError::TaskError("source failed".into())),
+        );
+        let scheduler = Arc::new(SchedulerShared {
+            core: Mutex::new(core),
+            runnable: Condvar::new(),
+        });
+
+        let error = run(&scheduler).unwrap_err();
+        let BackupHelperError::SchedulerError(message) = error else {
+            panic!("expected a scheduler error");
+        };
+        assert!(message.contains("Task failed: TaskError: source failed"));
+    }
+
+    #[test]
+    fn run_reports_fatal_unavailable_disk_errors() {
+        let root = testdir!();
+        let missing_disk = path_literal(&root.join("missing-disk"));
+        let source = path_literal(&root.join("missing-disk/source"));
+        let target = path_literal(&root.join("missing-disk/target"));
+        let config = format!(
+            r#"
+            disks {{ disk "missing" {{ path {missing_disk} }} }}
+            source {source} {{
+                target {target} {{ transfer_mode copy }}
+            }}
+        "#
+        );
+        let scheduler = Arc::new(SchedulerShared::new(state(&config)).unwrap());
+
+        let error = run(&scheduler).unwrap_err();
+        let BackupHelperError::SchedulerError(message) = error else {
+            panic!("expected a scheduler error");
+        };
+        assert!(message.contains("Fatal error: Scheduler: ready tasks cannot run"));
     }
 }
