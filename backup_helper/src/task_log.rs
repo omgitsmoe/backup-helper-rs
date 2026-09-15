@@ -184,8 +184,10 @@ fn sanitized_path_prefix(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitized_path_prefix;
+    use super::{sanitized_path_prefix, TaskLog};
+    use checksum_helper::{checksum_helper::IncrementalProgress, hashed_file::VerifyResult};
     use std::path::Path;
+    use testdir::testdir;
 
     #[test]
     fn sanitizes_full_path_and_keeps_rightmost_characters() {
@@ -201,5 +203,101 @@ mod tests {
 
         assert_eq!(prefix.len(), 120);
         assert!(prefix.chars().all(|character| character == 'a'));
+    }
+
+    #[test]
+    fn reports_all_incremental_statuses_and_summary_counts() {
+        let root = testdir!();
+        let subject = root.join("source");
+        let mut log = TaskLog::new(&subject, "SourceHash", Some(&root)).unwrap();
+
+        let statuses = [
+            IncrementalProgress::FileMatch("unchanged.txt".into()),
+            IncrementalProgress::FileUnchangedSkipped("skipped.txt".into()),
+            IncrementalProgress::FileChanged("changed.txt".into()),
+            IncrementalProgress::FileChangedCorrupted("corrupted.txt".into()),
+            IncrementalProgress::FileChangedOlder("older.txt".into()),
+            IncrementalProgress::FileNew("new.txt".into()),
+            IncrementalProgress::FileRemoved("removed.txt".into()),
+        ];
+        for status in &statuses {
+            log.report_incremental(status).unwrap();
+        }
+        log.report_incremental(&IncrementalProgress::Finished)
+            .unwrap();
+        log.finish_incremental().unwrap();
+
+        let log_path = log.path().to_owned();
+        drop(log);
+        let contents = std::fs::read_to_string(log_path).unwrap();
+
+        for expected in [
+            "[OK   ] \"unchanged.txt\" unchanged",
+            "[SKIP ] \"skipped.txt\" (unchanged, skipped)",
+            "[CHG  ] \"changed.txt\" modified",
+            "[CORR ] \"corrupted.txt\" corrupted",
+            "[OLD  ] \"older.txt\" local newer than hash",
+            "[NEW  ] \"new.txt\"",
+            "[DEL  ] \"removed.txt\"",
+            "  unchanged: 1",
+            "  skipped: 1",
+            "  changed: 1",
+            "  corrupted: 1",
+            "  local newer than hash: 1",
+            "  new: 1",
+            "  removed: 1",
+            "Done.",
+        ] {
+            assert!(
+                contents.contains(expected),
+                "missing {expected:?}:\n{contents}"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_all_verification_statuses_and_summary_counts() {
+        let root = testdir!();
+        let subject = root.join("target");
+        let mut log = TaskLog::new(&subject, "TargetVerify", Some(&root)).unwrap();
+
+        for (path, result) in [
+            ("ok.txt", VerifyResult::Ok),
+            (
+                "missing.txt",
+                VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+            ),
+            ("hash.txt", VerifyResult::Mismatch),
+            ("size.txt", VerifyResult::MismatchSize),
+            ("corrupted.txt", VerifyResult::MismatchCorrupted),
+            ("outdated.txt", VerifyResult::MismatchOutdatedHash),
+        ] {
+            log.report_verify(Path::new(path), result).unwrap();
+        }
+        log.finish_verify().unwrap();
+
+        let log_path = log.path().to_owned();
+        drop(log);
+        let contents = std::fs::read_to_string(log_path).unwrap();
+
+        for expected in [
+            "[OK        ] \"ok.txt\"",
+            "[ERR MISS  ] \"missing.txt\"",
+            "[ERR HASH  ] \"hash.txt\"",
+            "[ERR SIZE  ] \"size.txt\"",
+            "[ERR CORR  ] \"corrupted.txt\"",
+            "[WARN STALE] \"outdated.txt\"",
+            "  checked: 6",
+            "  errors: 5",
+            "  missing: 1",
+            "  checksum errors: 4",
+            "  outdated hashes: 1",
+            "Done.",
+        ] {
+            assert!(
+                contents.contains(expected),
+                "missing {expected:?}:\n{contents}"
+            );
+        }
     }
 }

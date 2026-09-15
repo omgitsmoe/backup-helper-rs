@@ -260,6 +260,70 @@ mod tests {
     }
 
     #[test]
+    fn copy_tree_rejects_missing_source() {
+        let root = testdir!();
+        let source = root.join("missing-source");
+
+        let result = copy_tree(&source, root.join("destination"));
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::CopyError(message))
+                if message.contains("does not exist")
+        ));
+    }
+
+    #[test]
+    fn copy_tree_rejects_file_source() {
+        let root = testdir!();
+        let source = root.join("source");
+        fs::write(&source, "not a directory").unwrap();
+
+        let result = copy_tree(&source, root.join("destination"));
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::CopyError(message))
+                if message.contains("is not a directory")
+        ));
+    }
+
+    #[test]
+    fn copy_tree_rejects_file_destination() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::write(&destination, "not a directory").unwrap();
+
+        let result = copy_tree(&source, &destination);
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::CopyError(message))
+                if message.contains("create destination directory")
+        ));
+    }
+
+    #[test]
+    fn copy_tree_rejects_destination_below_file_parent() {
+        let root = testdir!();
+        let source = root.join("source");
+        let file_parent = root.join("file-parent");
+        let destination = file_parent.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::write(&file_parent, "not a directory").unwrap();
+
+        let result = copy_tree(&source, &destination);
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::CopyError(message))
+                if message.contains("create destination directory")
+        ));
+    }
+
+    #[test]
     fn copy_tree_rejects_destination_inside_source() {
         let root = testdir!();
         let destination = root.join("nested/destination");
