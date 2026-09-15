@@ -16,6 +16,7 @@ mod disks;
 mod backup_helper;
 mod task;
 mod scheduler;
+mod copy;
 
 #[cfg(test)]
 mod test_utils;

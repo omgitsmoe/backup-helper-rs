@@ -3,7 +3,7 @@ use std::path;
 use checksum_helper::{ChecksumHelper, ChecksumHelperOptions, collection, hashed_file::VerifyResult};
 
 use crate::{
-    BackupHelperError, backup_helper::DiskHandle, source::ChecksumOptions, target::VerifiedInfo,
+    BackupHelperError, backup_helper::DiskHandle, copy, source::ChecksumOptions, target::VerifiedInfo
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,8 +75,8 @@ impl TaskExecutor for SourceHash {
             .hash_type(checksum_options.hash_type.0)
             .hash_files_matcher(checksum_options.checksum_files.clone().try_into()?)
             .all_files_matcher(checksum_options.all_files.clone().try_into()?);
-        let mut ch = ChecksumHelper::with_options(&source_path, options)?;
-        // TODO progress
+        let mut ch = ChecksumHelper::with_options(source_path, options)?;
+        // TODO progress + log
         let collection = ch.incremental(|_p| {})?;
         ch.write_collection(&collection)?;
 
@@ -118,22 +118,10 @@ impl TaskExecutor for SourceToTargetCopy {
         if let Some(p) = target_path.parent() {
             std::fs::create_dir_all(p)?;
         }
-        // TODO implement this properly
-        let output = std::process::Command::new("cp")
-            .args([
-                "-r",
-                &source_path.join(".").to_string_lossy(),
-                &target_path.to_string_lossy(),
-            ])
-            .output()?;
 
-        if output.status.success() {
-            Ok(TaskOutcome::SourceToTargetCopy)
-        } else {
-            Err(BackupHelperError::CopyError(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ))
-        }
+        copy::copy_tree(source_path, target_path)?;
+
+        Ok(TaskOutcome::SourceToTargetCopy)
     }
 }
 
@@ -183,7 +171,7 @@ impl TaskExecutor for TargetVerify {
         let target_collection_path = target_path.join(collection_file_name);
 
         let collection = ch.read_collection(&target_collection_path)?;
-        // TODO progress
+        // TODO progress + log
         let mut verified = VerifiedInfo {
             checked: 0,
             errors: 0,
@@ -502,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_copy_returns_copy_error_for_command_failure() {
+    fn execute_copy_returns_copy_error_for_destination_file() {
         let testdir = testdir!();
         let source_path = testdir.join("source");
         let target_path = testdir.join("target");
