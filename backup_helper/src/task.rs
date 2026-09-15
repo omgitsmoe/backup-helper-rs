@@ -690,7 +690,7 @@ mod tests {
         fs::write(source_path.join("file.txt"), "source content").unwrap();
 
         let hash_file = hash_source(&source_path);
-        fs::write(target_path.join("file.txt"), "different size").unwrap();
+        fs::write(target_path.join("file.txt"), "different").unwrap();
         copy_collection(&hash_file, &target_path);
 
         let verified = verify_target(&target_path, &hash_file);
@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(verified.crc_errors, 1);
         assert_log_contains(
             &verified.log_file,
-            &["[WARN STALE]", "file.txt", "errors: 1", "checksum errors: 1"],
+            &["[ERR SIZE  ]", "file.txt", "errors: 1", "checksum errors: 1"],
         );
     }
 
