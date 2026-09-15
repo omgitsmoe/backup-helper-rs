@@ -377,6 +377,7 @@ impl SchedulerCore {
                         .checksum_options()
                         .clone(),
                 ),
+                log_directory: None,
             },
             Task::SourceToTargetCopy(t) => {
                 let source = &self.state.sources()[t.source_idx];
@@ -385,6 +386,7 @@ impl SchedulerCore {
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
                     checksum_options: None,
+                    log_directory: None,
                 }
             }
             Task::SourceToTargetSync(t) => {
@@ -394,6 +396,7 @@ impl SchedulerCore {
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
                     checksum_options: None,
+                    log_directory: None,
                 }
             }
             Task::TargetVerify(t) => {
@@ -403,6 +406,7 @@ impl SchedulerCore {
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: source.hash_file().to_owned(),
                     checksum_options: None,
+                    log_directory: None,
                 }
             }
         }
@@ -941,7 +945,8 @@ mod tests {
         let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
 
         let source_task = core.start_task(0);
-        let source_context = core.context(&source_task);
+        let mut source_context = core.context(&source_task);
+        source_context.log_directory = Some(root.clone());
         let source_outcome = source_task.execute(&source_context).unwrap();
         let hash_file = match &source_outcome {
             TaskOutcome::SourceHash { hash_file, .. } => hash_file.clone(),
@@ -958,7 +963,8 @@ mod tests {
         assert!(core.state.sources()[0].targets()[0].is_transferred());
 
         let verify_task = core.start_task(2);
-        let verify_context = core.context(&verify_task);
+        let mut verify_context = core.context(&verify_task);
+        verify_context.log_directory = Some(root.clone());
         let verify_outcome = verify_task.execute(&verify_context).unwrap();
         core.finish_task(2, Ok(verify_outcome));
         assert!(core.state.sources()[0].targets()[0].is_verified());

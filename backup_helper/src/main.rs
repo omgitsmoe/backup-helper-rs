@@ -17,6 +17,7 @@ mod backup_helper;
 mod task;
 mod scheduler;
 mod copy;
+mod task_log;
 
 #[cfg(test)]
 mod test_utils;

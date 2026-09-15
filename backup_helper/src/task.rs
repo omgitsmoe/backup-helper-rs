@@ -1,9 +1,12 @@
 use std::path;
 
-use checksum_helper::{ChecksumHelper, ChecksumHelperOptions, collection, hashed_file::VerifyResult};
+use checksum_helper::{
+    ChecksumHelper, ChecksumHelperOptions, collection, hashed_file::VerifyResult,
+};
 
 use crate::{
-    BackupHelperError, backup_helper::DiskHandle, copy, source::ChecksumOptions, target::VerifiedInfo
+    BackupHelperError, backup_helper::DiskHandle, copy, source::ChecksumOptions,
+    target::VerifiedInfo, task_log::TaskLog,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +48,7 @@ pub(crate) struct CommonData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceHash{
+pub(crate) struct SourceHash {
     pub(crate) common: CommonData,
     pub(crate) source_idx: usize,
     pub(crate) options: ChecksumOptions,
@@ -57,7 +60,8 @@ impl TaskExecutor for SourceHash {
         let name = thread.name().unwrap_or("<unnamed>");
         println!("{name}: Executing SourceHash");
 
-        let source_path = ctx.source_path
+        let source_path = ctx
+            .source_path
             .as_ref()
             .expect("ctx must have a source path for SourceHash task");
         if !source_path.is_dir() {
@@ -66,7 +70,8 @@ impl TaskExecutor for SourceHash {
             )));
         }
 
-        let checksum_options = ctx.checksum_options
+        let checksum_options = ctx
+            .checksum_options
             .as_ref()
             .expect("ctx must have checksum_options for SourceHash task");
         let options = ChecksumHelperOptions::default()
@@ -76,13 +81,30 @@ impl TaskExecutor for SourceHash {
             .hash_files_matcher(checksum_options.checksum_files.clone().try_into()?)
             .all_files_matcher(checksum_options.all_files.clone().try_into()?);
         let mut ch = ChecksumHelper::with_options(source_path, options)?;
-        // TODO progress + log
-        let collection = ch.incremental(|_p| {})?;
+        let mut log = TaskLog::new(
+            source_path,
+            "SourceHash",
+            ctx.log_directory.as_deref(),
+        )?;
+        let mut log_error = None;
+        let collection = ch.incremental(|progress| {
+            if log_error.is_none()
+                && let Err(error) = log.report_incremental(&progress)
+            {
+                log_error = Some(error);
+            }
+        })?;
+
+        if let Some(error) = log_error {
+            return Err(error.into());
+        }
+
+        log.finish_incremental()?;
         ch.write_collection(&collection)?;
 
         Ok(TaskOutcome::SourceHash {
             hash_file: collection.full_path()?,
-            hash_log_file: path::PathBuf::from("/todo.log"),
+            hash_log_file: log.path().to_path_buf(),
         })
     }
 }
@@ -171,7 +193,12 @@ impl TaskExecutor for TargetVerify {
         let target_collection_path = target_path.join(collection_file_name);
 
         let collection = ch.read_collection(&target_collection_path)?;
-        // TODO progress + log
+        let mut log = TaskLog::new(
+            target_path,
+            "TargetVerify",
+            ctx.log_directory.as_deref(),
+        )?;
+        let mut log_error = None;
         let mut verified = VerifiedInfo {
             checked: 0,
             errors: 0,
@@ -187,7 +214,16 @@ impl TaskExecutor for TargetVerify {
                 collection::VerifyProgress::During(_hash_progress) => {}
                 collection::VerifyProgress::Post(verify_progress_post) => {
                     verified.checked += 1;
-                    println!("verified {:?}", verify_progress_post.progress.relative_path);
+                    let path = verify_progress_post
+                        .progress
+                        .tree_root
+                        .join(verify_progress_post.progress.relative_path);
+
+                    if log_error.is_none()
+                        && let Err(error) = log.report_verify(&path, verify_progress_post.result)
+                    {
+                        log_error = Some(error);
+                    }
 
                     match verify_progress_post.result {
                         VerifyResult::Ok => {}
@@ -207,6 +243,13 @@ impl TaskExecutor for TargetVerify {
             },
         )?;
 
+        if let Some(error) = log_error {
+            return Err(error.into());
+        }
+
+        log.finish_verify()?;
+        verified.log_file = log.path().to_path_buf();
+
         Ok(TaskOutcome::TargetVerify(verified))
     }
 }
@@ -217,6 +260,7 @@ pub(crate) struct TaskContext {
     pub(crate) target_path: Option<path::PathBuf>,
     pub(crate) hash_file: Option<path::PathBuf>,
     pub(crate) checksum_options: Option<ChecksumOptions>,
+    pub(crate) log_directory: Option<path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,12 +312,23 @@ mod tests {
             target_path: None,
             hash_file: None,
             checksum_options: Some(checksum_options),
+            log_directory: source_path.parent().map(path::Path::to_path_buf),
         })
         .unwrap();
 
-        let TaskOutcome::SourceHash { hash_file, .. } = outcome else {
+        let TaskOutcome::SourceHash {
+            hash_file,
+            hash_log_file,
+        } = outcome
+        else {
             panic!("SourceHash task returned the wrong outcome");
         };
+
+        assert_log_contains(
+            &hash_log_file,
+            &["[NEW  ]", "Summary:", "Done."],
+        );
+
         hash_file
     }
 
@@ -288,17 +343,31 @@ mod tests {
             target_path: Some(target_path.to_path_buf()),
             hash_file: Some(hash_file.to_path_buf()),
             checksum_options: None,
+            log_directory: target_path.parent().map(path::Path::to_path_buf),
         })
         .unwrap();
 
         let TaskOutcome::TargetVerify(verified) = outcome else {
             panic!("TargetVerify task returned the wrong outcome");
         };
+        assert_log_contains(&verified.log_file, &["Summary:", "Done."]);
         verified
     }
 
     fn copy_collection(hash_file: &Path, target_path: &Path) {
         fs::copy(hash_file, target_path.join(hash_file.file_name().unwrap())).unwrap();
+    }
+
+    fn assert_log_contains(log_file: &Path, expected: &[&str]) {
+        assert!(log_file.is_file(), "log file does not exist: {log_file:?}");
+        let contents = fs::read_to_string(log_file).unwrap();
+
+        for expected in expected {
+            assert!(
+                contents.contains(expected),
+                "log file {log_file:?} did not contain {expected:?}:\n{contents}"
+            );
+        }
     }
 
     #[test]
@@ -350,13 +419,22 @@ mod tests {
                 target_path: None,
                 hash_file: None,
                 checksum_options: Some(ChecksumOptions::default()),
+                log_directory: Some(testdir.clone()),
             })
             .unwrap();
 
-        let TaskOutcome::SourceHash { hash_file, .. } = outcome else {
+        let TaskOutcome::SourceHash {
+            hash_file,
+            hash_log_file,
+        } = outcome
+        else {
             panic!("SourceHash task returned the wrong outcome");
         };
         assert!(hash_file.is_file());
+        assert_log_contains(
+            &hash_log_file,
+            &["[NEW  ]", "file.txt", "Summary:", "  new: 1", "Done."],
+        );
     }
 
     #[test]
@@ -411,6 +489,7 @@ mod tests {
             target_path: None,
             hash_file: None,
             checksum_options: Some(ChecksumOptions::default()),
+            log_directory: None,
         });
 
         assert!(matches!(
@@ -443,10 +522,14 @@ mod tests {
             target_path: Some(target_path.clone()),
             hash_file: None,
             checksum_options: None,
+            log_directory: None,
         });
         assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
 
-        assert_eq!(fs::read_to_string(target_path.join("file.txt")).unwrap(), "content");
+        assert_eq!(
+            fs::read_to_string(target_path.join("file.txt")).unwrap(),
+            "content"
+        );
         assert_eq!(
             fs::read_to_string(target_path.join(".hidden")).unwrap(),
             "hidden content"
@@ -480,6 +563,7 @@ mod tests {
             target_path: Some(target_path.clone()),
             hash_file: None,
             checksum_options: None,
+            log_directory: None,
         });
 
         assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
@@ -508,6 +592,7 @@ mod tests {
             target_path: Some(target_path),
             hash_file: None,
             checksum_options: None,
+            log_directory: None,
         });
 
         assert!(matches!(outcome, Err(BackupHelperError::CopyError(_))));
@@ -530,6 +615,7 @@ mod tests {
             target_path: Some(target_path.clone()),
             hash_file: None,
             checksum_options: None,
+            log_directory: None,
         });
 
         assert!(matches!(
@@ -559,6 +645,10 @@ mod tests {
         assert_eq!(verified.errors, 0);
         assert_eq!(verified.missing, 0);
         assert_eq!(verified.crc_errors, 0);
+        assert_log_contains(
+            &verified.log_file,
+            &["[OK        ]", "file.txt", "checked: 1", "errors: 0"],
+        );
     }
 
     #[test]
@@ -584,6 +674,10 @@ mod tests {
         assert_eq!(verified.errors, 1);
         assert_eq!(verified.missing, 1);
         assert_eq!(verified.crc_errors, 0);
+        assert_log_contains(
+            &verified.log_file,
+            &["[ERR MISS  ]", "missing.txt", "checked: 2", "missing: 1"],
+        );
     }
 
     #[test]
@@ -604,6 +698,10 @@ mod tests {
         assert_eq!(verified.errors, 1);
         assert_eq!(verified.missing, 0);
         assert_eq!(verified.crc_errors, 1);
+        assert_log_contains(
+            &verified.log_file,
+            &["[WARN STALE]", "file.txt", "errors: 1", "checksum errors: 1"],
+        );
     }
 
     #[test]
@@ -624,6 +722,10 @@ mod tests {
         assert_eq!(verified.errors, 1);
         assert_eq!(verified.missing, 0);
         assert_eq!(verified.crc_errors, 1);
+        assert_log_contains(
+            &verified.log_file,
+            &["[WARN STALE]", "file.txt", "errors: 1", "checksum errors: 1"],
+        );
     }
 
     #[test]
@@ -649,6 +751,19 @@ mod tests {
         assert_eq!(verified.errors, 3);
         assert_eq!(verified.missing, 1);
         assert_eq!(verified.crc_errors, 2);
+        assert_log_contains(
+            &verified.log_file,
+            &[
+                "[OK        ]",
+                "[ERR MISS  ]",
+                "[ERR SIZE  ]",
+                "[WARN STALE]",
+                "checked: 4",
+                "errors: 3",
+                "missing: 1",
+                "checksum errors: 2",
+            ],
+        );
     }
 
     #[test]
