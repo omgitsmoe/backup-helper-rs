@@ -1,6 +1,6 @@
 use std::path;
 
-use checksum_helper::{ChecksumHelper, collection, hashed_file::VerifyResult};
+use checksum_helper::{ChecksumHelper, ChecksumHelperOptions, collection, hashed_file::VerifyResult};
 
 use crate::{
     BackupHelperError, backup_helper::DiskHandle, source::ChecksumOptions, target::VerifiedInfo,
@@ -66,8 +66,16 @@ impl TaskExecutor for SourceHash {
             )));
         }
 
-        // TODO: respect checksum_options
-        let mut ch = ChecksumHelper::new(source_path)?;
+        let checksum_options = ctx.checksum_options
+            .as_ref()
+            .expect("ctx must have checksum_options for SourceHash task");
+        let options = ChecksumHelperOptions::default()
+            .incremental_skip_unchanged(true)
+            .incremental_include_unchanged_files(true)
+            .hash_type(checksum_options.hash_type.0)
+            .hash_files_matcher(checksum_options.checksum_files.clone().try_into()?)
+            .all_files_matcher(checksum_options.all_files.clone().try_into()?);
+        let mut ch = ChecksumHelper::with_options(&source_path, options)?;
         // TODO progress
         let collection = ch.incremental(|_p| {})?;
         ch.write_collection(&collection)?;
@@ -220,6 +228,7 @@ pub(crate) struct TaskContext {
     pub(crate) source_path: Option<path::PathBuf>,
     pub(crate) target_path: Option<path::PathBuf>,
     pub(crate) hash_file: Option<path::PathBuf>,
+    pub(crate) checksum_options: Option<ChecksumOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +246,7 @@ pub(crate) enum TaskOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::HashType;
     use std::fs;
     use std::path::Path;
     use testdir::testdir;
@@ -253,15 +263,23 @@ mod tests {
     }
 
     fn hash_source(source_path: &Path) -> path::PathBuf {
+        hash_source_with_options(source_path, ChecksumOptions::default())
+    }
+
+    fn hash_source_with_options(
+        source_path: &Path,
+        checksum_options: ChecksumOptions,
+    ) -> path::PathBuf {
         let outcome = Task::SourceHash(SourceHash {
             common: common(&[0]),
             source_idx: 0,
-            options: ChecksumOptions::default(),
+            options: checksum_options.clone(),
         })
         .execute(&TaskContext {
             source_path: Some(source_path.to_path_buf()),
             target_path: None,
             hash_file: None,
+            checksum_options: Some(checksum_options),
         })
         .unwrap();
 
@@ -281,6 +299,7 @@ mod tests {
             source_path: None,
             target_path: Some(target_path.to_path_buf()),
             hash_file: Some(hash_file.to_path_buf()),
+            checksum_options: None,
         })
         .unwrap();
 
@@ -342,6 +361,7 @@ mod tests {
                 source_path: Some(source_path),
                 target_path: None,
                 hash_file: None,
+                checksum_options: Some(ChecksumOptions::default()),
             })
             .unwrap();
 
@@ -349,6 +369,42 @@ mod tests {
             panic!("SourceHash task returned the wrong outcome");
         };
         assert!(hash_file.is_file());
+    }
+
+    #[test]
+    fn execute_source_hash_uses_configured_hash_type() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        fs::create_dir(&source_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let mut checksum_options = ChecksumOptions::default();
+        checksum_options.hash_type = HashType::try_from("sha256").unwrap();
+        let hash_file = hash_source_with_options(&source_path, checksum_options);
+        let collection = fs::read_to_string(hash_file).unwrap();
+
+        assert!(collection.lines().any(|line| line.contains(",sha256,")));
+    }
+
+    #[test]
+    fn execute_source_hash_uses_configured_file_globs() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        fs::create_dir(&source_path).unwrap();
+        fs::write(source_path.join("included.txt"), "included").unwrap();
+        fs::write(source_path.join("excluded.bin"), "excluded").unwrap();
+
+        let mut checksum_options = ChecksumOptions::default();
+        checksum_options.all_files.block = vec!["*.bin".into()];
+        let hash_file = hash_source_with_options(&source_path, checksum_options);
+        let collection = fs::read_to_string(hash_file).unwrap();
+        let entries: Vec<_> = collection
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].ends_with(" included.txt"));
     }
 
     #[test]
@@ -366,6 +422,7 @@ mod tests {
             source_path: Some(source_path),
             target_path: None,
             hash_file: None,
+            checksum_options: Some(ChecksumOptions::default()),
         });
 
         assert!(matches!(
@@ -397,6 +454,7 @@ mod tests {
             source_path: Some(source_path),
             target_path: Some(target_path.clone()),
             hash_file: None,
+            checksum_options: None,
         });
         assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
 
@@ -433,6 +491,7 @@ mod tests {
             source_path: Some(source_path),
             target_path: Some(target_path.clone()),
             hash_file: None,
+            checksum_options: None,
         });
 
         assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
@@ -460,6 +519,7 @@ mod tests {
             source_path: Some(source_path),
             target_path: Some(target_path),
             hash_file: None,
+            checksum_options: None,
         });
 
         assert!(matches!(outcome, Err(BackupHelperError::CopyError(_))));
@@ -481,6 +541,7 @@ mod tests {
             source_path: Some(source_path),
             target_path: Some(target_path.clone()),
             hash_file: None,
+            checksum_options: None,
         });
 
         assert!(matches!(

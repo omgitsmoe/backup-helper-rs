@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{path, sync::Arc};
 use std::error::Error;
 
+use checksum_helper::pathmatcher::PathMatcherError;
 use checksum_helper::{ChecksumHelperError, collection::HashCollectionError};
 use clap::{Args, Parser, Subcommand};
 
@@ -80,6 +81,12 @@ impl From<HashCollectionError> for BackupHelperError {
         BackupHelperError::ChecksumHelperError(ChecksumHelperError::HashCollectionError(Box::new(
             value,
         )))
+    }
+}
+
+impl From<PathMatcherError> for BackupHelperError {
+    fn from(value: PathMatcherError) -> Self {
+        BackupHelperError::InvalidConfig(value.to_string())
     }
 }
 

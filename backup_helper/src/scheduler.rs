@@ -372,6 +372,11 @@ impl SchedulerCore {
                 source_path: Some(self.state.sources()[t.source_idx].path().to_path_buf()),
                 target_path: None,
                 hash_file: None,
+                checksum_options: Some(
+                    self.state.sources()[t.source_idx]
+                        .checksum_options()
+                        .clone(),
+                ),
             },
             Task::SourceToTargetCopy(t) => {
                 let source = &self.state.sources()[t.source_idx];
@@ -379,6 +384,7 @@ impl SchedulerCore {
                     source_path: Some(source.path().to_path_buf()),
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
+                    checksum_options: None,
                 }
             }
             Task::SourceToTargetSync(t) => {
@@ -387,6 +393,7 @@ impl SchedulerCore {
                     source_path: Some(source.path().to_path_buf()),
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
+                    checksum_options: None,
                 }
             }
             Task::TargetVerify(t) => {
@@ -395,6 +402,7 @@ impl SchedulerCore {
                     source_path: Some(source.path().to_path_buf()),
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: source.hash_file().to_owned(),
+                    checksum_options: None,
                 }
             }
         }

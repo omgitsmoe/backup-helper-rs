@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path;
 
-use checksum_helper::hash_type;
+use checksum_helper::{hash_type, pathmatcher::{PathMatcher, PathMatcherBuilder}};
 
 use crate::{backup_helper::DiskHandle, disks::Disk, reconcile::Reconcile, target::Target};
 
@@ -184,6 +184,22 @@ impl ChecksumOptions {
 pub struct GlobFilter {
     pub(crate) allow: Vec<String>,
     pub(crate) block: Vec<String>,
+}
+
+impl TryInto<PathMatcher> for GlobFilter {
+    type Error = checksum_helper::pathmatcher::PathMatcherError;
+
+    fn try_into(self) -> std::result::Result<PathMatcher, Self::Error> {
+        let mut matcher = PathMatcherBuilder::new();
+        for allow in self.allow {
+            matcher = matcher.allow(allow)?;
+        }
+        for block in self.block {
+            matcher = matcher.block(block)?;
+        }
+
+        matcher.build()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
