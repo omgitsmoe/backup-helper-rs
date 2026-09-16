@@ -58,7 +58,7 @@ fn copy_tree_entries(
         let destination_path = destination.join(relative);
 
         if meta.is_dir() {
-            fs::create_dir(&destination_path).map_err(|error| {
+            fs::create_dir_all(&destination_path).map_err(|error| {
                 copy_io_error("create destination directory", &destination_path, error)
             })?;
         } else if meta.file_type().is_symlink() {
@@ -373,6 +373,26 @@ mod tests {
         let result = copy_tree(&source, &destination, |_| {});
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn copy_tree_allows_existing_nested_destination_directory() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let nested_source = source.join("nested");
+        let nested_destination = destination.join("nested");
+        fs::create_dir_all(&nested_source).unwrap();
+        fs::create_dir_all(&nested_destination).unwrap();
+        fs::write(nested_source.join("file.txt"), "content").unwrap();
+
+        let result = copy_tree(&source, &destination, |_| {});
+
+        assert!(result.is_ok());
+        assert_eq!(
+            fs::read_to_string(nested_destination.join("file.txt")).unwrap(),
+            "content"
+        );
     }
 
     #[cfg(any(unix, windows))]
