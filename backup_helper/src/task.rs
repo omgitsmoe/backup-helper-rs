@@ -27,19 +27,21 @@ pub enum Task {
 impl Task {
     pub fn description(&self, ctx: &TaskContext) -> String {
         match self {
-            Task::SourceHash(_) => format!("hash {:?}", ctx.source_path.as_deref().unwrap()),
+            Task::SourceHash(_) => {
+                format!("hash {}", ctx.source_path.as_deref().unwrap().display())
+            }
             Task::SourceToTargetCopy(_) => format!(
-                "copy {:?} -> {:?}",
-                ctx.source_path.as_deref().unwrap(),
-                ctx.target_path.as_deref().unwrap()
+                "copy {} -> {}",
+                ctx.source_path.as_deref().unwrap().display(),
+                ctx.target_path.as_deref().unwrap().display()
             ),
             Task::SourceToTargetSync(_) => format!(
-                "sync {:?} -> {:?}",
-                ctx.source_path.as_deref().unwrap(),
-                ctx.target_path.as_deref().unwrap()
+                "sync {} -> {}",
+                ctx.source_path.as_deref().unwrap().display(),
+                ctx.target_path.as_deref().unwrap().display()
             ),
             Task::TargetVerify(_) => {
-                format!("verify {:?}", ctx.target_path.as_deref().unwrap())
+                format!("verify {}", ctx.target_path.as_deref().unwrap().display())
             }
         }
     }
@@ -1058,6 +1060,11 @@ mod tests {
 
         let hash_file = hash_source(&source_path);
         fs::write(target_path.join("file.txt"), "target content").unwrap();
+        filetime::set_file_mtime(
+            target_path.join("file.txt"),
+            filetime::FileTime::from_unix_time(1, 0),
+        )
+        .unwrap();
         copy_collection(&hash_file, &target_path);
 
         let verified = verify_target(&target_path, &hash_file);

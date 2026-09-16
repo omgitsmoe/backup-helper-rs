@@ -19,5 +19,6 @@ windows-sys = { version = "0.61", features = [
     ] }
 
 [dev-dependencies]
+filetime = "0.2"
 pretty_assertions = "1.4"
 testdir = "0.9.3"
