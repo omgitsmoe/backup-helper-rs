@@ -89,8 +89,7 @@ pub enum PathMatcherError {
 impl fmt::Display for PathMatcherError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            PathMatcherError::InvalidGlob(s) =>
-                write!(f, "invalid glob: {}", &s),
+            PathMatcherError::InvalidGlob(s) => write!(f, "invalid glob: {}", &s),
         }
     }
 }
@@ -137,8 +136,10 @@ mod test {
     #[test]
     fn empty_block_list_excludes_nothing() {
         let matcher = PathMatcherBuilder::new()
-            .allow("**/*").unwrap()
-            .build().unwrap();
+            .allow("**/*")
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(matcher.is_match(path::Path::new("foo/bar/baz.txt")));
         assert!(matcher.is_match(path::Path::new("/foo")));
@@ -162,10 +163,14 @@ mod test {
     #[test]
     fn allow_only() {
         let matcher = PathMatcherBuilder::new()
-            .allow("foo/**/*.txt").unwrap()
-            .allow("bar/baz.txt").unwrap()
-            .allow("*.mp4").unwrap()
-            .build().unwrap();
+            .allow("foo/**/*.txt")
+            .unwrap()
+            .allow("bar/baz.txt")
+            .unwrap()
+            .allow("*.mp4")
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(matcher.is_match(path::Path::new("foo/bar/baz.txt")));
         assert!(matcher.is_match(path::Path::new("foo/./bar/baz.txt")));
@@ -183,10 +188,14 @@ mod test {
     #[test]
     fn exclude_only() {
         let matcher = PathMatcherBuilder::new()
-            .block("foo/**/*.txt").unwrap()
-            .block("bar/baz.txt").unwrap()
-            .block("*.mp4").unwrap()
-            .build().unwrap();
+            .block("foo/**/*.txt")
+            .unwrap()
+            .block("bar/baz.txt")
+            .unwrap()
+            .block("*.mp4")
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(!matcher.is_match(path::Path::new("foo/bar/baz.txt")));
         assert!(!matcher.is_match(path::Path::new("foo/./bar/baz.txt")));
@@ -213,12 +222,18 @@ mod test {
     #[test]
     fn block_overrides_allow() {
         let matcher = PathMatcherBuilder::new()
-            .allow("foo/**/*.txt").unwrap()
-            .allow("bar/baz.txt").unwrap()
-            .allow("*.mp4").unwrap()
-            .block("**/*.txt").unwrap()
-            .block("xer.mp4").unwrap()
-            .build().unwrap();
+            .allow("foo/**/*.txt")
+            .unwrap()
+            .allow("bar/baz.txt")
+            .unwrap()
+            .allow("*.mp4")
+            .unwrap()
+            .block("**/*.txt")
+            .unwrap()
+            .block("xer.mp4")
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(!matcher.is_match(path::Path::new("foo/bar/baz.txt")));
         assert!(!matcher.is_match(path::Path::new("foo/./bar/baz.txt")));
@@ -243,9 +258,12 @@ mod test {
     #[test]
     fn single_wildcard_not_matching_path_sep() {
         let matcher = PathMatcherBuilder::new()
-            .allow("*.txt").unwrap()
-            .allow("*.mp4").unwrap()
-            .build().unwrap();
+            .allow("*.txt")
+            .unwrap()
+            .allow("*.mp4")
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(matcher.is_match(path::Path::new("xer.mp4")));
         assert!(matcher.is_match(path::Path::new("baz.txt")));
@@ -263,9 +281,12 @@ mod test {
     #[test]
     fn block_trims_trailing_separators() {
         let matcher = PathMatcherBuilder::new()
-            .block("foo/").unwrap()
-            .block("bar/baz\\\\").unwrap()
-            .build().unwrap();
+            .block("foo/")
+            .unwrap()
+            .block("bar/baz\\\\")
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(matcher.is_excluded(path::Path::new("foo")));
         assert!(matcher.is_excluded(path::Path::new("bar/baz")));
@@ -274,9 +295,12 @@ mod test {
     #[test]
     fn allow_trims_trailing_separators() {
         let matcher = PathMatcherBuilder::new()
-            .allow("foo/").unwrap()
-            .allow("bar/baz\\\\").unwrap()
-            .build().unwrap();
+            .allow("foo/")
+            .unwrap()
+            .allow("bar/baz\\\\")
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert!(matcher.is_match(path::Path::new("foo")));
         assert!(matcher.is_match(path::Path::new("bar/baz")));

@@ -3,8 +3,8 @@ use super::{HashCollection, HashCollectionError, Result};
 use crate::file_tree::{EntryHandle, FileTree};
 use crate::hashed_file::FileRaw;
 
-use pathdiff::diff_paths;
 use hex;
+use pathdiff::diff_paths;
 
 use std::io::Write;
 use std::path;
@@ -13,16 +13,24 @@ use std::path;
 //      converting to .cshd
 
 const VERSION_HEADER: &str = "# version 1\n";
-pub fn serialize<W: Write>(collection: &HashCollection, writer: &mut W, file_tree: &FileTree, with_header: bool) -> Result<()> {
+pub fn serialize<W: Write>(
+    collection: &HashCollection,
+    writer: &mut W,
+    file_tree: &FileTree,
+    with_header: bool,
+) -> Result<()> {
     let prefix = match &collection.root_dir {
-        None => return Err(HashCollectionError::MissingPath(
-                (collection.root_dir.clone(), collection.name.clone()))),
+        None => {
+            return Err(HashCollectionError::MissingPath((
+                collection.root_dir.clone(),
+                collection.name.clone(),
+            )))
+        }
         Some(hc_root) => {
             let ft_root = file_tree.absolute_path(&file_tree.root());
             diff_paths(hc_root, ft_root)
-                .ok_or_else(||
-                    HashCollectionError::InvalidCollectionRoot(Some(hc_root.clone())))?
-        },
+                .ok_or_else(|| HashCollectionError::InvalidCollectionRoot(Some(hc_root.clone())))?
+        }
     };
     assert!(
         !&prefix.components().any(|c| c == path::Component::ParentDir),
@@ -108,11 +116,11 @@ pub fn sort_serialized(serialized: &str) -> Option<String> {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use super::super::test::setup_minimal_hc;
-    use pretty_assertions::assert_eq;
+    use super::*;
     use crate::hash_type::HashType;
     use crate::test_utils::abs;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_serialize_entry() {
@@ -165,10 +173,7 @@ mod test {
         serialize(&hc, &mut buf, &ft, true).unwrap();
 
         let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
-        assert_eq!(
-            result,
-            expected_serialization,
-        );
+        assert_eq!(result, expected_serialization,);
     }
 
     #[test]
@@ -176,8 +181,7 @@ mod test {
         // NOTE: The prefix from the FileTree root to the root dir of the collection should
         //       be stripped from paths when serializing.
         let mut ft = FileTree::new(abs("foo")).unwrap();
-        let mut hc = HashCollection::new(
-            Some(&abs("foo/foo/bar/foo.cshd")), None).unwrap();
+        let mut hc = HashCollection::new(Some(&abs("foo/foo/bar/foo.cshd")), None).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
         hc.update(
             path_handle.clone(),
@@ -224,17 +228,13 @@ mod test {
         serialize(&hc, &mut buf, &ft, true).unwrap();
 
         let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
-        assert_eq!(
-            result,
-            expected_serialization_sorted,
-        );
+        assert_eq!(result, expected_serialization_sorted,);
     }
 
     #[test]
     fn serialize_with_and_without_header() {
         let mut ft = FileTree::new(abs("foo")).unwrap();
-        let mut hc = HashCollection::new(
-            Some(&abs("foo/foo/bar/foo.cshd")), None).unwrap();
+        let mut hc = HashCollection::new(Some(&abs("foo/foo/bar/foo.cshd")), None).unwrap();
         let path_handle = ft.add_file("./foo/bar/baz.txt").unwrap();
         hc.update(
             path_handle.clone(),
@@ -255,7 +255,8 @@ mod test {
             result,
             "\
 # version 1
-1337.00133,1337,sha512,deadbeef baz.txt\n");
+1337.00133,1337,sha512,deadbeef baz.txt\n"
+        );
 
         let mut buf = vec![];
         serialize(&hc, &mut buf, &ft, false).unwrap();
@@ -263,7 +264,8 @@ mod test {
         assert_eq!(
             result,
             "\
-1337.00133,1337,sha512,deadbeef baz.txt\n");
+1337.00133,1337,sha512,deadbeef baz.txt\n"
+        );
     }
 
     #[test]
@@ -287,5 +289,4 @@ mod test {
 ,4206969,sha3_512,eeff0011 xer.mp4\n",
         );
     }
-
 }

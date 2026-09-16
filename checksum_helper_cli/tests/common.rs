@@ -5,20 +5,19 @@ use std::process::Command;
 /// Run the CLI binary (built by cargo for integration tests) with the given args.
 /// Returns (stdout, stderr, success).
 pub fn run_cli(args: &[&str]) -> (String, String, bool) {
-    let bin = std::env::var("CARGO_BIN_EXE_CHECKSUM_HELPER_CLI")
-        .unwrap_or_else(|_| {
-            // Fallback: locate the binary relative to the manifest dir
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            // Go up to workspace root, then into target/debug/
-            manifest_dir
-                .parent()
-                .expect("workspace root")
-                .join("target")
-                .join("debug")
-                .join("checksum_helper_cli")
-                .to_string_lossy()
-                .to_string()
-        });
+    let bin = std::env::var("CARGO_BIN_EXE_CHECKSUM_HELPER_CLI").unwrap_or_else(|_| {
+        // Fallback: locate the binary relative to the manifest dir
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // Go up to workspace root, then into target/debug/
+        manifest_dir
+            .parent()
+            .expect("workspace root")
+            .join("target")
+            .join("debug")
+            .join("checksum_helper_cli")
+            .to_string_lossy()
+            .to_string()
+    });
     let output = Command::new(bin)
         .args(args)
         .output()
@@ -96,7 +95,9 @@ pub fn cshd_strip_mtime(contents: &str) -> String {
 
 /// Parse the collection path from "Wrote collection at: \"...\"" in stdout.
 pub fn parse_collection_path(stdout: &str) -> Option<PathBuf> {
-    let line = stdout.lines().find(|l| l.contains("Wrote collection at:"))?;
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("Wrote collection at:"))?;
     let start = line.find('"')?;
     let after_quote = &line[start + 1..];
     let end = after_quote.find('"')?;

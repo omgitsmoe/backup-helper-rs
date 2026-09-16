@@ -1,11 +1,11 @@
-use crate::collection::HashCollection;
-use crate::hashed_file::{mtimes_match, FileRaw, FileMut};
-use crate::file_tree::{FileTree, EntryHandle};
-use crate::gather::{filtered, VisitType};
-use crate::most_current::MostCurrentProgress;
-use crate::{ChecksumHelperError, ChecksumHelperOptions};
 use crate::checksum_helper::default_filename;
 use crate::collection::writer::HashCollectionWriter;
+use crate::collection::HashCollection;
+use crate::file_tree::{EntryHandle, FileTree};
+use crate::gather::{filtered, VisitType};
+use crate::hashed_file::{mtimes_match, FileMut, FileRaw};
+use crate::most_current::MostCurrentProgress;
+use crate::{ChecksumHelperError, ChecksumHelperOptions};
 
 use std::path;
 use std::time;
@@ -78,14 +78,17 @@ impl<'a> Incremental<'a> {
         options: &'a ChecksumHelperOptions,
         most_current: HashCollection,
     ) -> Self {
-        assert_eq!(root, file_tree.absolute_path(&file_tree.root()),
-                   "Incremental root and the file tree root must match!");
+        assert_eq!(
+            root,
+            file_tree.absolute_path(&file_tree.root()),
+            "Incremental root and the file tree root must match!"
+        );
         Incremental {
             root,
             file_tree,
             options,
             most_current,
-            files_to_checksum: vec!{},
+            files_to_checksum: vec![],
         }
     }
 
@@ -106,19 +109,18 @@ impl<'a> Incremental<'a> {
         // TODO restructure gather iterator/filter to return ignored entries as well
         let progress = std::cell::RefCell::new(progress);
         let mut ignored_num = 0usize;
-        let iter = filtered(
-            self.root, &self.options.all_files_matcher,
-            |e| {
-                if e.ignored {
-                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(
-                        e.entry.relative_to_root.to_owned()));
-                    ignored_num += 1;
+        let iter = filtered(self.root, &self.options.all_files_matcher, |e| {
+            if e.ignored {
+                progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(
+                    e.entry.relative_to_root.to_owned(),
+                ));
+                ignored_num += 1;
 
-                    return false;
-                }
+                return false;
+            }
 
-                true
-            })?;
+            true
+        })?;
 
         let mut ignored_special_num = 0usize;
         for entry in iter {
@@ -131,22 +133,22 @@ impl<'a> Incremental<'a> {
                         self.files_to_checksum.len() as u64,
                     ));
                 }
-                VisitType::ListDirStart(_) => {},
-                VisitType::ListDirStop(_) => {},
-                VisitType::Directory(_) => {},
+                VisitType::ListDirStart(_) => {}
+                VisitType::ListDirStop(_) => {}
+                VisitType::Directory(_) => {}
                 // TODO test (but should not appear, since ignored by filtered, unless we overwrite
                 VisitType::SpecialFile((p, _)) => {
-                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(
-                        p));
+                    progress.borrow_mut()(IncrementalProgress::DiscoverFilesIgnored(p));
                     ignored_special_num += 1;
-                },
+                }
             }
         }
 
         let mut progress = progress.into_inner();
-        progress(
-            IncrementalProgress::DiscoverFilesDone(
-                self.files_to_checksum.len(), ignored_num + ignored_special_num));
+        progress(IncrementalProgress::DiscoverFilesDone(
+            self.files_to_checksum.len(),
+            ignored_num + ignored_special_num,
+        ));
 
         Ok(())
     }
@@ -174,7 +176,11 @@ impl<'a> Incremental<'a> {
         // Build a new collection and remove processed
         // entries from self.most_current (Python version does this, without removal)
         let mut result = HashCollection::new(
-            Some(&self.root.join(default_filename(self.root, "incremental", ""))),
+            Some(
+                &self
+                    .root
+                    .join(default_filename(self.root, "incremental", "")),
+            ),
             None,
         )?;
 
@@ -184,13 +190,11 @@ impl<'a> Incremental<'a> {
         let files_to_checksum = std::mem::take(&mut self.files_to_checksum);
         for handle in files_to_checksum {
             let path = self.file_tree.absolute_path(&handle);
-            let relative_path = path.strip_prefix(self.root)
+            let relative_path = path
+                .strip_prefix(self.root)
                 .expect("Incremental root and FileTree root must match!");
 
-            let mut file_raw = FileRaw::bare(
-                handle.clone(),
-                self.options.hash_type,
-            );
+            let mut file_raw = FileRaw::bare(handle.clone(), self.options.hash_type);
             let mut file = file_raw.with_context_mut(self.file_tree);
 
             let previous = self.most_current.get(&handle);
@@ -212,7 +216,8 @@ impl<'a> Incremental<'a> {
                     }
 
                     progress(IncrementalProgress::FileUnchangedSkipped(
-                        relative_path.to_owned()));
+                        relative_path.to_owned(),
+                    ));
                     self.most_current.remove(&handle);
                     continue;
                 }
@@ -223,8 +228,7 @@ impl<'a> Incremental<'a> {
             })?;
             let mut include = true;
             if let Some(p) = previous {
-                include =
-                    self.compare_files_and_include(&file, p, relative_path, &mut progress)?;
+                include = self.compare_files_and_include(&file, p, relative_path, &mut progress)?;
                 self.most_current.remove(&handle);
             } else {
                 progress(IncrementalProgress::FileNew(relative_path.to_owned()));
@@ -243,7 +247,8 @@ impl<'a> Incremental<'a> {
 
         for missing in self.most_current.iter_with_context(self.file_tree) {
             let (path_absolute, _) = missing;
-            let path_relative = path_absolute.strip_prefix(self.root)
+            let path_relative = path_absolute
+                .strip_prefix(self.root)
                 .expect("Incremental root and FileTree root must match!");
             progress(IncrementalProgress::FileRemoved(path_relative.to_owned()));
         }
@@ -308,9 +313,9 @@ impl<'a> Incremental<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::file_tree::FileTree;
     use crate::hash_type::HashType;
     use crate::{pathmatcher::PathMatcherBuilder, test_utils::*};
-    use crate::file_tree::FileTree;
     use pretty_assertions::assert_eq;
 
     fn ftree_all_files() -> Vec<&'static str> {
@@ -330,10 +335,7 @@ mod test {
 
     fn setup_ftree() -> path::PathBuf {
         let test_path = testdir!();
-        create_ftree(
-            test_path.as_ref(),
-            &ftree_all_files().join("\n"),
-        );
+        create_ftree(test_path.as_ref(), &ftree_all_files().join("\n"));
 
         test_path
     }
@@ -341,16 +343,15 @@ mod test {
     fn setup_ftree_minimal() -> (path::PathBuf, String, filetime::FileTime) {
         let test_path = testdir!();
         let path_relative = "subdir/nested/nested/cgi.bin";
-        create_ftree(
-            test_path.as_ref(),
-            path_relative,
-        );
+        create_ftree(test_path.as_ref(), path_relative);
 
         let filetime_cig_bin = filetime::FileTime::from_unix_time(69420, 3_300_000);
         filetime::set_file_times(
             &test_path.join(path_relative),
             filetime_cig_bin,
-            filetime_cig_bin).unwrap();
+            filetime_cig_bin,
+        )
+        .unwrap();
 
         (test_path, path_relative.to_owned(), filetime_cig_bin)
     }
@@ -361,8 +362,7 @@ mod test {
         let mut ft = FileTree::new(&test_path).unwrap();
         let options = ChecksumHelperOptions::default();
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
 
@@ -405,20 +405,24 @@ vid.mp4",
         let test_path = setup_ftree();
         let mut ft = FileTree::new(&test_path).unwrap();
         let matcher = PathMatcherBuilder::new()
-            .block("subdir/nested/").unwrap()
-            .block("**/*.md5").unwrap()
-            .block("**/*.bin").unwrap()
-            .allow("**/*.md5").unwrap()
-            .allow("**/*.txt").unwrap()
+            .block("subdir/nested/")
+            .unwrap()
+            .block("**/*.md5")
+            .unwrap()
+            .block("**/*.bin")
+            .unwrap()
+            .allow("**/*.md5")
+            .unwrap()
+            .allow("**/*.txt")
+            .unwrap()
             .build()
             .unwrap();
-        let options = ChecksumHelperOptions{
+        let options = ChecksumHelperOptions {
             all_files_matcher: matcher,
             ..Default::default()
         };
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
 
@@ -447,28 +451,33 @@ subdir/other/file.txt",
         let test_path = setup_ftree();
         let mut ft = FileTree::new(&test_path).unwrap();
         let matcher = PathMatcherBuilder::new()
-            .block("subdir/nested/").unwrap()
-            .block("**/*.md5").unwrap()
-            .block("**/*.bin").unwrap()
-            .allow("**/*.md5").unwrap()
-            .allow("**/*.txt").unwrap()
+            .block("subdir/nested/")
+            .unwrap()
+            .block("**/*.md5")
+            .unwrap()
+            .block("**/*.bin")
+            .unwrap()
+            .allow("**/*.md5")
+            .unwrap()
+            .allow("**/*.txt")
+            .unwrap()
             .build()
             .unwrap();
-        let options = ChecksumHelperOptions{
+        let options = ChecksumHelperOptions {
             all_files_matcher: matcher,
             ..Default::default()
         };
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         let mut callbacks = vec![];
         inc.discover_files(|p| {
             callbacks.push(p);
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(
-            vec!{
+            vec! {
                 IncrementalProgress::DiscoverFilesFound(1),  // file.txt
                 IncrementalProgress::DiscoverFilesIgnored(
                     path::PathBuf::from("subdir/chksum.md5"),
@@ -488,7 +497,6 @@ subdir/other/file.txt",
             },
             callbacks,
         );
-
     }
 
     #[test]
@@ -497,8 +505,7 @@ subdir/other/file.txt",
         let mut ft = FileTree::new(&test_path).unwrap();
         let options = ChecksumHelperOptions::default();
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let new = inc.checksum_files(|_| {}).unwrap();
@@ -529,13 +536,12 @@ vid.mp4
         let test_path = setup_ftree();
         let mut ft = FileTree::new(&test_path).unwrap();
         let expected = HashType::Sha3_224;
-        let options = ChecksumHelperOptions{
+        let options = ChecksumHelperOptions {
             hash_type: expected,
             ..Default::default()
         };
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         let handle = inc.file_tree.add_file("vid.mp4").unwrap();
         inc.files_to_checksum.push(handle.clone());
@@ -551,10 +557,7 @@ vid.mp4
         hash_type: HashType,
     ) -> (EntryHandle, FileRaw) {
         let handle = file_tree.add_file(path).unwrap();
-        let mut file_raw = FileRaw::bare(
-            handle.clone(),
-            hash_type,
-        );
+        let mut file_raw = FileRaw::bare(handle.clone(), hash_type);
         let mut file = file_raw.with_context_mut(&file_tree);
         file.update_size_and_mtime_from_disk().unwrap();
         file.update_hash_from_disk(|_| {}).unwrap();
@@ -565,7 +568,9 @@ vid.mp4
     #[test]
     fn checksum_files_respects_include_unchanged() {
         let combinations = vec![
-            (true, "file.txt
+            (
+                true,
+                "file.txt
 subdir/chksum.md5
 subdir/foo.txt
 subdir/nested/bar.txt
@@ -575,8 +580,11 @@ subdir/nested/vid.mov
 subdir/other/chksms.md5
 subdir/other/file.txt
 vid.mp4
-"),
-            (false, "subdir/chksum.md5
+",
+            ),
+            (
+                false,
+                "subdir/chksum.md5
 subdir/foo.txt
 subdir/nested/bar.txt
 subdir/nested/nested/chksum.md5
@@ -584,14 +592,15 @@ subdir/nested/vid.mov
 subdir/other/chksms.md5
 subdir/other/file.txt
 vid.mp4
-"),
+",
+            ),
         ];
 
         let test_path = setup_ftree();
         let mut ft = FileTree::new(&test_path).unwrap();
 
         for (include_unchanged, expected) in combinations {
-            let options = ChecksumHelperOptions{
+            let options = ChecksumHelperOptions {
                 incremental_include_unchanged_files: include_unchanged,
                 ..Default::default()
             };
@@ -601,19 +610,18 @@ vid.mp4
             hc.update(file_txt.0, file_txt.1);
             let subdir_nested_nested_cgi_bin =
                 file_from_disk(&mut ft, "subdir/nested/nested/cgi.bin", HashType::Sha512);
-            hc.update(subdir_nested_nested_cgi_bin.0, subdir_nested_nested_cgi_bin.1);
+            hc.update(
+                subdir_nested_nested_cgi_bin.0,
+                subdir_nested_nested_cgi_bin.1,
+            );
 
-            let mut inc = Incremental::new(
-                &test_path, &mut ft, &options, hc);
+            let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
             inc.discover_files(|_| {}).unwrap();
             let new = inc.checksum_files(|_| {}).unwrap();
             let cshd_str = new.to_str(inc.file_tree).unwrap();
 
-            assert_eq!(
-                expected,
-                cshd_str_paths_only_sorted(&cshd_str),
-            );
+            assert_eq!(expected, cshd_str_paths_only_sorted(&cshd_str),);
         }
     }
 
@@ -636,7 +644,7 @@ vid.mp4
         let mut ft = FileTree::new(&test_path).unwrap();
 
         for (skip_unchanged, expected) in combinations {
-            let options = ChecksumHelperOptions{
+            let options = ChecksumHelperOptions {
                 incremental_include_unchanged_files: true,
                 incremental_skip_unchanged: skip_unchanged,
                 ..Default::default()
@@ -647,24 +655,26 @@ vid.mp4
             hc.update(file_txt.0, file_txt.1);
             let subdir_nested_nested_cgi_bin =
                 file_from_disk(&mut ft, "subdir/nested/nested/cgi.bin", HashType::Sha512);
-            hc.update(subdir_nested_nested_cgi_bin.0, subdir_nested_nested_cgi_bin.1);
+            hc.update(
+                subdir_nested_nested_cgi_bin.0,
+                subdir_nested_nested_cgi_bin.1,
+            );
 
-            let mut inc = Incremental::new(
-                &test_path, &mut ft, &options, hc);
+            let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
             inc.discover_files(|_| {}).unwrap();
             let mut skipped_callbacks = vec![];
-            let new = inc.checksum_files(|p| {
-                if let IncrementalProgress::FileUnchangedSkipped(_) = p {
-                    skipped_callbacks.push(p);
-                }
-            }).unwrap();
+            let new = inc
+                .checksum_files(|p| {
+                    if let IncrementalProgress::FileUnchangedSkipped(_) = p {
+                        skipped_callbacks.push(p);
+                    }
+                })
+                .unwrap();
             let cshd_str = new.to_str(inc.file_tree).unwrap();
 
             assert!(inc.most_current.is_empty());
-            assert_eq!(
-                expected,
-                skipped_callbacks);
+            assert_eq!(expected, skipped_callbacks);
 
             assert_eq!(
                 "file.txt
@@ -685,7 +695,7 @@ vid.mp4
 
     #[test]
     fn checksum_files_respects_skip_unchanged_and_incremental_unchanged() {
-        struct Combination{
+        struct Combination {
             skip_unchanged: bool,
             include_unchanged: bool,
             skipped_callbacks: Vec<IncrementalProgress>,
@@ -735,8 +745,7 @@ vid.mp4
             Combination {
                 skip_unchanged: false,
                 include_unchanged: true,
-                skipped_callbacks: vec![
-                ],
+                skipped_callbacks: vec![],
                 expected_files: "file.txt
 subdir/chksum.md5
 subdir/foo.txt
@@ -752,8 +761,7 @@ vid.mp4
             Combination {
                 skip_unchanged: false,
                 include_unchanged: false,
-                skipped_callbacks: vec![
-                ],
+                skipped_callbacks: vec![],
                 expected_files: "subdir/chksum.md5
 subdir/foo.txt
 subdir/nested/bar.txt
@@ -770,7 +778,7 @@ vid.mp4
         let mut ft = FileTree::new(&test_path).unwrap();
 
         for expected in combinations {
-            let options = ChecksumHelperOptions{
+            let options = ChecksumHelperOptions {
                 incremental_include_unchanged_files: expected.include_unchanged,
                 incremental_skip_unchanged: expected.skip_unchanged,
                 ..Default::default()
@@ -781,24 +789,26 @@ vid.mp4
             hc.update(file_txt.0, file_txt.1);
             let subdir_nested_nested_cgi_bin =
                 file_from_disk(&mut ft, "subdir/nested/nested/cgi.bin", HashType::Sha512);
-            hc.update(subdir_nested_nested_cgi_bin.0, subdir_nested_nested_cgi_bin.1);
+            hc.update(
+                subdir_nested_nested_cgi_bin.0,
+                subdir_nested_nested_cgi_bin.1,
+            );
 
-            let mut inc = Incremental::new(
-                &test_path, &mut ft, &options, hc);
+            let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
             inc.discover_files(|_| {}).unwrap();
             let mut skipped_callbacks = vec![];
-            let new = inc.checksum_files(|p| {
-                if let IncrementalProgress::FileUnchangedSkipped(_) = p {
-                    skipped_callbacks.push(p);
-                }
-            }).unwrap();
+            let new = inc
+                .checksum_files(|p| {
+                    if let IncrementalProgress::FileUnchangedSkipped(_) = p {
+                        skipped_callbacks.push(p);
+                    }
+                })
+                .unwrap();
             let cshd_str = new.to_str(inc.file_tree).unwrap();
 
             assert!(inc.most_current.is_empty());
-            assert_eq!(
-                expected.skipped_callbacks,
-                skipped_callbacks);
+            assert_eq!(expected.skipped_callbacks, skipped_callbacks);
 
             assert_eq!(
                 expected.expected_files,
@@ -813,8 +823,7 @@ vid.mp4
         let mut ft = FileTree::new(&test_path).unwrap();
         let options = ChecksumHelperOptions::default();
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let new = inc.checksum_files(|_| {}).unwrap();
@@ -876,8 +885,7 @@ vid.mp4
         // Final flush
         assert_eq!(new.len(), 0);
 
-        let contents =
-            std::fs::read_to_string(new.full_path().unwrap()).unwrap();
+        let contents = std::fs::read_to_string(new.full_path().unwrap()).unwrap();
 
         assert_eq!(
             "file.txt
@@ -912,8 +920,7 @@ vid.mp4
         // Final flush still happened
         assert_eq!(new.len(), 0);
 
-        let contents =
-            std::fs::read_to_string(new.full_path().unwrap()).unwrap();
+        let contents = std::fs::read_to_string(new.full_path().unwrap()).unwrap();
 
         assert_eq!(
             "file.txt
@@ -940,8 +947,7 @@ vid.mp4
         hc.update(cgi_bin.0, cgi_bin.1);
 
         let options = ChecksumHelperOptions::default();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
@@ -958,16 +964,9 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    28,
-                    28,
-                ),
-                IncrementalProgress::FileMatch(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(28, 28,),
+                IncrementalProgress::FileMatch(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -980,8 +979,7 @@ vid.mp4
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
 
         let options = ChecksumHelperOptions::default();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
@@ -998,16 +996,9 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    28,
-                    28,
-                ),
-                IncrementalProgress::FileNew(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(28, 28,),
+                IncrementalProgress::FileNew(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1024,8 +1015,7 @@ vid.mp4
         std::fs::remove_file(test_path.join(&path_cgi_bin)).unwrap();
 
         let options = ChecksumHelperOptions::default();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
@@ -1035,9 +1025,7 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::FileRemoved(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::FileRemoved(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1057,14 +1045,11 @@ vid.mp4
         filetime::set_file_times(&path, filetime_cig_bin, filetime_cig_bin).unwrap();
 
         let options = ChecksumHelperOptions::default();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
-
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
         let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
-
 
         assert_eq!(
             new.to_str(inc.file_tree).unwrap(),
@@ -1077,16 +1062,9 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    3,
-                    3,
-                ),
-                IncrementalProgress::FileChanged(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(3, 3,),
+                IncrementalProgress::FileChanged(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1101,20 +1079,16 @@ vid.mp4
         hc.update(cgi_bin.0, cgi_bin.1);
 
         let path = test_path.join(&path_cgi_bin);
-        let newer_filetime = filetime::FileTime::from_unix_time(
-            133337, 1_330_000);
+        let newer_filetime = filetime::FileTime::from_unix_time(133337, 1_330_000);
         std::fs::write(&path, "foo").unwrap();
         filetime::set_file_times(&path, newer_filetime, newer_filetime).unwrap();
 
         let options = ChecksumHelperOptions::default();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
-
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
         let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
-
 
         assert_eq!(
             new.to_str(inc.file_tree).unwrap(),
@@ -1127,16 +1101,9 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    3,
-                    3,
-                ),
-                IncrementalProgress::FileChanged(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(3, 3,),
+                IncrementalProgress::FileChanged(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1151,20 +1118,16 @@ vid.mp4
         hc.update(cgi_bin.0, cgi_bin.1);
 
         let path = test_path.join(&path_cgi_bin);
-        let older_filetime = filetime::FileTime::from_unix_time(
-            1337, 1_330_000);
+        let older_filetime = filetime::FileTime::from_unix_time(1337, 1_330_000);
         std::fs::write(&path, "foo").unwrap();
         filetime::set_file_times(&path, older_filetime, older_filetime).unwrap();
 
         let options = ChecksumHelperOptions::default();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
-
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
         let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
-
 
         assert_eq!(
             new.to_str(inc.file_tree).unwrap(),
@@ -1177,16 +1140,9 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    3,
-                    3,
-                ),
-                IncrementalProgress::FileChangedOlder(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(3, 3,),
+                IncrementalProgress::FileChangedOlder(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1205,14 +1161,11 @@ vid.mp4
         filetime::set_file_times(&path, filetime_cig_bin, filetime_cig_bin).unwrap();
 
         let options = ChecksumHelperOptions::default();
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
-
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
         let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
-
 
         assert_eq!(
             new.to_str(inc.file_tree).unwrap(),
@@ -1225,16 +1178,9 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    3,
-                    3,
-                ),
-                IncrementalProgress::FileChangedCorrupted(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(3, 3,),
+                IncrementalProgress::FileChangedCorrupted(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1254,14 +1200,11 @@ vid.mp4
 
         let options = ChecksumHelperOptions::default();
         assert_ne!(options.hash_type, HashType::Md5);
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
-
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
         let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
-
 
         assert_eq!(
             new.to_str(inc.file_tree).unwrap(),
@@ -1274,21 +1217,11 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    3,
-                    3,
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(3, 3,),
                 // second read due to different hash type -> recompute
-                IncrementalProgress::Read(
-                    3,
-                    3,
-                ),
-                IncrementalProgress::FileChangedCorrupted(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::Read(3, 3,),
+                IncrementalProgress::FileChangedCorrupted(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1304,14 +1237,11 @@ vid.mp4
 
         let options = ChecksumHelperOptions::default();
         assert_ne!(options.hash_type, HashType::Md5);
-        let mut inc = Incremental::new(
-            &test_path, &mut ft, &options, hc);
-
+        let mut inc = Incremental::new(&test_path, &mut ft, &options, hc);
 
         inc.discover_files(|_| {}).unwrap();
         let mut callbacks = vec![];
         let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
-
 
         assert_eq!(
             new.to_str(inc.file_tree).unwrap(),
@@ -1324,21 +1254,11 @@ vid.mp4
         assert_eq!(
             callbacks,
             vec![
-                IncrementalProgress::PreRead(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
-                IncrementalProgress::Read(
-                    28,
-                    28,
-                ),
+                IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
+                IncrementalProgress::Read(28, 28,),
                 // second read due to different hash type -> recompute
-                IncrementalProgress::Read(
-                    28,
-                    28,
-                ),
-                IncrementalProgress::FileMatch(
-                    path::PathBuf::from(&path_cgi_bin),
-                ),
+                IncrementalProgress::Read(28, 28,),
+                IncrementalProgress::FileMatch(path::PathBuf::from(&path_cgi_bin),),
                 IncrementalProgress::Finished,
             ],
         );
@@ -1359,8 +1279,7 @@ vid.mp4
                 incremental_include_unchanged_files: include_unchanged,
                 ..Default::default()
             };
-            let mut inc = Incremental::new(
-                &test_path, &mut ft, &options, hc.clone());
+            let mut inc = Incremental::new(&test_path, &mut ft, &options, hc.clone());
 
             inc.discover_files(|_| {}).unwrap();
             let mut callbacks = vec![];
@@ -1376,13 +1295,9 @@ vid.mp4
             assert_eq!(
                 callbacks,
                 vec![
-                    IncrementalProgress::PreRead(
-                        path::PathBuf::from(&path_cgi_bin),
-                    ),
+                    IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin),),
                     IncrementalProgress::Read(28, 28),
-                    IncrementalProgress::FileMatch(
-                        path::PathBuf::from(&path_cgi_bin),
-                    ),
+                    IncrementalProgress::FileMatch(path::PathBuf::from(&path_cgi_bin),),
                     IncrementalProgress::Finished,
                 ],
             );

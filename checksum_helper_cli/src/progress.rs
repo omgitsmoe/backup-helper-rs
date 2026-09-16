@@ -169,9 +169,7 @@ impl ProgressReporter {
             VerifyProgress::During(hash_progress) => {
                 if let Some(path) = &self.current_file {
                     let percent = if hash_progress.bytes_total > 0 {
-                        (hash_progress.bytes_read as f64
-                            / hash_progress.bytes_total as f64)
-                            * 100.0
+                        (hash_progress.bytes_read as f64 / hash_progress.bytes_total as f64) * 100.0
                     } else {
                         0.0
                     };
@@ -197,25 +195,17 @@ impl ProgressReporter {
                 print!("\r");
 
                 let status = match post.result {
-                    checksum_helper::hashed_file::VerifyResult::Ok => {
-                        "[OK        ]"
-                    }
+                    checksum_helper::hashed_file::VerifyResult::Ok => "[OK        ]",
 
                     checksum_helper::hashed_file::VerifyResult::FileMissing(_error_kind) => {
                         "[ERR MISS  ]"
                     }
 
-                    checksum_helper::hashed_file::VerifyResult::Mismatch => {
-                        "[ERR HASH  ]"
-                    }
+                    checksum_helper::hashed_file::VerifyResult::Mismatch => "[ERR HASH  ]",
 
-                    checksum_helper::hashed_file::VerifyResult::MismatchSize => {
-                        "[ERR SIZE  ]"
-                    }
+                    checksum_helper::hashed_file::VerifyResult::MismatchSize => "[ERR SIZE  ]",
 
-                    checksum_helper::hashed_file::VerifyResult::MismatchCorrupted => {
-                        "[ERR CORR  ]"
-                    }
+                    checksum_helper::hashed_file::VerifyResult::MismatchCorrupted => "[ERR CORR  ]",
 
                     checksum_helper::hashed_file::VerifyResult::MismatchOutdatedHash => {
                         "[WARN STALE]" // not strictly an error

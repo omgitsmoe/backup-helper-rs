@@ -1271,11 +1271,10 @@ xer.mp4",
 
         let mut actual_callbacks = vec![];
         hc.filter_missing(&ft, |p| match p {
-            MostCurrentProgress::FilteredMissingFile(p) => {
-                actual_callbacks.push(p)
-            }
+            MostCurrentProgress::FilteredMissingFile(p) => actual_callbacks.push(p),
             _ => unreachable!(),
-        }).unwrap();
+        })
+        .unwrap();
 
         for p in remove {
             assert!(!hc.contains_path(p, &ft));

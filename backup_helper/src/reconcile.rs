@@ -1,7 +1,7 @@
-use crate::backup_helper::BackupHelper;
-use crate::parse;
 use crate::BackupHelperError;
 use crate::ReconcileArgs;
+use crate::backup_helper::BackupHelper;
+use crate::parse;
 
 use std::fs;
 
@@ -38,12 +38,14 @@ mod tests {
         let config_path = testdir.join("config.kdl");
         std::fs::write(
             &config_path,
-            crate::test_utils::config_with_absolute_paths(r#"
+            crate::test_utils::config_with_absolute_paths(
+                r#"
                 disks { disk "main" { path "/mnt" } }
                 source "/mnt/source" {
                     target "/mnt/backup" { transfer_mode copy }
                 }
-            "#),
+            "#,
+            ),
         )
         .unwrap();
 
@@ -57,8 +59,9 @@ mod tests {
 
         let actual: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
-        let expected: serde_json::Value = serde_json::from_str(
-            &crate::test_utils::config_with_absolute_paths(r#"{
+        let expected: serde_json::Value =
+            serde_json::from_str(&crate::test_utils::config_with_absolute_paths(
+                r#"{
                 "version": 1,
                 "disks": [{"name": "main", "path": "/mnt"}],
                 "sources": [{
@@ -80,9 +83,9 @@ mod tests {
                     }],
                     "disk": 0
                 }]
-            }"#),
-        )
-        .unwrap();
+            }"#,
+            ))
+            .unwrap();
 
         assert_eq!(actual, expected);
     }

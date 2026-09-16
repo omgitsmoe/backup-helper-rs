@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf, Component};
-use std::fmt::Display;
 use std::ffi::OsStr;
+use std::fmt::Display;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct FileTree {
@@ -28,7 +28,7 @@ pub fn is_absolute(path: impl AsRef<Path>) -> bool {
             if os.next() == Some(&b':') {
                 return true;
             }
-        },
+        }
         Some(b'/') => return true,
         Some(b'\\') => return os.next() == Some(&b'\\'),
         _ => {}
@@ -49,12 +49,12 @@ impl FileTree {
             Err(ErrorKind::PathNotAbsolute)
         } else {
             Ok(FileTree {
-                nodes: vec!(Entry{
+                nodes: vec![Entry {
                     name: root.to_path_buf(),
                     is_directory: true,
                     parent: None,
-                    children: vec!(),
-                }),
+                    children: vec![],
+                }],
                 last_directory: None,
             })
         }
@@ -84,12 +84,16 @@ impl FileTree {
 
     pub fn relative_path_to(&self, entry: &EntryHandle, base: impl AsRef<Path>) -> PathBuf {
         let base = base.as_ref();
-        debug_assert!(base.starts_with(self.absolute_path(&self.root())), "Base must be a subpath of the file tree");
+        debug_assert!(
+            base.starts_with(self.absolute_path(&self.root())),
+            "Base must be a subpath of the file tree"
+        );
 
         let absolute_path = self.absolute_path(entry);
-        pathdiff::diff_paths(&absolute_path, base)
-            .expect("BUG: should always succeed, since base must be \
-                          a subpath of the file tree")
+        pathdiff::diff_paths(&absolute_path, base).expect(
+            "BUG: should always succeed, since base must be \
+                          a subpath of the file tree",
+        )
     }
 
     fn path(&self, entry: &EntryHandle, is_absolute: bool) -> PathBuf {
@@ -115,9 +119,12 @@ impl FileTree {
         let mut full_match = true;
         for component_name in path.iter() {
             if component_name == "." {
-                continue
+                continue;
             }
-            debug_assert!(component_name != "..", "Path must not contain pardir elements!");
+            debug_assert!(
+                component_name != "..",
+                "Path must not contain pardir elements!"
+            );
 
             let entry = &self.nodes[current];
             let mut found = false;
@@ -166,7 +173,11 @@ impl FileTree {
 
     // NOTE: tested full LRU cache (at least for add, not for find_last_existing) and
     //       there was no performance gain over just caching the last_directory
-    pub fn add(&mut self, path: impl AsRef<Path>, is_directory: bool) -> Result<EntryHandle, ErrorKind> {
+    pub fn add(
+        &mut self,
+        path: impl AsRef<Path>,
+        is_directory: bool,
+    ) -> Result<EntryHandle, ErrorKind> {
         let path = path.as_ref();
         debug_assert!(path.is_relative(), "Only relative paths are allowed!");
         if let Some((last_path, last_handle)) = &self.last_directory {
@@ -176,10 +187,9 @@ impl FileTree {
                     let handle = last_handle.clone();
                     return Ok(self.add_child(
                         &handle,
-                        path.file_name()
-                            .expect("must have a filename"),
-                        is_directory
-                    ))
+                        path.file_name().expect("must have a filename"),
+                        is_directory,
+                    ));
                 }
             }
         }
@@ -191,15 +201,15 @@ impl FileTree {
         for component_name in &remaining {
             last_parent = current_parent.clone();
             if component_name == "." {
-                continue
+                continue;
             } else if component_name == ".." {
                 return Err(ErrorKind::NonCanoncialPath);
             }
-            self.nodes.push(Entry{
+            self.nodes.push(Entry {
                 name: component_name.into(),
                 is_directory: true,
                 parent: Some(current_parent.clone()),
-                children: vec!(),
+                children: vec![],
             });
             let index = self.nodes.len() - 1;
 
@@ -208,23 +218,21 @@ impl FileTree {
             current_parent = EntryHandle(index);
         }
         if is_directory {
-            self.last_directory = Some((
-                self.relative_path(&current_parent),
-                current_parent.clone(),
-
-            ));
+            self.last_directory =
+                Some((self.relative_path(&current_parent), current_parent.clone()));
         } else {
-            self.last_directory = Some((
-                self.relative_path(&last_parent),
-                last_parent.clone(),
-
-            ));
+            self.last_directory = Some((self.relative_path(&last_parent), last_parent.clone()));
         }
         self.nodes[current_parent.0].is_directory = is_directory;
         Ok(current_parent)
     }
 
-    pub fn add_child(&mut self, parent: &EntryHandle, child_name: impl AsRef<OsStr>, is_directory: bool) -> EntryHandle {
+    pub fn add_child(
+        &mut self,
+        parent: &EntryHandle,
+        child_name: impl AsRef<OsStr>,
+        is_directory: bool,
+    ) -> EntryHandle {
         let child_name = child_name.as_ref();
 
         for (entry_name, child_handle) in &self.nodes[parent.0].children {
@@ -234,11 +242,11 @@ impl FileTree {
         }
 
         // TODO child_name validation, must not contain path separators etc.
-        self.nodes.push(Entry{
+        self.nodes.push(Entry {
             name: child_name.into(),
             is_directory,
             parent: Some(parent.clone()),
-            children: vec!(),
+            children: vec![],
         });
         let index = self.nodes.len() - 1;
 
@@ -252,12 +260,14 @@ impl FileTree {
     }
 
     #[allow(dead_code)]
-    pub fn len(&self) -> usize { self.nodes.len() }
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
 
     pub fn iter(&self) -> FileTreeIter<'_> {
-        FileTreeIter{
+        FileTreeIter {
             file_tree: self,
-            stack: vec!((EntryHandle(0), 0)),
+            stack: vec![(EntryHandle(0), 0)],
         }
     }
 
@@ -265,20 +275,18 @@ impl FileTree {
         let path = path.as_ref();
         assert!(path.is_relative(), "path must be relative!");
 
-        let prefix_components = prefix.iter(self)
-            .collect::<Vec<EntryHandle>>();
-        let prefix_iter = prefix_components
-            .iter()
-            .rev()
-            .skip(1); // skip root
-        let mut path_iter = path
-            .components()
-            .skip_while(|c| *c == Component::CurDir);
+        let prefix_components = prefix.iter(self).collect::<Vec<EntryHandle>>();
+        let prefix_iter = prefix_components.iter().rev().skip(1); // skip root
+        let mut path_iter = path.components().skip_while(|c| *c == Component::CurDir);
 
         for strip_component in prefix_iter {
             let stripped = path_iter.next();
-            debug_assert!(stripped == Some(
-                        Component::Normal(self.nodes[strip_component.0].name.as_os_str())));
+            debug_assert!(
+                stripped
+                    == Some(Component::Normal(
+                        self.nodes[strip_component.0].name.as_os_str()
+                    ))
+            );
         }
 
         path_iter.collect()
@@ -342,7 +350,7 @@ impl Iterator for FileTreeIter<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(curr) = self.stack.pop() {
-            let entry = &self.file_tree.nodes[curr.0.0];
+            let entry = &self.file_tree.nodes[curr.0 .0];
             if curr.1 >= entry.children.len() {
                 continue;
             }
@@ -352,14 +360,17 @@ impl Iterator for FileTreeIter<'_> {
 
             self.stack.push((curr.0, curr.1 + 1));
             if !child_entry.children.is_empty() {
-                debug_assert!(child_entry.is_directory, "Has children, but is_directory is false");
+                debug_assert!(
+                    child_entry.is_directory,
+                    "Has children, but is_directory is false"
+                );
                 self.stack.push((child.clone(), 0));
             }
 
             if child_entry.is_directory {
                 continue;
             } else {
-                return Some(child)
+                return Some(child);
             }
         }
 
@@ -393,7 +404,6 @@ impl Entry {
     pub fn add_child(&mut self, name: impl AsRef<Path>, child_handle: EntryHandle) {
         let key = name.as_ref().as_os_str().to_os_string();
         self.children.push((key, child_handle.clone()));
-
     }
 }
 
@@ -441,11 +451,26 @@ mod test {
 
     #[test]
     fn file_tree_new_rejects_relative_paths() {
-        assert!(matches!(FileTree::new(Path::new("foo")), Err(ErrorKind::PathNotAbsolute)));
-        assert!(matches!(FileTree::new(Path::new("./foo")), Err(ErrorKind::PathNotAbsolute)));
-        assert!(matches!(FileTree::new(Path::new("foo/bar")), Err(ErrorKind::PathNotAbsolute)));
-        assert!(matches!(FileTree::new(Path::new("./foo/bar")), Err(ErrorKind::PathNotAbsolute)));
-        assert!(matches!(FileTree::new(Path::new("\\foo")), Err(ErrorKind::PathNotAbsolute)));
+        assert!(matches!(
+            FileTree::new(Path::new("foo")),
+            Err(ErrorKind::PathNotAbsolute)
+        ));
+        assert!(matches!(
+            FileTree::new(Path::new("./foo")),
+            Err(ErrorKind::PathNotAbsolute)
+        ));
+        assert!(matches!(
+            FileTree::new(Path::new("foo/bar")),
+            Err(ErrorKind::PathNotAbsolute)
+        ));
+        assert!(matches!(
+            FileTree::new(Path::new("./foo/bar")),
+            Err(ErrorKind::PathNotAbsolute)
+        ));
+        assert!(matches!(
+            FileTree::new(Path::new("\\foo")),
+            Err(ErrorKind::PathNotAbsolute)
+        ));
     }
 
     #[test]
@@ -453,8 +478,14 @@ mod test {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let txt_path = Path::new("./bar/baz/file.txt");
         let txt = ft.add(txt_path, false).unwrap();
-        assert_eq!(ft.relative_path(&txt), Path::new("bar").join("baz").join("file.txt"));
-        assert_eq!(ft.absolute_path(&txt), Path::new("/foo").join("bar").join("baz").join("file.txt"));
+        assert_eq!(
+            ft.relative_path(&txt),
+            Path::new("bar").join("baz").join("file.txt")
+        );
+        assert_eq!(
+            ft.absolute_path(&txt),
+            Path::new("/foo").join("bar").join("baz").join("file.txt")
+        );
 
         let txt_entry = ft.entry(&txt);
         assert_eq!(txt_entry.name, Path::new("file.txt"));
@@ -466,7 +497,10 @@ mod test {
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 1);
-        assert_eq!(*baz_entry.parent.as_ref().unwrap(), ft.find_last_existing(Path::new("bar")).0);
+        assert_eq!(
+            *baz_entry.parent.as_ref().unwrap(),
+            ft.find_last_existing(Path::new("bar")).0
+        );
         assert!(baz_entry.is_directory);
 
         let mov_path = Path::new("bar/baz/mov.mp4");
@@ -480,7 +514,10 @@ mod test {
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 2);
-        assert_eq!(*baz_entry.parent.as_ref().unwrap(), ft.find_last_existing(Path::new("bar")).0);
+        assert_eq!(
+            *baz_entry.parent.as_ref().unwrap(),
+            ft.find_last_existing(Path::new("bar")).0
+        );
         assert!(baz_entry.is_directory);
 
         let bin_path = Path::new("bar/file.bin");
@@ -498,8 +535,9 @@ mod test {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         // NOTE: `is_absolute` is platform dependent, so e.g. `/tmp` is
         //       not absolute on Windows
-        let txt_path = std::env::current_dir().unwrap().join(
-            "foo/bar/baz/file.txt");
+        let txt_path = std::env::current_dir()
+            .unwrap()
+            .join("foo/bar/baz/file.txt");
         let _ = ft.add(&txt_path, false);
     }
 
@@ -512,7 +550,10 @@ mod test {
         for e in &ft.nodes {
             assert!(e.name != Path::new("."));
         }
-        assert_eq!(ft.relative_path(&txt), Path::new("bar").join("baz").join("file.txt"));
+        assert_eq!(
+            ft.relative_path(&txt),
+            Path::new("bar").join("baz").join("file.txt")
+        );
     }
 
     #[test]
@@ -520,7 +561,10 @@ mod test {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
         let txt_path = Path::new("./bar/baz/file.txt");
         let txt = ft.add(txt_path, false).unwrap();
-        assert_eq!(ft.relative_path(&txt), Path::new("bar").join("baz").join("file.txt"));
+        assert_eq!(
+            ft.relative_path(&txt),
+            Path::new("bar").join("baz").join("file.txt")
+        );
 
         let txt_entry = ft.entry(&txt);
         assert_eq!(txt_entry.name, Path::new("file.txt"));
@@ -532,7 +576,10 @@ mod test {
         let baz_entry = ft.entry(&baz);
         assert_eq!(baz_entry.name, Path::new("baz"));
         assert_eq!(baz_entry.children.len(), 1);
-        assert_eq!(*baz_entry.parent.as_ref().unwrap(), ft.find_last_existing(Path::new("bar")).0);
+        assert_eq!(
+            *baz_entry.parent.as_ref().unwrap(),
+            ft.find_last_existing(Path::new("bar")).0
+        );
         assert!(baz_entry.is_directory);
     }
 
@@ -540,11 +587,9 @@ mod test {
     fn test_add_reuses_dir_entries() {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
 
-        let txt = ft.add(
-            Path::new("./bar/baz/file.txt"), false).unwrap();
+        let txt = ft.add(Path::new("./bar/baz/file.txt"), false).unwrap();
 
-        let two = ft.add(
-            Path::new("bar/baz/foo/xer.txt"), false).unwrap();
+        let two = ft.add(Path::new("bar/baz/foo/xer.txt"), false).unwrap();
 
         let txt_entry = ft.entry(&txt);
         let two_entry = ft.entry(&two);
@@ -558,8 +603,12 @@ mod test {
         assert!(baz_entry.is_directory);
 
         assert_eq!(baz_entry.children.len(), 2);
-        assert!(baz_entry.children.contains(&(std::ffi::OsString::from("file.txt"), txt)));
-        assert!(baz_entry.children.contains(&(std::ffi::OsString::from("foo"), foo)));
+        assert!(baz_entry
+            .children
+            .contains(&(std::ffi::OsString::from("file.txt"), txt)));
+        assert!(baz_entry
+            .children
+            .contains(&(std::ffi::OsString::from("foo"), foo)));
 
         assert_eq!(txt_entry.parent, Some(baz.clone()));
         assert_eq!(foo_entry.parent, Some(baz.clone()));
@@ -569,8 +618,7 @@ mod test {
     fn test_add_returns_entry_if_present() {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
 
-        let txt = ft.add(
-            Path::new("./bar/baz/file.txt"), false).unwrap();
+        let txt = ft.add(Path::new("./bar/baz/file.txt"), false).unwrap();
         assert_eq!(txt, ft.add("bar/baz/file.txt", false).unwrap());
         assert_eq!(txt, ft.add("bar/baz/file.txt", false).unwrap());
     }
@@ -578,25 +626,17 @@ mod test {
     #[test]
     fn path_for_tree_root() {
         let ft = FileTree::new(Path::new("/foo")).unwrap();
-        assert_eq!(
-            ft.relative_path(&ft.root()),
-            Path::new(""),
-        );
-        assert_eq!(
-            ft.absolute_path(&ft.root()),
-            Path::new("/foo"),
-        );
+        assert_eq!(ft.relative_path(&ft.root()), Path::new(""),);
+        assert_eq!(ft.absolute_path(&ft.root()), Path::new("/foo"),);
     }
 
     #[test]
     fn test_add_child_returns_entry_if_present() {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
 
-        let dir = ft.add("./bar/baz", true)
-            .unwrap();
+        let dir = ft.add("./bar/baz", true).unwrap();
 
-        let txt = ft.add_child(
-            &dir, "file.txt", false);
+        let txt = ft.add_child(&dir, "file.txt", false);
         assert_eq!(txt, ft.add_child(&dir, "file.txt", false));
         assert_eq!(txt, ft.add_child(&dir, "file.txt", false));
     }
@@ -612,61 +652,80 @@ mod test {
     #[should_panic]
     fn relative_path_to_panics_if_base_not_subpath_of_filetree() {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
-        let fh = ft.add("foo/bar/baz/file.txt", false)
-            .unwrap();
-        println!("Should panic relative_to: {:?}", ft.relative_path_to(&fh, "/bar"));
+        let fh = ft.add("foo/bar/baz/file.txt", false).unwrap();
+        println!(
+            "Should panic relative_to: {:?}",
+            ft.relative_path_to(&fh, "/bar")
+        );
     }
 
     #[test]
     fn relative_path_to() {
         let mut ft = FileTree::new(Path::new("/foo")).unwrap();
-        let fh = ft.add("foo/bar/baz/file.txt", false)
-            .unwrap();
-        assert_eq!(ft.relative_path_to(&fh, "/foo"), Path::new("foo/bar/baz/file.txt"));
-        assert_eq!(ft.relative_path_to(&fh, "/foo/foo"), Path::new("bar/baz/file.txt"));
-        assert_eq!(ft.relative_path_to(&fh, "/foo/foo/bar"), Path::new("baz/file.txt"));
-        assert_eq!(ft.relative_path_to(&fh, "/foo/foo/bar/baz"), Path::new("file.txt"));
+        let fh = ft.add("foo/bar/baz/file.txt", false).unwrap();
+        assert_eq!(
+            ft.relative_path_to(&fh, "/foo"),
+            Path::new("foo/bar/baz/file.txt")
+        );
+        assert_eq!(
+            ft.relative_path_to(&fh, "/foo/foo"),
+            Path::new("bar/baz/file.txt")
+        );
+        assert_eq!(
+            ft.relative_path_to(&fh, "/foo/foo/bar"),
+            Path::new("baz/file.txt")
+        );
+        assert_eq!(
+            ft.relative_path_to(&fh, "/foo/foo/bar/baz"),
+            Path::new("file.txt")
+        );
     }
 
     #[test]
     fn strip_prefix() {
         let ft = FileTree {
-            nodes: vec!{
-                Entry{
+            nodes: vec![
+                Entry {
                     name: PathBuf::from("root"),
                     is_directory: true,
                     parent: None,
-                    children: vec!{ (std::ffi::OsString::from("foo"), EntryHandle(1)) },
+                    children: vec![(std::ffi::OsString::from("foo"), EntryHandle(1))],
                 },
-                Entry{
+                Entry {
                     name: PathBuf::from("foo"),
                     is_directory: true,
                     parent: Some(EntryHandle(0)),
-                    children: vec!{ (std::ffi::OsString::from("bar"), EntryHandle(2)) },
+                    children: vec![(std::ffi::OsString::from("bar"), EntryHandle(2))],
                 },
-                Entry{
+                Entry {
                     name: PathBuf::from("bar"),
                     is_directory: true,
                     parent: Some(EntryHandle(1)),
-                    children: vec!{ (std::ffi::OsString::from("baz"), EntryHandle(3)) },
+                    children: vec![(std::ffi::OsString::from("baz"), EntryHandle(3))],
                 },
-                Entry{
+                Entry {
                     name: PathBuf::from("baz"),
                     is_directory: true,
                     parent: Some(EntryHandle(2)),
-                    children: vec!{  },
+                    children: vec![],
                 },
-            },
+            ],
             last_directory: None,
         };
 
         let strip_handle = EntryHandle(3);
         assert_eq!(
-            ft.strip_prefix(strip_handle.clone(), Path::new("foo/bar/baz/xer/moo/file.txt")),
+            ft.strip_prefix(
+                strip_handle.clone(),
+                Path::new("foo/bar/baz/xer/moo/file.txt")
+            ),
             Path::new("xer/moo/file.txt"),
         );
         assert_eq!(
-            ft.strip_prefix(strip_handle.clone(), Path::new("foo/bar/./baz/xer/moo/./file.txt")),
+            ft.strip_prefix(
+                strip_handle.clone(),
+                Path::new("foo/bar/./baz/xer/moo/./file.txt")
+            ),
             Path::new("xer/moo/file.txt"),
         );
     }

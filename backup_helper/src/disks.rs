@@ -1,5 +1,5 @@
 use crate::{BackupHelperError, backup_helper::DiskHandle, reconcile::Reconcile};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path;
 
 #[cfg(unix)]
@@ -28,11 +28,10 @@ impl Disk {
         }
 
         if max_idx_components.1 == 0 {
-            return Err(BackupHelperError::ReconcileConflict(
-                format!(
-                    "no declared disk matching path '{:?}'",
-                    path)
-            ));
+            return Err(BackupHelperError::ReconcileConflict(format!(
+                "no declared disk matching path '{:?}'",
+                path
+            )));
         }
 
         Ok(DiskHandle(max_idx_components.0))
@@ -149,7 +148,10 @@ mod tests {
     fn matching_disk_accepts_an_exact_path() {
         let disks = vec![disk("/mnt/data"), disk("/mnt/backup")];
 
-        assert_eq!(Disk::matching_disk(Path::new("/mnt/data"), &disks).unwrap(), DiskHandle(0));
+        assert_eq!(
+            Disk::matching_disk(Path::new("/mnt/data"), &disks).unwrap(),
+            DiskHandle(0)
+        );
     }
 
     #[test]

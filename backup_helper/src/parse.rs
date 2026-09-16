@@ -1,8 +1,11 @@
-use std::path;
 use kdl::{KdlDocument, KdlNode};
+use std::path;
 
 use crate::{
-    BackupHelperError, disks::Disk, source::{self, ChecksumOptions, HashType, Source}, target::{Target, TransferMode}
+    BackupHelperError,
+    disks::Disk,
+    source::{self, ChecksumOptions, HashType, Source},
+    target::{Target, TransferMode},
 };
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
@@ -16,7 +19,7 @@ pub struct Parsed {
 pub fn parse(contents: &str) -> Result<Parsed> {
     let doc: KdlDocument = contents.parse()?;
 
-    let mut result = Parsed{
+    let mut result = Parsed {
         sources: vec![],
         disks: vec![],
     };
@@ -25,7 +28,7 @@ pub fn parse(contents: &str) -> Result<Parsed> {
             "source" => {
                 let source = parse_source(contents, node)?;
                 result.sources.push(source);
-            },
+            }
             "disks" => {
                 for child in node.iter_children() {
                     let name = child.name().value();
@@ -33,20 +36,22 @@ pub fn parse(contents: &str) -> Result<Parsed> {
                         "disk" => {
                             let disk = parse_disk(child, contents)?;
                             result.disks.push(disk);
-                        },
+                        }
                         _ => {
                             return Err(BackupHelperError::InvalidConfig(format!(
                                 "Expected `disk` as child nodes of `disks`, got `{}`",
                                 name
                             )));
-                        },
+                        }
                     }
                 }
-            },
-            _ => return Err(BackupHelperError::InvalidConfig(format!(
-                "Invalid top-level node. Expected `source` or `disk`, got '{}'",
-                node.name().value()
-            ))),
+            }
+            _ => {
+                return Err(BackupHelperError::InvalidConfig(format!(
+                    "Invalid top-level node. Expected `source` or `disk`, got '{}'",
+                    node.name().value()
+                )));
+            }
         }
     }
 
@@ -87,7 +92,7 @@ fn parse_source(contents: &str, node: &KdlNode) -> Result<Source> {
         match name {
             "checksums" => {
                 *source.checksum_options_mut() = parse_checksum_options(child, contents)?;
-            },
+            }
             "hash_file" => {
                 let path = child.get(0).and_then(|a| a.as_string());
                 if let Some(p) = path {
@@ -140,9 +145,7 @@ fn parse_checksum_options(node: &KdlNode, contents: &str) -> Result<ChecksumOpti
                 let hash_type = child.get(0).and_then(|a| a.as_string());
                 if let Some(hash_type) = hash_type {
                     result.hash_type = HashType::try_from(hash_type).map_err(|e| {
-                        BackupHelperError::InvalidConfig(format!(
-                            "invalid source.hash_type: {}", e
-                        ))
+                        BackupHelperError::InvalidConfig(format!("invalid source.hash_type: {}", e))
                     })?;
                 } else {
                     let line_nr = span_to_line_number(contents, child.span().offset());
@@ -152,7 +155,7 @@ fn parse_checksum_options(node: &KdlNode, contents: &str) -> Result<ChecksumOpti
                         line_nr
                     )));
                 }
-            },
+            }
             _ => {
                 return Err(BackupHelperError::InvalidConfig(format!(
                     "Expected `hash_type`, `files` or `checksum_files` as child nodes of `source.checksums`, got `{}`",
@@ -165,7 +168,11 @@ fn parse_checksum_options(node: &KdlNode, contents: &str) -> Result<ChecksumOpti
     Ok(result)
 }
 
-fn parse_checksums_child(node: &KdlNode, contents: &str, child_name: &str) -> Result<source::GlobFilter> {
+fn parse_checksums_child(
+    node: &KdlNode,
+    contents: &str,
+    child_name: &str,
+) -> Result<source::GlobFilter> {
     let mut result = source::GlobFilter::default();
 
     for child in node.iter_children() {
@@ -188,8 +195,7 @@ fn parse_checksums_child(node: &KdlNode, contents: &str, child_name: &str) -> Re
             _ => {
                 return Err(BackupHelperError::InvalidConfig(format!(
                     "Expected `allow` or `block` as child nodes of `source.checksums.{}`, got `{}`",
-                    child_name,
-                    name
+                    child_name, name
                 )));
             }
         }
@@ -206,9 +212,7 @@ fn parse_string_nodes(node: &KdlNode, contents: &str, node_name: &str) -> Result
             let line_nr = span_to_line_number(contents, child.span().offset());
             return Err(BackupHelperError::InvalidConfig(format!(
                 "Expected only strings as child nodes of `{}`, got `{}` on line {}",
-                node_name,
-                child,
-                line_nr,
+                node_name, child, line_nr,
             )));
         }
 
@@ -352,18 +356,13 @@ fn parse_disk(node: &KdlNode, contents: &str) -> Result<Disk> {
     }
     let path = path.expect("we exit early above if none");
 
-    Ok(Disk{
+    Ok(Disk {
         name: name.to_string(),
         path: path::PathBuf::from(path),
     })
 }
 
-fn require_absolute_path(
-    value: &str,
-    field: &str,
-    contents: &str,
-    offset: usize,
-) -> Result<()> {
+fn require_absolute_path(value: &str, field: &str, contents: &str, offset: usize) -> Result<()> {
     if path::Path::new(value).is_absolute() {
         return Ok(());
     }
@@ -401,7 +400,10 @@ mod tests {
                 );
             }
             Err(e) => panic!("Expected InvalidConfig error, got: {:?}", e),
-            Ok(_) => panic!("Expected error containing '{}', but got Ok", expected_substring),
+            Ok(_) => panic!(
+                "Expected error containing '{}', but got Ok",
+                expected_substring
+            ),
         }
     }
 
@@ -453,11 +455,17 @@ mod tests {
 
         assert_eq!(parsed.disks.len(), 1);
         assert_eq!(parsed.disks[0].name, "main");
-        assert_eq!(parsed.disks[0].path, crate::test_utils::fixture_path("/mnt/main"));
+        assert_eq!(
+            parsed.disks[0].path,
+            crate::test_utils::fixture_path("/mnt/main")
+        );
 
         assert_eq!(parsed.sources.len(), 1);
         let source = &parsed.sources[0];
-        assert_eq!(source.path(), &crate::test_utils::fixture_path("/mnt/main/photos"));
+        assert_eq!(
+            source.path(),
+            &crate::test_utils::fixture_path("/mnt/main/photos")
+        );
 
         let opts = source.checksum_options();
         assert_eq!(opts.hash_type.0.to_str(), "sha256");
@@ -471,17 +479,21 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert_eq!(
             targets[0].get("path").unwrap().as_str().unwrap(),
-            crate::test_utils::fixture_path("/mnt/backup/photos")
-                .to_string_lossy()
+            crate::test_utils::fixture_path("/mnt/backup/photos").to_string_lossy()
         );
-        assert_eq!(targets[0].get("transfer_mode").unwrap().as_str().unwrap(), "Copy");
+        assert_eq!(
+            targets[0].get("transfer_mode").unwrap().as_str().unwrap(),
+            "Copy"
+        );
         assert!(targets[0].get("verify").unwrap().as_bool().unwrap());
         assert_eq!(
             targets[1].get("path").unwrap().as_str().unwrap(),
-            crate::test_utils::fixture_path("/mnt/remote/photos")
-                .to_string_lossy()
+            crate::test_utils::fixture_path("/mnt/remote/photos").to_string_lossy()
         );
-        assert_eq!(targets[1].get("transfer_mode").unwrap().as_str().unwrap(), "Sync");
+        assert_eq!(
+            targets[1].get("transfer_mode").unwrap().as_str().unwrap(),
+            "Sync"
+        );
         assert!(!targets[1].get("verify").unwrap().as_bool().unwrap());
     }
 
@@ -504,7 +516,10 @@ mod tests {
         let v = serde_json::to_value(source).unwrap();
         let targets = v.get("targets").unwrap().as_array().unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].get("transfer_mode").unwrap().as_str().unwrap(), "Copy");
+        assert_eq!(
+            targets[0].get("transfer_mode").unwrap().as_str().unwrap(),
+            "Copy"
+        );
         assert!(targets[0].get("verify").unwrap().as_bool().unwrap());
     }
 
@@ -521,7 +536,10 @@ mod tests {
 
         let v = serde_json::to_value(&parsed.sources[0]).unwrap();
         let targets = v.get("targets").unwrap().as_array().unwrap();
-        assert_eq!(targets[0].get("transfer_mode").unwrap().as_str().unwrap(), "Sync");
+        assert_eq!(
+            targets[0].get("transfer_mode").unwrap().as_str().unwrap(),
+            "Sync"
+        );
     }
 
     // parse() errors
@@ -650,12 +668,20 @@ mod tests {
 
         let parsed = parse(input).expect("absolute paths should be accepted");
 
-        assert_eq!(parsed.disks[0].path, crate::test_utils::fixture_path("/mnt/main"));
+        assert_eq!(
+            parsed.disks[0].path,
+            crate::test_utils::fixture_path("/mnt/main")
+        );
         assert_eq!(
             parsed.sources[0].hash_file(),
-            &Some(crate::test_utils::fixture_path("/mnt/source/checksums.cshd"))
+            &Some(crate::test_utils::fixture_path(
+                "/mnt/source/checksums.cshd"
+            ))
         );
-        assert_eq!(parsed.sources[0].path(), &crate::test_utils::fixture_path("/mnt/source"));
+        assert_eq!(
+            parsed.sources[0].path(),
+            &crate::test_utils::fixture_path("/mnt/source")
+        );
         assert_eq!(
             parsed.sources[0].targets()[0].path(),
             &crate::test_utils::fixture_path("/mnt/backup")
@@ -670,7 +696,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `checksums`, `hash_file` or `target` as child nodes of `source`");
+        assert_config_err(
+            result,
+            "Expected `checksums`, `hash_file` or `target` as child nodes of `source`",
+        );
     }
 
     #[test]
@@ -823,7 +852,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `hash_type`, `files` or `checksum_files` as child nodes of `source.checksums`");
+        assert_config_err(
+            result,
+            "Expected `hash_type`, `files` or `checksum_files` as child nodes of `source.checksums`",
+        );
     }
 
     #[test]
@@ -842,7 +874,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `allow` or `block` as child nodes of `source.checksums.files`");
+        assert_config_err(
+            result,
+            "Expected `allow` or `block` as child nodes of `source.checksums.files`",
+        );
     }
 
     #[test]
@@ -862,7 +897,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected only strings as child nodes of `source.checksums.files.allow`");
+        assert_config_err(
+            result,
+            "Expected only strings as child nodes of `source.checksums.files.allow`",
+        );
     }
 
     // parse_target() errors
@@ -890,7 +928,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected positional string argument for `transfer_mode`");
+        assert_config_err(
+            result,
+            "Expected positional string argument for `transfer_mode`",
+        );
     }
 
     #[test]
@@ -903,7 +944,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Invalid transfer_mode `invalid`, expected `copy` or `sync`");
+        assert_config_err(
+            result,
+            "Invalid transfer_mode `invalid`, expected `copy` or `sync`",
+        );
     }
 
     #[test]
@@ -931,7 +975,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `transfer_mode` or `verify` as child nodes of `target`");
+        assert_config_err(
+            result,
+            "Expected `transfer_mode` or `verify` as child nodes of `target`",
+        );
     }
 
     #[test]
@@ -944,7 +991,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Missing mandatory child node `transfer_mode` for `target`");
+        assert_config_err(
+            result,
+            "Missing mandatory child node `transfer_mode` for `target`",
+        );
     }
 
     // parse_disk() errors

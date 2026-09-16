@@ -184,7 +184,7 @@ fn sanitized_path_prefix(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitized_path_prefix, TaskLog};
+    use super::{TaskLog, sanitized_path_prefix};
     use checksum_helper::{checksum_helper::IncrementalProgress, hashed_file::VerifyResult};
     use std::path::Path;
     use testdir::testdir;

@@ -38,7 +38,7 @@ impl HashCollectionWriter {
         }
 
         collection.map.clear();
-        #[cfg(not(test))]  // using BTreeMap for testing
+        #[cfg(not(test))] // using BTreeMap for testing
         collection.map.shrink_to_fit();
 
         Ok(())
@@ -70,8 +70,8 @@ mod test {
     use super::super::serialize;
     use super::super::test::setup_minimal_hc;
     use super::*;
-    use crate::test_utils::*;
     use crate::collection::HashCollectionError;
+    use crate::test_utils::*;
 
     use std::ffi::OsString;
 
@@ -164,4 +164,3 @@ mod test {
         assert!(hc.map.is_empty());
     }
 }
-

@@ -22,7 +22,7 @@ pub fn build(
             println!("\nWrote collection at: {:?}", c.full_path()?);
 
             Ok(())
-        }
+        },
     )?;
 
     Ok(())

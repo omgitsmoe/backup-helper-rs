@@ -1,11 +1,8 @@
 use checksum_helper::ChecksumHelperOptions;
 
-use crate::{IncrementalArgs, progress::ProgressReporter};
+use crate::{progress::ProgressReporter, IncrementalArgs};
 
-pub fn incremental(
-    args: IncrementalArgs,
-    verbose: u8,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn incremental(args: IncrementalArgs, verbose: u8) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::absolute(args.root.clone())?;
     let options = args.apply(ChecksumHelperOptions::default())?;
     let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
@@ -20,10 +17,7 @@ pub fn incremental(
     Ok(())
 }
 
-pub fn fill(
-    args: IncrementalArgs,
-    verbose: u8,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn fill(args: IncrementalArgs, verbose: u8) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::absolute(args.root.clone())?;
     let options = args.apply(ChecksumHelperOptions::default())?;
     let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;

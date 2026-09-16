@@ -120,8 +120,11 @@ sub/deep/file3.txt",
 ,,sha512,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb file2.txt
 ";
     std::fs::write(root.join("sub").join("sub.cshd"), sub_hf).unwrap();
-    filetime::set_file_mtime(&root.join("sub").join("sub.cshd"), FileTime::from_unix_time(101, 0))
-        .unwrap();
+    filetime::set_file_mtime(
+        &root.join("sub").join("sub.cshd"),
+        FileTime::from_unix_time(101, 0),
+    )
+    .unwrap();
 
     let deep_hf = "\
 # version 1
@@ -147,11 +150,7 @@ sub/deep/file3.txt",
         .unwrap_or_else(|| panic!("expected 'Wrote collection at:' in stdout: {}", stdout));
     let contents = std::fs::read_to_string(&output_path).unwrap();
     assert!(contents.contains("file1.txt"), "contents: {}", contents);
-    assert!(
-        contents.contains("file2.txt"),
-        "contents: {}",
-        contents
-    );
+    assert!(contents.contains("file2.txt"), "contents: {}", contents);
     assert!(
         !contents.contains("file3.txt"),
         "file3 should not appear at depth=1, contents: {}",
@@ -182,12 +181,8 @@ aaaaaabbbbbbccccccddddddeeeeeeffffffff file1.txt
     filetime::set_file_mtime(&root.join("data.md5"), FileTime::from_unix_time(200, 0)).unwrap();
 
     // Only allow .cshd files
-    let (stdout, stderr, success) = common::run_cli(&[
-        "build",
-        &root.to_string_lossy(),
-        "--hash-allow",
-        "*.cshd",
-    ]);
+    let (stdout, stderr, success) =
+        common::run_cli(&["build", &root.to_string_lossy(), "--hash-allow", "*.cshd"]);
     assert!(success, "build failed: stderr={}", stderr);
 
     let output_path = common::parse_collection_path(&stdout)
@@ -225,11 +220,7 @@ existing.txt",
     let output_path = common::parse_collection_path(&stdout)
         .unwrap_or_else(|| panic!("expected 'Wrote collection at:' in stdout: {}", stdout));
     let contents = std::fs::read_to_string(&output_path).unwrap();
-    assert!(
-        contents.contains("existing.txt"),
-        "contents: {}",
-        contents
-    );
+    assert!(contents.contains("existing.txt"), "contents: {}", contents);
     assert!(
         !contents.contains("deleted.txt"),
         "deleted.txt should be filtered out by default, contents: {}",
@@ -344,10 +335,7 @@ fn test_verify_file_corrupted() {
     } else if stdout.contains("[ERR HASH  ]") {
         // Hash mismatch is also acceptable
     } else {
-        panic!(
-            "expected ERR SIZE or ERR HASH in output, got: {}",
-            stdout
-        );
+        panic!("expected ERR SIZE or ERR HASH in output, got: {}", stdout);
     }
 }
 
@@ -410,8 +398,7 @@ good.txt",
     std::fs::write(&cshd_path, &cshd).unwrap();
     filetime::set_file_mtime(&cshd_path, FileTime::from_unix_time(100, 0)).unwrap();
 
-    let (stdout, stderr, success) =
-        common::run_cli(&["verify", "root", &root.to_string_lossy()]);
+    let (stdout, stderr, success) = common::run_cli(&["verify", "root", &root.to_string_lossy()]);
     assert!(success, "verify root failed: stderr={}", stderr);
     assert!(
         stdout.contains("SUCCESSFULLY"),
@@ -444,8 +431,7 @@ bad.txt",
     std::fs::write(&cshd_path, &cshd).unwrap();
     filetime::set_file_mtime(&cshd_path, FileTime::from_unix_time(100, 0)).unwrap();
 
-    let (stdout, _stderr, success) =
-        common::run_cli(&["verify", "root", &root.to_string_lossy()]);
+    let (stdout, _stderr, success) = common::run_cli(&["verify", "root", &root.to_string_lossy()]);
     assert!(!success, "verify root should fail when files are corrupted");
     assert!(
         stdout.contains("VERIFICATION FAILED"),
@@ -467,15 +453,16 @@ fn test_incremental_basic() {
 file1.txt",
     );
 
-    let (stdout, stderr, success) = common::run_cli(&[
-        "incremental",
-        &root.to_string_lossy(),
-    ]);
+    let (stdout, stderr, success) = common::run_cli(&["incremental", &root.to_string_lossy()]);
     assert!(success, "incremental failed: stderr={}", stderr);
 
     let output_path = common::parse_collection_path(&stdout)
         .unwrap_or_else(|| panic!("expected 'Wrote collection at:' in stdout: {}", stdout));
-    assert!(output_path.exists(), "output file not found: {:?}", output_path);
+    assert!(
+        output_path.exists(),
+        "output file not found: {:?}",
+        output_path
+    );
 
     let contents = std::fs::read_to_string(&output_path).unwrap();
     assert!(
@@ -510,10 +497,7 @@ file2.txt",
 
     // file1.txt already has a hash — incremental should only add file2.txt
     // (by default include_unchanged=True, so file1.txt should appear too)
-    let (stdout, stderr, success) = common::run_cli(&[
-        "incremental",
-        &root.to_string_lossy(),
-    ]);
+    let (stdout, stderr, success) = common::run_cli(&["incremental", &root.to_string_lossy()]);
     assert!(success, "incremental failed: stderr={}", stderr);
 
     let output_path = common::parse_collection_path(&stdout)
@@ -608,10 +592,7 @@ unprotected.txt",
     std::fs::write(&cshd_path, &cshd).unwrap();
     filetime::set_file_mtime(&cshd_path, FileTime::from_unix_time(100, 0)).unwrap();
 
-    let (stdout, stderr, success) = common::run_cli(&[
-        "fill",
-        &root.to_string_lossy(),
-    ]);
+    let (stdout, stderr, success) = common::run_cli(&["fill", &root.to_string_lossy()]);
     assert!(success, "fill failed: stderr={}", stderr);
 
     let output_path = common::parse_collection_path(&stdout)
@@ -642,12 +623,8 @@ keep.txt
 skip.txt",
     );
 
-    let (stdout, stderr, success) = common::run_cli(&[
-        "fill",
-        &root.to_string_lossy(),
-        "--all-allow",
-        "keep.txt",
-    ]);
+    let (stdout, stderr, success) =
+        common::run_cli(&["fill", &root.to_string_lossy(), "--all-allow", "keep.txt"]);
     assert!(success, "fill failed: stderr={}", stderr);
 
     let output_path = common::parse_collection_path(&stdout)
@@ -753,21 +730,29 @@ uncovered.txt",
         "5d14bf2c30771a7c2efe9d5320e148540fefe9af3253260a329463d31d2d41c73fe58bb837ebbafe6b9a4f16ebfa954e66eb9f99e53150744515d2409b9c38f9"
     );
     std::fs::write(root.join("existing.cshd"), &cshd).unwrap();
-    filetime::set_file_mtime(&root.join("existing.cshd"), FileTime::from_unix_time(100, 0))
-        .unwrap();
+    filetime::set_file_mtime(
+        &root.join("existing.cshd"),
+        FileTime::from_unix_time(100, 0),
+    )
+    .unwrap();
 
-    let (stdout, stderr, success) = common::run_cli(&[
-        "missing",
-        &root.to_string_lossy(),
-    ]);
+    let (stdout, stderr, success) = common::run_cli(&["missing", &root.to_string_lossy()]);
     assert!(!success, "missing should fail when files lack checksums");
     assert!(
         stdout.contains("uncovered.txt"),
         "expected uncovered.txt in missing output:\n{}",
         stdout
     );
-    assert!(stderr.contains("Fail"), "expected error on stderr:\n{}", stderr);
-    assert!(!stdout.contains("Success"), "unexpected success:\n{}", stdout);
+    assert!(
+        stderr.contains("Fail"),
+        "expected error on stderr:\n{}",
+        stderr
+    );
+    assert!(
+        !stdout.contains("Success"),
+        "unexpected success:\n{}",
+        stdout
+    );
 }
 
 #[test]
@@ -782,13 +767,13 @@ fn test_missing_all_data_files_covered() {
         "5d14bf2c30771a7c2efe9d5320e148540fefe9af3253260a329463d31d2d41c73fe58bb837ebbafe6b9a4f16ebfa954e66eb9f99e53150744515d2409b9c38f9"
     );
     std::fs::write(root.join("existing.cshd"), &cshd).unwrap();
-    filetime::set_file_mtime(&root.join("existing.cshd"), FileTime::from_unix_time(100, 0))
-        .unwrap();
+    filetime::set_file_mtime(
+        &root.join("existing.cshd"),
+        FileTime::from_unix_time(100, 0),
+    )
+    .unwrap();
 
-    let (stdout, _stderr, success) = common::run_cli(&[
-        "missing",
-        &root.to_string_lossy(),
-    ]);
+    let (stdout, _stderr, success) = common::run_cli(&["missing", &root.to_string_lossy()]);
     // Hash files themselves always appear as missing (they are not in the
     // hash collection).  So `missing` reports `existing.cshd` as uncovered.
     assert!(!success, "hash files are always reported as missing");
@@ -823,14 +808,17 @@ sub2/uncovered.txt",
         "ffc07de6ad39a6d2770852dcbda905c6369275c54765264fd229c4bd0882da75e4e5815999e0115c165139a3e23b070b24c5e95568953b9b87f2986ffd3581bd"
     );
     std::fs::write(root.join("existing.cshd"), &cshd).unwrap();
-    filetime::set_file_mtime(&root.join("existing.cshd"), FileTime::from_unix_time(100, 0))
-        .unwrap();
+    filetime::set_file_mtime(
+        &root.join("existing.cshd"),
+        FileTime::from_unix_time(100, 0),
+    )
+    .unwrap();
 
-    let (stdout, stderr, success) = common::run_cli(&[
-        "missing",
-        &root.to_string_lossy(),
-    ]);
-    assert!(!success, "missing should fail when directories lack coverage");
+    let (stdout, stderr, success) = common::run_cli(&["missing", &root.to_string_lossy()]);
+    assert!(
+        !success,
+        "missing should fail when directories lack coverage"
+    );
     // sub2 has no hashed files → listed as a missing directory
     assert!(
         stdout.contains("sub2"),
@@ -849,7 +837,11 @@ sub2/uncovered.txt",
         "covered.txt should not appear:\n{}",
         stdout
     );
-    assert!(stderr.contains("Fail"), "expected error on stderr:\n{}", stderr);
+    assert!(
+        stderr.contains("Fail"),
+        "expected error on stderr:\n{}",
+        stderr
+    );
 }
 
 #[test]
@@ -869,14 +861,14 @@ uncovered.txt",
         "5d14bf2c30771a7c2efe9d5320e148540fefe9af3253260a329463d31d2d41c73fe58bb837ebbafe6b9a4f16ebfa954e66eb9f99e53150744515d2409b9c38f9"
     );
     std::fs::write(root.join("existing.cshd"), &cshd).unwrap();
-    filetime::set_file_mtime(&root.join("existing.cshd"), FileTime::from_unix_time(100, 0))
-        .unwrap();
+    filetime::set_file_mtime(
+        &root.join("existing.cshd"),
+        FileTime::from_unix_time(100, 0),
+    )
+    .unwrap();
 
     // Step 1: run fill to generate hashes for uncovered files
-    let (fill_out, fill_err, fill_ok) = common::run_cli(&[
-        "fill",
-        &root.to_string_lossy(),
-    ]);
+    let (fill_out, fill_err, fill_ok) = common::run_cli(&["fill", &root.to_string_lossy()]);
     assert!(fill_ok, "fill failed: {}", fill_err);
 
     let fill_path = common::parse_collection_path(&fill_out)
@@ -884,10 +876,7 @@ uncovered.txt",
     assert!(fill_path.exists(), "fill output not found");
 
     // Step 2: now all DATA files are covered; only hash files are listed
-    let (stdout, _stderr, success) = common::run_cli(&[
-        "missing",
-        &root.to_string_lossy(),
-    ]);
+    let (stdout, _stderr, success) = common::run_cli(&["missing", &root.to_string_lossy()]);
     // Hash files (existing.cshd + the newly generated .cshd) are always
     // reported as missing, so `missing` still exits non-zero.
     assert!(!success, "hash files are always reported as missing");

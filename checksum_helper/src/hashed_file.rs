@@ -1,5 +1,5 @@
 use crate::file_tree::{EntryHandle, FileTree};
-use crate::hash_type::{HashType};
+use crate::hash_type::HashType;
 
 use filetime::FileTime;
 use sha2::Digest;
@@ -27,10 +27,10 @@ impl fmt::Display for HashedFileError {
             HashedFileError::MissingHash => write!(f, "missing hash"),
             // The wrapped error contains additional information and is available
             // via the source() method.
-            HashedFileError::IOError((Some(ref p), kind)) =>
-                write!(f, "disk i/o error at '{:?}': {}", p, kind),
-            HashedFileError::IOError((None, kind)) =>
-                write!(f, "disk i/o error: {}", kind.clone()),
+            HashedFileError::IOError((Some(ref p), kind)) => {
+                write!(f, "disk i/o error at '{:?}': {}", p, kind)
+            }
+            HashedFileError::IOError((None, kind)) => write!(f, "disk i/o error: {}", kind.clone()),
         }
     }
 }
@@ -41,7 +41,6 @@ impl Error for HashedFileError {
         None
     }
 }
-
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct FileRaw {
@@ -86,7 +85,11 @@ impl FileRaw {
         file_tree.relative_path(&self.path)
     }
 
-    pub fn relative_path_to(&self, file_tree: &FileTree, base: impl AsRef<path::Path>) -> path::PathBuf {
+    pub fn relative_path_to(
+        &self,
+        file_tree: &FileTree,
+        base: impl AsRef<path::Path>,
+    ) -> path::PathBuf {
         file_tree.relative_path_to(&self.path, base)
     }
 
@@ -103,9 +106,7 @@ impl FileRaw {
     }
 
     pub fn mtime_str(&self) -> Option<String> {
-        self.mtime.map(|m| {
-            Self::file_time_to_unix_time_float(m)
-        })
+        self.mtime.map(|m| Self::file_time_to_unix_time_float(m))
     }
 
     pub(crate) fn file_time_to_unix_time_float(time: filetime::FileTime) -> String {
@@ -131,17 +132,11 @@ impl FileRaw {
         self.hash_bytes.as_slice()
     }
 
-    pub(crate) fn with_context<'a>(
-        &'a self,
-        file_tree: &'a FileTree,
-    ) -> File<'a> {
+    pub(crate) fn with_context<'a>(&'a self, file_tree: &'a FileTree) -> File<'a> {
         File::from_raw(self, file_tree)
     }
 
-    pub(crate) fn with_context_mut<'a>(
-        &'a mut self,
-        file_tree: &'a FileTree,
-    ) -> FileMut<'a> {
+    pub(crate) fn with_context_mut<'a>(&'a mut self, file_tree: &'a FileTree) -> FileMut<'a> {
         FileMut::from_raw(self, file_tree)
     }
 }
@@ -167,7 +162,10 @@ pub(crate) struct FileMut<'a> {
 
 impl<'a> FileMut<'a> {
     pub fn from_raw(file: &'a mut FileRaw, file_tree: &'a FileTree) -> FileMut<'a> {
-        FileMut { file, context: file_tree }
+        FileMut {
+            file,
+            context: file_tree,
+        }
     }
 
     // NOTE: Use a closure here so we don't run into borrow/lifetime issues
@@ -179,7 +177,10 @@ impl<'a> FileMut<'a> {
     }
 
     pub fn as_file(&'a self) -> File<'a> {
-        File { file: self.file, context: self.context }
+        File {
+            file: self.file,
+            context: self.context,
+        }
     }
 
     pub fn update_size_and_mtime_from_disk(&mut self) -> Result<()> {
@@ -191,7 +192,7 @@ impl<'a> FileMut<'a> {
 
     pub fn update_hash_from_disk<P>(&mut self, progress: P) -> Result<()>
     where
-        P: FnMut((u64, u64))
+        P: FnMut((u64, u64)),
     {
         let hash_bytes = self.as_file().compute_hash(progress)?;
         self.file.hash_bytes = hash_bytes;
@@ -231,7 +232,10 @@ impl<'a> File<'a> {
         let path = self.absolute_path();
         let metadata = std::fs::metadata(&path)
             .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
-        Ok((metadata.len(), FileTime::from_last_modification_time(&metadata)))
+        Ok((
+            metadata.len(),
+            FileTime::from_last_modification_time(&metadata),
+        ))
     }
 
     #[allow(dead_code)]
@@ -278,20 +282,20 @@ impl<'a> File<'a> {
 
     pub fn compute_hash<P>(&self, progress: P) -> Result<Vec<u8>>
     where
-        P: FnMut((u64, u64))
+        P: FnMut((u64, u64)),
     {
         self.compute_hash_with(self.file.hash_type, progress)
     }
 
     pub fn compute_hash_with<P>(&self, hash_type: HashType, mut progress: P) -> Result<Vec<u8>>
     where
-        P: FnMut((u64, u64))
+        P: FnMut((u64, u64)),
     {
-
         let path = self.absolute_path();
         let file = fs::File::open(&path)
             .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?;
-        let bytes_total = file.metadata()
+        let bytes_total = file
+            .metadata()
             .map_err(|e| HashedFileError::IOError((Some(path.clone()), e.kind())))?
             .len();
         let reader = BufReader::new(file);
@@ -303,7 +307,10 @@ impl<'a> File<'a> {
     }
 
     pub(crate) fn from_raw(file: &'a FileRaw, file_tree: &'a FileTree) -> File<'a> {
-        File { file, context: file_tree }
+        File {
+            file,
+            context: file_tree,
+        }
     }
 
     // NOTE: Use a closure here so we don't run into borrow/lifetime issues
@@ -321,7 +328,6 @@ impl<'a> File<'a> {
     {
         func(self.file)
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,7 +376,11 @@ pub(crate) fn mtimes_match(a: Option<FileTime>, b: Option<FileTime>) -> bool {
     }
 }
 
-fn compute_hash<R: BufRead, P: FnMut(u64)>(reader: R, hash_type: HashType, progress: P) -> Result<Vec<u8>> {
+fn compute_hash<R: BufRead, P: FnMut(u64)>(
+    reader: R,
+    hash_type: HashType,
+    progress: P,
+) -> Result<Vec<u8>> {
     match hash_type {
         HashType::Md5 => {
             let mut hasher = md5::Md5::new();
@@ -421,31 +431,34 @@ fn compute_hash<R: BufRead, P: FnMut(u64)>(reader: R, hash_type: HashType, progr
             let mut hasher = sha3::Sha3_512::new();
             update_in_chunks(reader, &mut hasher, progress)?;
             Ok(hasher.finalize().to_vec())
-        }
-        // HashType::Shake128 => {
-        //     let mut hasher = sha3::Shake128::new();
-        //     update_in_chunks(reader, &mut hasher, progress)?;
-        //     Ok(hasher.finalize().to_vec())
-        // }
-        // HashType::Shake256 => {
-        //     let mut hasher = sha3::Shake256::new();
-        //     update_in_chunks(reader, &mut hasher, progress)?;
-        //     Ok(hasher.finalize().to_vec())
-        // }
-        // HashType::Blake2s => {
-        //     let mut hasher = blake2::Blake2s::new();
-        //     update_in_chunks(reader, &mut hasher, progress)?;
-        //     Ok(hasher.finalize().to_vec())
-        // }
-        // HashType::Blake2b => {
-        //     let mut hasher = blake2::Blake2b::new();
-        //     update_in_chunks(reader, &mut hasher, progress)?;
-        //     Ok(hasher.finalize().to_vec())
-        // }
+        } // HashType::Shake128 => {
+          //     let mut hasher = sha3::Shake128::new();
+          //     update_in_chunks(reader, &mut hasher, progress)?;
+          //     Ok(hasher.finalize().to_vec())
+          // }
+          // HashType::Shake256 => {
+          //     let mut hasher = sha3::Shake256::new();
+          //     update_in_chunks(reader, &mut hasher, progress)?;
+          //     Ok(hasher.finalize().to_vec())
+          // }
+          // HashType::Blake2s => {
+          //     let mut hasher = blake2::Blake2s::new();
+          //     update_in_chunks(reader, &mut hasher, progress)?;
+          //     Ok(hasher.finalize().to_vec())
+          // }
+          // HashType::Blake2b => {
+          //     let mut hasher = blake2::Blake2b::new();
+          //     update_in_chunks(reader, &mut hasher, progress)?;
+          //     Ok(hasher.finalize().to_vec())
+          // }
     }
 }
 
-fn update_in_chunks<R: BufRead, P: FnMut(u64)>(mut reader: R, hasher: &mut impl Digest, mut progress: P) -> Result<()> {
+fn update_in_chunks<R: BufRead, P: FnMut(u64)>(
+    mut reader: R,
+    hasher: &mut impl Digest,
+    mut progress: P,
+) -> Result<()> {
     // reading 64k (65536 bytes) chunks turned out to be most performant
     let mut buf = [0u8; 65536];
     loop {
@@ -503,18 +516,18 @@ mod test {
     #[test]
     fn file_time_to_unix_time_float() {
         assert_eq!(
-            FileRaw::file_time_to_unix_time_float(
-                FileTime::from_unix_time(1337, 1_330_000)),
-            "1337.00133");
+            FileRaw::file_time_to_unix_time_float(FileTime::from_unix_time(1337, 1_330_000)),
+            "1337.00133"
+        );
         assert_eq!(
-            FileRaw::file_time_to_unix_time_float(
-                FileTime::from_unix_time(1, 0)),
-            "1");
+            FileRaw::file_time_to_unix_time_float(FileTime::from_unix_time(1, 0)),
+            "1"
+        );
         // rounds due to floating point precision
         assert_eq!(
-            FileRaw::file_time_to_unix_time_float(
-                FileTime::from_unix_time(694201337, 694_201_337)),
-            "694201337.6942014");
+            FileRaw::file_time_to_unix_time_float(FileTime::from_unix_time(694201337, 694_201_337)),
+            "694201337.6942014"
+        );
     }
 
     #[test]
@@ -533,13 +546,16 @@ mod test {
     fn test_mtime_to_disk() {
         let (_testdir, _, _, _, ft, mut raw, _) = setup_testfile();
         let expected_mtime = filetime::FileTime::from_unix_time(1337, 1_300_000);
-        let mut file = FileMut::from_raw(&mut raw,  &ft);
+        let mut file = FileMut::from_raw(&mut raw, &ft);
 
         file.raw(|raw| raw.set_mtime(Some(expected_mtime)));
 
         file.as_file().mtime_to_disk().unwrap();
 
-        assert_eq!(file.as_file().fetch_size_and_mtime().unwrap().1, expected_mtime);
+        assert_eq!(
+            file.as_file().fetch_size_and_mtime().unwrap().1,
+            expected_mtime
+        );
     }
 
     #[test]
@@ -561,8 +577,13 @@ mod test {
 
         assert_eq!(file.compute_hash(|_| {}).unwrap(), expected);
 
-        let expected = hex::decode("c3ab8ff13720e8ad9047dd39466b3c8974e592c2fa383d4a3960714caef0c4f2").unwrap();
-        assert_eq!(file.compute_hash_with(HashType::Sha256, |_| {}).unwrap(), expected);
+        let expected =
+            hex::decode("c3ab8ff13720e8ad9047dd39466b3c8974e592c2fa383d4a3960714caef0c4f2")
+                .unwrap();
+        assert_eq!(
+            file.compute_hash_with(HashType::Sha256, |_| {}).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -571,10 +592,14 @@ mod test {
             setup_testfile();
         let file = File::from_raw(&mut raw, &ft);
 
-        assert_eq!(file.verify(|(read, total)| {
-            assert_eq!(read, 6);
-            assert_eq!(total, 6);
-        }).unwrap(), VerifyResult::Ok);
+        assert_eq!(
+            file.verify(|(read, total)| {
+                assert_eq!(read, 6);
+                assert_eq!(total, 6);
+            })
+            .unwrap(),
+            VerifyResult::Ok
+        );
     }
 
     #[test]
@@ -589,24 +614,32 @@ mod test {
         // this could be used to check the contents as well:
         // assert!(matches!(file.verify(), Err(HashedFileError::IOError(k))
         //         if k.kind() == std::io::ErrorKind::NotFound));
-        assert!(matches!(file.as_file().verify(|_| {}), Err(HashedFileError::MissingHash)));
+        assert!(matches!(
+            file.as_file().verify(|_| {}),
+            Err(HashedFileError::MissingHash)
+        ));
     }
 
     #[test]
     fn test_verify_missing_file() {
-        let (_testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw,&ft);
+        let (_testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) =
+            setup_testfile();
+        let file = File::from_raw(&mut raw, &ft);
 
         std::fs::remove_file(testfile_abs).unwrap();
 
         let result = file.verify(|_| {});
-        assert!(matches!(result, Ok(VerifyResult::FileMissing(std::io::ErrorKind::NotFound))));
+        assert!(matches!(
+            result,
+            Ok(VerifyResult::FileMissing(std::io::ErrorKind::NotFound))
+        ));
     }
 
     #[test]
     fn test_verify_mismatch_size() {
-        let (_testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw,&ft);
+        let (_testdir, _testfile_name, testfile_abs, _testcontent, ft, mut raw, _) =
+            setup_testfile();
+        let file = File::from_raw(&mut raw, &ft);
 
         std::fs::write(testfile_abs, "newsize1234").unwrap();
 
@@ -616,8 +649,9 @@ mod test {
 
     #[test]
     fn test_verify_mismatch() {
-        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
-        let file = File::from_raw(&mut raw,&ft);
+        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) =
+            setup_testfile();
+        let file = File::from_raw(&mut raw, &ft);
 
         let new_content = "foobaz";
         assert_eq!(testcontent.len(), new_content.len());
@@ -629,7 +663,8 @@ mod test {
 
     #[test]
     fn test_verify_mismatch_corrupted() {
-        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) =
+            setup_testfile();
         let mut file = FileMut::from_raw(&mut raw, &ft);
 
         let new_content = "foobaz";
@@ -644,7 +679,8 @@ mod test {
 
     #[test]
     fn test_verify_mismatch_outdated() {
-        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) = setup_testfile();
+        let (_testdir, _testfile_name, testfile_abs, testcontent, ft, mut raw, _) =
+            setup_testfile();
         let mut file = FileMut::from_raw(&mut raw, &ft);
         let (_, _current_mtime) = file.as_file().fetch_size_and_mtime().unwrap();
         // Use SystemTime (Unix epoch) for platform-independent arithmetic.

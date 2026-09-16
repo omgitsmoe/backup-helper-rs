@@ -49,7 +49,9 @@ impl StoredEntry {
     // E.g. { path: "/" }.file_name() -> "/"
     #[cfg(test)]
     pub fn file_name(&self) -> &std::ffi::OsStr {
-        self.path.file_name().unwrap_or_else(|| self.path.as_os_str())
+        self.path
+            .file_name()
+            .unwrap_or_else(|| self.path.as_os_str())
     }
 }
 
@@ -119,7 +121,10 @@ where
     }
 
     /// depth: new depth of the returned entries of [`directory`]
-    fn dir_entries(depth: u32, directory: impl AsRef<path::Path>) -> Result<Vec<Result<StoredEntry>>> {
+    fn dir_entries(
+        depth: u32,
+        directory: impl AsRef<path::Path>,
+    ) -> Result<Vec<Result<StoredEntry>>> {
         let directory = directory.as_ref();
         // NOTE: for dfs stable order: extract what we need to
         //       restore dfs state when popping the stack
@@ -127,9 +132,9 @@ where
         //       onto one file handle per depth level
         let dir = fs::read_dir(directory).map_err(|e| {
             Error::ReadDirectory((
-                    directory.to_owned(),
-                    format!("{}", e).into_boxed_str(),
-                    e.kind(),
+                directory.to_owned(),
+                format!("{}", e).into_boxed_str(),
+                e.kind(),
             ))
         })?;
 
@@ -138,16 +143,13 @@ where
         //       instead, keep the error and give that as iterator item
         let mut entries: Vec<Result<StoredEntry>> = dir
             .map(|entry| {
-                let d = entry.map_err(|e| Error::Iteration(format!("{:?}", e).into_boxed_str(), e.kind()))?;
+                let d = entry
+                    .map_err(|e| Error::Iteration(format!("{:?}", e).into_boxed_str(), e.kind()))?;
                 let ft = d.file_type().map_err(|e| {
-                    Error::ReadFileInfo((
-                        d.path(),
-                        format!("{:?}", e).into_boxed_str(),
-                        e.kind(),
-                    ))
+                    Error::ReadFileInfo((d.path(), format!("{:?}", e).into_boxed_str(), e.kind()))
                 })?;
 
-                Ok(StoredEntry{
+                Ok(StoredEntry {
                     path: d.path(),
                     ty: ft,
                     depth,
@@ -170,13 +172,16 @@ where
         // TODO: also emit ignored items, then we don't need the loop and callbacks become easier
         loop {
             let current = {
-                let StackEntry { depth, next_idx, entries } = self.directory_stack.last_mut()?;
+                let StackEntry {
+                    depth,
+                    next_idx,
+                    entries,
+                } = self.directory_stack.last_mut()?;
 
                 match next_idx {
                     Some(next_idx) => {
                         if *next_idx == entries.len() {
-                            let finished_dir = self.directory_stack.pop()
-                                .expect("checked above");
+                            let finished_dir = self.directory_stack.pop().expect("checked above");
                             return Some(Ok(VisitType::ListDirStop(finished_dir.depth)));
                         }
 
@@ -213,14 +218,12 @@ where
                     if is_dir {
                         match Self::dir_entries(c.depth + 1, &c.path) {
                             Ok(entries) => {
-                                self.directory_stack.push(
-                                    StackEntry{
-                                        depth: c.depth + 1,
-                                        next_idx: None,
-                                        entries,
-                                    }
-                                );
-                            },
+                                self.directory_stack.push(StackEntry {
+                                    depth: c.depth + 1,
+                                    next_idx: None,
+                                    entries,
+                                });
+                            }
                             Err(e) => return Some(Err(e)),
                         }
 
@@ -236,8 +239,8 @@ where
                     } else {
                         Ok(VisitType::SpecialFile((c.path.clone(), c.ty)))
                     }
-                },
-                Err(e) => return Some(Err(e.clone()))
+                }
+                Err(e) => return Some(Err(e.clone())),
             };
 
             return Some(iter_item);
@@ -332,10 +335,7 @@ mod test {
     use crate::{pathmatcher::PathMatcherBuilder, test_utils::*};
     use pretty_assertions::assert_eq;
 
-    fn gather_into_file_tree<F>(
-        file_tree: &mut FileTree,
-        include_fn: F,
-    ) -> Result<Vec<EntryHandle>>
+    fn gather_into_file_tree<F>(file_tree: &mut FileTree, include_fn: F) -> Result<Vec<EntryHandle>>
     where
         F: FnMut(Entry) -> bool,
     {
@@ -611,14 +611,13 @@ mod test {
                         .replace("\\", "/"),
                     v.relative_to_root.to_str().unwrap().replace('\\', "/"),
                 )),
-                VisitType::SpecialFile(_) => unreachable!("no special files expected")
+                VisitType::SpecialFile(_) => unreachable!("no special files expected"),
             }
         }
         let actual = visits.join("\n");
         println!("actual:\n{}", actual);
 
-        let order_dfs =
-r#"start d0
+        let order_dfs = r#"start d0
 dir d0 "abc" r"abc"
 start d1
 file d1 "abc/boo.txt" r"abc/boo.txt"
@@ -648,10 +647,7 @@ stop d1
 file d0 "vid.mp4" r"vid.mp4"
 stop d0"#;
 
-        assert_eq!(
-            actual,
-            order_dfs
-        );
+        assert_eq!(actual, order_dfs);
     }
 
     fn normalize(root: &path::Path, path: std::path::PathBuf) -> String {
@@ -951,7 +947,8 @@ vid.mp4"
             // NOTE: IMPRORTANT! need to return the reversed, since it's used
             //       to determine whether to descent into e.entry
             !e.ignored
-        }).unwrap();
+        })
+        .unwrap();
 
         for v in iter {
             match v {
@@ -1004,7 +1001,8 @@ vid.mp4"
             } else {
                 true
             }
-        }).unwrap();
+        })
+        .unwrap();
 
         for v in iter {
             match v {
@@ -1058,7 +1056,8 @@ vid.mp4"
             } else {
                 false
             }
-        }).unwrap();
+        })
+        .unwrap();
 
         for v in iter {
             match v {
@@ -1105,7 +1104,8 @@ vid.mp4"
             }
 
             true
-        }).unwrap();
+        })
+        .unwrap();
 
         for v in iter {
             let v = v.unwrap();
@@ -1138,7 +1138,8 @@ vid.mp4"
             }
 
             true
-        }).unwrap();
+        })
+        .unwrap();
 
         let mut visited_special_file = false;
         for v in iter {

@@ -1,4 +1,4 @@
-use crate::checksum_helper::{ChecksumHelperError, ChecksumHelperOptions, default_filename};
+use crate::checksum_helper::{default_filename, ChecksumHelperError, ChecksumHelperOptions};
 use crate::collection::HashCollection;
 use crate::file_tree::FileTree;
 use crate::gather::{Gather, VisitType};
@@ -38,7 +38,6 @@ where
     let mut most_current = HashCollection::new(Some(&most_current_path), None)
         .expect("creating an empty hash file collection must succeed");
 
-
     struct MTimePath<'a> {
         path: &'a std::path::Path,
         mtime: Option<SystemTime>,
@@ -47,9 +46,13 @@ where
         std::fs::metadata(p).and_then(|m| m.modified()).ok()
     }
 
-    let mut files = discover_result.hash_file_paths
+    let mut files = discover_result
+        .hash_file_paths
         .iter()
-        .map(|p| MTimePath{ path: p, mtime: mtime(p) })
+        .map(|p| MTimePath {
+            path: p,
+            mtime: mtime(p),
+        })
         .collect::<Vec<_>>();
 
     // NOTE: sort by ascending mtime, so the newer collection overwrites
@@ -60,13 +63,11 @@ where
     //       as older and keep the other entries and most_current __has no mtime__
     //       we could assign max(most_current.mtime, hc.mtime) while iterating,
     //       but this also solves testing issues, so prefer this
-    files.sort_by(|a, b| {
-        match (a.mtime, b.mtime) {
-            (Some(a), Some(b)) => a.cmp(&b),
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
+    files.sort_by(|a, b| match (a.mtime, b.mtime) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     });
 
     for MTimePath { path, .. } in files {
@@ -126,7 +127,7 @@ where
         if let VisitType::File(v) = visit_data {
             files.push(v.entry.path);
         }
-    };
+    }
 
     Ok(DiscoverResult {
         hash_file_paths: files,
@@ -756,18 +757,14 @@ d4ca4c74d827424ca5e6cb552cc039d3 *bar.mp4
 ac06ffd974d80119666da2b17d1595c9 *baz/file.txt\
 ";
         let foo_bar_file_md5_path = testdir.join("foo").join("bar").join("file.md5");
-        std::fs::write(
+        std::fs::write(&foo_bar_file_md5_path, foo_bar_file_md5_contents).unwrap();
+        filetime::set_file_mtime(
             &foo_bar_file_md5_path,
-            foo_bar_file_md5_contents,
+            filetime::FileTime::from_unix_time(200, 0),
         )
         .unwrap();
-        filetime::set_file_mtime(&foo_bar_file_md5_path, filetime::FileTime::from_unix_time(200, 0))
-            .unwrap();
 
-        let deleted = vec![
-            "bar/other.txt",
-            "vid.mp4",
-        ];
+        let deleted = vec!["bar/other.txt", "vid.mp4"];
         (testdir, deleted)
     }
 
@@ -793,10 +790,7 @@ ac06ffd974d80119666da2b17d1595c9 *baz/file.txt\
 ,,md5,d4ca4c74d827424ca5e6cb552cc039d3 foo/bar/bar.mp4
 ";
 
-        assert_eq!(
-            most_current.to_str(&ft).unwrap(),
-            expected,
-        );
+        assert_eq!(most_current.to_str(&ft).unwrap(), expected,);
     }
 
     #[test]
@@ -808,7 +802,6 @@ ac06ffd974d80119666da2b17d1595c9 *baz/file.txt\
         let mut ft = FileTree::new(&testdir).unwrap();
 
         let most_current = update_most_current(&testdir, &mut ft, &options, |_| {}).unwrap();
-
 
         for deleted_path in deleted_relative {
             assert!(!most_current.contains_path(deleted_path, &ft));
@@ -823,10 +816,7 @@ ac06ffd974d80119666da2b17d1595c9 *baz/file.txt\
 ,,md5,d4ca4c74d827424ca5e6cb552cc039d3 foo/bar/bar.mp4
 ";
 
-        assert_eq!(
-            most_current.to_str(&ft).unwrap(),
-            expected,
-        );
+        assert_eq!(most_current.to_str(&ft).unwrap(), expected,);
     }
 
     #[test]

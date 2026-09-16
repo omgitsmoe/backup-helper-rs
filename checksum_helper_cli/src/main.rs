@@ -8,8 +8,8 @@ use checksum_helper::hash_type::HashType as HashTypeLib;
 mod build;
 mod incremental;
 mod modify;
-mod verify;
 mod progress;
+mod verify;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -120,7 +120,6 @@ impl MostCurrentArgs {
             .most_current_filter_deleted(!self.keep_deleted)
             .hash_files_matcher(matcher.build()?))
     }
-
 }
 
 #[derive(Args, Debug)]
@@ -150,8 +149,7 @@ impl VerifyMatcherArgs {
             builder = builder.block(block)?;
         }
 
-        builder
-            .build()
+        builder.build()
     }
 }
 
@@ -201,7 +199,9 @@ impl IncrementalArgs {
             matcher = matcher.block(block)?;
         }
 
-        Ok(self.most_current.apply(options)?
+        Ok(self
+            .most_current
+            .apply(options)?
             .hash_type(self.hash_type.into())
             .incremental_include_unchanged_files(!self.no_include_unchanged)
             .incremental_skip_unchanged(self.skip_unchanged)
@@ -211,7 +211,6 @@ impl IncrementalArgs {
             )
             .all_files_matcher(matcher.build()?))
     }
-
 }
 
 #[derive(Subcommand)]

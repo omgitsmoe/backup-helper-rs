@@ -1,7 +1,10 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path;
 
-use checksum_helper::{hash_type, pathmatcher::{PathMatcher, PathMatcherBuilder}};
+use checksum_helper::{
+    hash_type,
+    pathmatcher::{PathMatcher, PathMatcherBuilder},
+};
 
 use crate::{backup_helper::DiskHandle, disks::Disk, reconcile::Reconcile, target::Target};
 

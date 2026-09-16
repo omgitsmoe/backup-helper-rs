@@ -5,9 +5,7 @@ use std::io::Write;
 pub use testdir::testdir;
 
 pub fn to_file_list(ft: &FileTree) -> String {
-    let mut paths: Vec<_> = ft.iter()
-        .map(|handle| ft.relative_path(&handle))
-        .collect();
+    let mut paths: Vec<_> = ft.iter().map(|handle| ft.relative_path(&handle)).collect();
 
     // Sort alphabetically for deterministic output
     paths.sort();
@@ -30,7 +28,6 @@ pub fn to_file_list(ft: &FileTree) -> String {
 
     result
 }
-
 
 pub fn file_handles_to_file_list(ft: &FileTree, handles: &Vec<EntryHandle>) -> String {
     let mut result = vec![];
