@@ -1,22 +1,26 @@
+use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{path, sync::Arc};
-use std::error::Error;
 
 use checksum_helper::pathmatcher::PathMatcherError;
 use checksum_helper::{ChecksumHelperError, collection::HashCollectionError};
 use clap::{Args, Parser, Subcommand};
 
-use crate::{backup_helper::BackupHelper, scheduler::{Scheduler, SchedulerShared}};
+use crate::{
+    backup_helper::BackupHelper,
+    scheduler::{Scheduler, SchedulerShared},
+};
 
+mod backup_helper;
+mod copy;
+mod disks;
+mod parse;
+mod progress;
 mod reconcile;
+mod scheduler;
 mod source;
 mod target;
-mod parse;
-mod disks;
-mod backup_helper;
 mod task;
-mod scheduler;
-mod copy;
 mod task_log;
 
 #[cfg(test)]
@@ -35,39 +39,38 @@ enum BackupHelperError {
     Interrupted,
 }
 
-impl Error for BackupHelperError {
-}
+impl Error for BackupHelperError {}
 
 impl std::fmt::Display for BackupHelperError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
             BackupHelperError::IoError(e) => {
                 write!(f, "IoError: {}", e)
-            },
+            }
             BackupHelperError::InvalidConfig(e) => {
                 write!(f, "InvalidConfig: {}", e)
-            },
+            }
             BackupHelperError::InvalidState(e) => {
                 write!(f, "InvalidState: {}", e)
-            },
+            }
             BackupHelperError::ReconcileConflict(e) => {
                 write!(f, "ReconcileConflict: {}", e)
-            },
+            }
             BackupHelperError::SchedulerError(e) => {
                 write!(f, "Scheduler: {}", e)
-            },
+            }
             BackupHelperError::ChecksumHelperError(e) => {
                 write!(f, "ChecksumHelper: {}", e)
-            },
+            }
             BackupHelperError::CopyError(e) => {
                 write!(f, "CopyError: {}", e)
-            },
+            }
             BackupHelperError::TaskError(e) => {
                 write!(f, "TaskError: {}", e)
-            },
+            }
             BackupHelperError::Interrupted => {
                 write!(f, "UserInterrupt")
-            },
+            }
         }
     }
 }

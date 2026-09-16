@@ -1,8 +1,9 @@
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 
+use crate::progress::{self, ProgressEvent};
 use crate::task::{TaskContext, TaskOutcome};
 use crate::{
     BackupHelperError,
@@ -86,9 +87,7 @@ impl SchedulerShared {
             )
         })?;
 
-        Ok(shared.core.into_inner()
-            .expect("worker panicked")
-            .close())
+        Ok(shared.core.into_inner().expect("worker panicked").close())
     }
 
     pub fn request_cancel(&self) {
@@ -171,14 +170,17 @@ impl SchedulerCore {
                 if !target.is_transferred() {
                     target_copy_task_id = Some(self.tasks.len());
                     let dependencies = match source_task_id {
-                            None => vec![],
-                            Some(source_task_id) => vec![source_task_id],
+                        None => vec![],
+                        Some(source_task_id) => vec![source_task_id],
                     };
 
                     self.tasks.push(TaskEntry {
-                        task: Task::SourceToTargetCopy(SourceToTargetCopy{
+                        task: Task::SourceToTargetCopy(SourceToTargetCopy {
                             common: CommonData {
-                                involved_disks: Box::<[DiskHandle; 2]>::new([source_disk, target_disk]),
+                                involved_disks: Box::<[DiskHandle; 2]>::new([
+                                    source_disk,
+                                    target_disk,
+                                ]),
                             },
                             source_idx: source_index,
                             target_idx: target_index,
@@ -195,15 +197,15 @@ impl SchedulerCore {
 
                 if target.verify() && !target.is_verified() {
                     let dependencies = match (source_task_id, target_copy_task_id) {
-                            (None, None) => vec![],
-                            (Some(_), None) => {
-                                unreachable!("source must be done before target copy can be done")
-                            }
-                            (None, Some(target_copy_task_id)) => vec![target_copy_task_id],
-                            (Some(source_task_id), Some(target_copy_task_id)) => {
-                                vec![source_task_id, target_copy_task_id]
-                            }
-                        };
+                        (None, None) => vec![],
+                        (Some(_), None) => {
+                            unreachable!("source must be done before target copy can be done")
+                        }
+                        (None, Some(target_copy_task_id)) => vec![target_copy_task_id],
+                        (Some(source_task_id), Some(target_copy_task_id)) => {
+                            vec![source_task_id, target_copy_task_id]
+                        }
+                    };
                     self.tasks.push(TaskEntry {
                         task: Task::TargetVerify(TargetVerify {
                             common: CommonData {
@@ -242,9 +244,10 @@ impl SchedulerCore {
                 continue;
             }
 
-            let can_run = task.involved_disks().iter().try_fold(
-                true,
-                |can_run, disk| {
+            let can_run = task
+                .involved_disks()
+                .iter()
+                .try_fold(true, |can_run, disk| {
                     if !can_run || self.disks_busy[disk.0] {
                         return Ok(false);
                     }
@@ -252,8 +255,8 @@ impl SchedulerCore {
                     self.state.disks()[disk.0].is_mounted()
                 })?;
 
-            if can_run &&
-                selected
+            if can_run
+                && selected
                     .map(|id| task.priority > self.tasks[id].priority)
                     .unwrap_or(true)
             {
@@ -298,26 +301,31 @@ impl SchedulerCore {
                 // update other tasks that might have become ready
                 for &dependent in &self.dependents[task_id] {
                     let entry = &mut self.tasks[dependent];
-                    if entry.state != TaskState::Pending { continue; }
+                    if entry.state != TaskState::Pending {
+                        continue;
+                    }
 
                     entry.remaining_deps -= 1;
                     if entry.remaining_deps == 0 {
                         entry.state = TaskState::Ready;
                     }
                 }
-            },
+            }
             Err(e) => {
                 task.state = TaskState::Failed;
                 self.errors.push(e);
                 self.mark_failed_dependents(task_id);
-            },
+            }
         }
     }
 
     fn update_state(&mut self, task_id: TaskId, outcome: TaskOutcome) {
         let task = &mut self.tasks[task_id].task;
         match outcome {
-            TaskOutcome::SourceHash { hash_file, hash_log_file } => {
+            TaskOutcome::SourceHash {
+                hash_file,
+                hash_log_file,
+            } => {
                 let Task::SourceHash(task) = task else {
                     unreachable!("outcome doesn't match task");
                 };
@@ -325,7 +333,7 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 source.set_hash_file(hash_file);
                 source.set_hash_log_file(hash_log_file);
-            },
+            }
             TaskOutcome::SourceToTargetCopy => {
                 let Task::SourceToTargetCopy(task) = task else {
                     unreachable!("outcome doesn't match task");
@@ -334,7 +342,7 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
                 target.transferred();
-            },
+            }
             TaskOutcome::SourceToTargetSync => {
                 let Task::SourceToTargetSync(task) = task else {
                     unreachable!("outcome doesn't match task");
@@ -343,7 +351,7 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
                 target.transferred();
-            },
+            }
             TaskOutcome::TargetVerify(verified_info) => {
                 let Task::TargetVerify(task) = task else {
                     unreachable!("outcome doesn't match task");
@@ -352,23 +360,26 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
                 target.verified(verified_info);
-            },
+            }
         }
     }
 
     fn mark_failed_dependents(&mut self, task_id: TaskId) {
         for i in 0..self.dependents[task_id].len() {
             let dependent = self.dependents[task_id][i];
-            if self.tasks[dependent].state != TaskState::Pending { continue; }
+            if self.tasks[dependent].state != TaskState::Pending {
+                continue;
+            }
 
             self.tasks[dependent].state = TaskState::Failed;
             self.mark_failed_dependents(dependent);
         }
     }
 
-    pub fn context(&self, task: &Task) -> TaskContext {
+    pub fn context(&self, task_id: TaskId, task: &Task) -> TaskContext {
         match task {
             Task::SourceHash(t) => TaskContext {
+                task_id,
                 source_path: Some(self.state.sources()[t.source_idx].path().to_path_buf()),
                 target_path: None,
                 hash_file: None,
@@ -382,6 +393,7 @@ impl SchedulerCore {
             Task::SourceToTargetCopy(t) => {
                 let source = &self.state.sources()[t.source_idx];
                 TaskContext {
+                    task_id,
                     source_path: Some(source.path().to_path_buf()),
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
@@ -392,6 +404,7 @@ impl SchedulerCore {
             Task::SourceToTargetSync(t) => {
                 let source = &self.state.sources()[t.source_idx];
                 TaskContext {
+                    task_id,
                     source_path: Some(source.path().to_path_buf()),
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
@@ -402,6 +415,7 @@ impl SchedulerCore {
             Task::TargetVerify(t) => {
                 let source = &self.state.sources()[t.source_idx];
                 TaskContext {
+                    task_id,
                     source_path: Some(source.path().to_path_buf()),
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: source.hash_file().to_owned(),
@@ -425,7 +439,7 @@ impl SchedulerCore {
     }
 }
 
-fn worker(scheduler: &Scheduler) {
+fn worker(scheduler: &Scheduler, progress: mpsc::Sender<ProgressEvent>) {
     loop {
         let guard = scheduler.core.lock().unwrap();
         let mut core = guard;
@@ -466,11 +480,11 @@ fn worker(scheduler: &Scheduler) {
         };
 
         let task = core.start_task(task_id);
-        let ctx = core.context(&task);
+        let ctx = core.context(task_id, &task);
 
         drop(core);
 
-        let outcome = task.execute(&ctx);
+        let outcome = task.execute(&ctx, &progress);
 
         let guard = scheduler.core.lock().unwrap();
         let mut core = guard;
@@ -481,24 +495,38 @@ fn worker(scheduler: &Scheduler) {
         // task is done, others might become runnable
         scheduler.runnable.notify_all();
 
-        if done { break; }
+        if done {
+            break;
+        }
     }
 }
 
 pub fn run(scheduler: &Scheduler) -> Result<()> {
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+
+    let reporter = thread::spawn(move || {
+        progress::progress_reporter(progress_rx);
+    });
+
     let handles = (0..scheduler.worker_count())
         .map(|i| {
             let sched = Arc::clone(scheduler);
+            let progress_tx = progress_tx.clone();
+
             thread::Builder::new()
                 .name(format!("worker-{i}"))
-                .spawn(move || worker(&sched))
+                .spawn(move || worker(&sched, progress_tx))
                 .expect("failed to spawn worker")
         })
         .collect::<Vec<_>>();
 
+    drop(progress_tx);
+
     for h in handles {
         h.join().expect("worker panicked");
     }
+
+    reporter.join().expect("progress reporter panicked");
 
     if scheduler.cancel_requested() {
         return Err(BackupHelperError::Interrupted);
@@ -520,14 +548,14 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
         }
 
         match &guard.fatal_error {
-            None => {},
+            None => {}
             Some(e) => {
                 if !first {
                     combined.push('\n');
                 }
 
                 write!(combined, "Fatal error: {}", e).unwrap();
-            },
+            }
         }
 
         Err(BackupHelperError::SchedulerError(combined))
@@ -644,7 +672,6 @@ mod tests {
     fn dependencies_are_released_in_order() {
         let root = testdir!();
         let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
-
         assert_eq!(core.tasks.len(), 3);
         assert_eq!(core.tasks[0].state, TaskState::Ready);
         assert_eq!(core.tasks[1].dependencies, vec![0]);
@@ -710,10 +737,7 @@ mod tests {
         let root = testdir!();
         let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
         core.start_task(0);
-        core.finish_task(
-            0,
-            Err(BackupHelperError::TaskError("source failed".into())),
-        );
+        core.finish_task(0, Err(BackupHelperError::TaskError("source failed".into())));
 
         assert_eq!(core.tasks[0].state, TaskState::Failed);
         assert_eq!(core.tasks[1].state, TaskState::Failed);
@@ -922,15 +946,13 @@ mod tests {
         let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
 
         core.start_task(0);
-        core.finish_task(
-            0,
-            Err(BackupHelperError::TaskError("source failed".into())),
-        );
+        core.finish_task(0, Err(BackupHelperError::TaskError("source failed".into())));
 
-        assert!(core
-            .tasks
-            .iter()
-            .all(|task| task.state == TaskState::Failed));
+        assert!(
+            core.tasks
+                .iter()
+                .all(|task| task.state == TaskState::Failed)
+        );
         assert!(core.finished());
     }
 
@@ -943,29 +965,33 @@ mod tests {
         std::fs::write(source_path.join("file.txt"), "content").unwrap();
 
         let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+        let (progress, _progress_rx) = mpsc::channel();
 
         let source_task = core.start_task(0);
-        let mut source_context = core.context(&source_task);
+        let mut source_context = core.context(0, &source_task);
         source_context.log_directory = Some(root.clone());
-        let source_outcome = source_task.execute(&source_context).unwrap();
+        let source_outcome = source_task.execute(&source_context, &progress).unwrap();
         let hash_file = match &source_outcome {
             TaskOutcome::SourceHash { hash_file, .. } => hash_file.clone(),
             _ => panic!("source task returned the wrong outcome"),
         };
         core.finish_task(0, Ok(source_outcome));
-        assert_eq!(core.state.sources()[0].hash_file(), &Some(hash_file.clone()));
+        assert_eq!(
+            core.state.sources()[0].hash_file(),
+            &Some(hash_file.clone())
+        );
 
         let copy_task = core.start_task(1);
-        let copy_context = core.context(&copy_task);
-        let copy_outcome = copy_task.execute(&copy_context).unwrap();
+        let copy_context = core.context(1, &copy_task);
+        let copy_outcome = copy_task.execute(&copy_context, &progress).unwrap();
         std::fs::copy(&hash_file, target_path.join(hash_file.file_name().unwrap())).unwrap();
         core.finish_task(1, Ok(copy_outcome));
         assert!(core.state.sources()[0].targets()[0].is_transferred());
 
         let verify_task = core.start_task(2);
-        let mut verify_context = core.context(&verify_task);
+        let mut verify_context = core.context(2, &verify_task);
         verify_context.log_directory = Some(root.clone());
-        let verify_outcome = verify_task.execute(&verify_context).unwrap();
+        let verify_outcome = verify_task.execute(&verify_context, &progress).unwrap();
         core.finish_task(2, Ok(verify_outcome));
         assert!(core.state.sources()[0].targets()[0].is_verified());
 
@@ -984,10 +1010,7 @@ mod tests {
         let root = testdir!();
         let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
         core.start_task(0);
-        core.finish_task(
-            0,
-            Err(BackupHelperError::TaskError("source failed".into())),
-        );
+        core.finish_task(0, Err(BackupHelperError::TaskError("source failed".into())));
         let scheduler = Arc::new(SchedulerShared {
             core: Mutex::new(core),
             runnable: Condvar::new(),
@@ -1009,13 +1032,17 @@ mod tests {
         scheduler.request_cancel();
         assert!(scheduler.cancel_requested());
 
-        assert!(matches!(run(&scheduler), Err(BackupHelperError::Interrupted)));
+        assert!(matches!(
+            run(&scheduler),
+            Err(BackupHelperError::Interrupted)
+        ));
 
         let core = scheduler.core.lock().unwrap();
-        assert!(core
-            .tasks
-            .iter()
-            .all(|task| matches!(task.state, TaskState::Pending | TaskState::Ready)));
+        assert!(
+            core.tasks
+                .iter()
+                .all(|task| matches!(task.state, TaskState::Pending | TaskState::Ready))
+        );
     }
 
     #[test]

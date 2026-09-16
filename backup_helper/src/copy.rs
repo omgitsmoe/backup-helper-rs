@@ -1,10 +1,14 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use crate::BackupHelperError;
 
 pub fn copy_tree(
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
+    mut on_progress: impl FnMut(CopyProgress),
 ) -> Result<(), BackupHelperError> {
     let source = source.as_ref();
     let destination = destination.as_ref();
@@ -30,13 +34,19 @@ pub fn copy_tree(
 
     let iter =
         WalkTree::new(source).map_err(|error| copy_io_error("walk source", source, error))?;
-    copy_tree_entries(source, destination, iter)
+    copy_tree_entries(source, destination, iter, &mut on_progress)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyProgress {
+    pub relative_path: PathBuf,
 }
 
 fn copy_tree_entries(
     source: &Path,
     destination: &Path,
     mut iter: WalkTree,
+    on_progress: &mut impl FnMut(CopyProgress),
 ) -> Result<(), BackupHelperError> {
     for entry in iter.by_ref() {
         let source_path = entry.entry.path();
@@ -64,6 +74,10 @@ fn copy_tree_entries(
             fs::copy(&source_path, &destination_path)
                 .map_err(|error| copy_io_error("copy source file", &source_path, error))?;
         }
+
+        on_progress(CopyProgress {
+            relative_path: relative.to_path_buf(),
+        });
     }
 
     if let Some(err) = iter.error() {
@@ -252,7 +266,7 @@ mod tests {
     fn copy_tree_rejects_same_source_and_destination() {
         let root = testdir!();
 
-        let result = copy_tree(&root, &root);
+        let result = copy_tree(&root, &root, |_| {});
 
         assert!(
             matches!(result, Err(BackupHelperError::CopyError(message)) if message.contains("same path"))
@@ -264,7 +278,7 @@ mod tests {
         let root = testdir!();
         let source = root.join("missing-source");
 
-        let result = copy_tree(&source, root.join("destination"));
+        let result = copy_tree(&source, root.join("destination"), |_| {});
 
         assert!(matches!(
             result,
@@ -279,7 +293,7 @@ mod tests {
         let source = root.join("source");
         fs::write(&source, "not a directory").unwrap();
 
-        let result = copy_tree(&source, root.join("destination"));
+        let result = copy_tree(&source, root.join("destination"), |_| {});
 
         assert!(matches!(
             result,
@@ -296,7 +310,7 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(&destination, "not a directory").unwrap();
 
-        let result = copy_tree(&source, &destination);
+        let result = copy_tree(&source, &destination, |_| {});
 
         assert!(matches!(
             result,
@@ -314,7 +328,7 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(&file_parent, "not a directory").unwrap();
 
-        let result = copy_tree(&source, &destination);
+        let result = copy_tree(&source, &destination, |_| {});
 
         assert!(matches!(
             result,
@@ -328,7 +342,7 @@ mod tests {
         let root = testdir!();
         let destination = root.join("nested/destination");
 
-        let result = copy_tree(&root, &destination);
+        let result = copy_tree(&root, &destination, |_| {});
 
         assert!(
             matches!(result, Err(BackupHelperError::CopyError(message)) if message.contains("inside source"))
@@ -342,7 +356,7 @@ mod tests {
         let source = root.join("source");
         fs::create_dir(&source).unwrap();
 
-        let result = copy_tree(&source, &root);
+        let result = copy_tree(&source, &root, |_| {});
 
         assert!(
             matches!(result, Err(BackupHelperError::CopyError(message)) if message.contains("inside destination"))
@@ -356,7 +370,7 @@ mod tests {
         let destination = root.join("destination");
         fs::create_dir(&source).unwrap();
 
-        let result = copy_tree(&source, &destination);
+        let result = copy_tree(&source, &destination, |_| {});
 
         assert!(result.is_ok());
     }
@@ -374,7 +388,11 @@ mod tests {
         create_file_symlink(&nested.join("file.txt"), &source.join("file-link"));
         create_dir_symlink(&nested, &source.join("dir-link"));
 
-        copy_tree(&source, &destination).unwrap();
+        let mut progress = Vec::new();
+        copy_tree(&source, &destination, |entry| {
+            progress.push(entry.relative_path);
+        })
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(destination.join("nested/file.txt")).unwrap(),
@@ -390,6 +408,9 @@ mod tests {
         );
         assert!(!destination.join("dir-link").exists());
         assert!(!destination.join("dir-link/file.txt").exists());
+        assert!(progress.contains(&PathBuf::from("nested")));
+        assert!(progress.contains(&PathBuf::from("nested/file.txt")));
+        assert!(progress.contains(&PathBuf::from("regular.txt")));
     }
 
     #[test]
@@ -403,7 +424,7 @@ mod tests {
             error: Some(io::Error::other("forced iterator failure")),
         };
 
-        let result = copy_tree_entries(&source, &destination, iter);
+        let result = copy_tree_entries(&source, &destination, iter, &mut |_| {});
 
         assert!(matches!(
             result,

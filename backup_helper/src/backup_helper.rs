@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path;
 
-use crate::{disks::Disk, parse::Parsed, reconcile::Reconcile, source::Source, BackupHelperError};
+use crate::{BackupHelperError, disks::Disk, parse::Parsed, reconcile::Reconcile, source::Source};
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 
@@ -180,9 +180,8 @@ mod tests {
     use testdir::testdir;
 
     fn reconcile_state(state: &str, config: &str) -> Result<Value> {
-        let mut helper = BackupHelper::from_state(
-            &crate::test_utils::config_with_absolute_paths(state),
-        )?;
+        let mut helper =
+            BackupHelper::from_state(&crate::test_utils::config_with_absolute_paths(state))?;
         helper.reconcile(parse::parse(
             &crate::test_utils::config_with_absolute_paths(config),
         )?)?;
