@@ -1,7 +1,8 @@
 use std::{path, sync::mpsc::Sender};
 
 use checksum_helper::{
-    ChecksumHelper, ChecksumHelperOptions, collection, hashed_file::VerifyResult,
+    ChecksumHelper, ChecksumHelperOptions, checksum_helper::IncrementalProgress, collection,
+    hashed_file::VerifyResult,
 };
 
 use crate::{
@@ -24,6 +25,25 @@ pub enum Task {
 }
 
 impl Task {
+    pub fn description(&self, ctx: &TaskContext) -> String {
+        match self {
+            Task::SourceHash(_) => format!("hash {:?}", ctx.source_path.as_deref().unwrap()),
+            Task::SourceToTargetCopy(_) => format!(
+                "copy {:?} -> {:?}",
+                ctx.source_path.as_deref().unwrap(),
+                ctx.target_path.as_deref().unwrap()
+            ),
+            Task::SourceToTargetSync(_) => format!(
+                "sync {:?} -> {:?}",
+                ctx.source_path.as_deref().unwrap(),
+                ctx.target_path.as_deref().unwrap()
+            ),
+            Task::TargetVerify(_) => {
+                format!("verify {:?}", ctx.target_path.as_deref().unwrap())
+            }
+        }
+    }
+
     pub fn involved_disks(&self) -> &[DiskHandle] {
         match self {
             Task::SourceHash(t) => &t.common.involved_disks[..],
@@ -38,12 +58,38 @@ impl Task {
         ctx: &TaskContext,
         progress: &Sender<ProgressEvent>,
     ) -> Result<TaskOutcome, BackupHelperError> {
-        match self {
+        progress::report(
+            progress,
+            ProgressEvent::Started {
+                task_id: ctx.task_id,
+                description: self.description(ctx),
+            },
+        );
+
+        let outcome = match self {
             Task::SourceHash(t) => t.execute(ctx, progress),
             Task::SourceToTargetCopy(t) => t.execute(ctx, progress),
             Task::SourceToTargetSync(t) => t.execute(ctx, progress),
             Task::TargetVerify(t) => t.execute(ctx, progress),
+        };
+
+        match &outcome {
+            Ok(_) => progress::report(
+                progress,
+                ProgressEvent::Finished {
+                    task_id: ctx.task_id,
+                },
+            ),
+            Err(error) => progress::report(
+                progress,
+                ProgressEvent::Failed {
+                    task_id: ctx.task_id,
+                    message: error.to_string(),
+                },
+            ),
         }
+
+        outcome
     }
 }
 
@@ -73,10 +119,6 @@ impl TaskExecutor for SourceHash {
         ctx: &TaskContext,
         progress_tx: &Sender<ProgressEvent>,
     ) -> Result<TaskOutcome, BackupHelperError> {
-        let thread = std::thread::current();
-        let name = thread.name().unwrap_or("<unnamed>");
-        println!("{name}: Executing SourceHash");
-
         let source_path = ctx
             .source_path
             .as_ref()
@@ -101,13 +143,15 @@ impl TaskExecutor for SourceHash {
         let mut log = TaskLog::new(source_path, "SourceHash", ctx.log_directory.as_deref())?;
         let mut log_error = None;
         let collection = ch.incremental(|progress| {
-            progress::report(
-                progress_tx,
-                ProgressEvent::Test {
-                    task_id: ctx.task_id,
-                    test: format!("{:?}", progress),
-                },
-            );
+            if let Some(message) = incremental_progress_message(&progress) {
+                progress::report(
+                    progress_tx,
+                    ProgressEvent::Updated {
+                        task_id: ctx.task_id,
+                        message,
+                    },
+                );
+            }
 
             if log_error.is_none()
                 && let Err(error) = log.report_incremental(&progress)
@@ -143,10 +187,6 @@ impl TaskExecutor for SourceToTargetCopy {
         ctx: &TaskContext,
         progress_tx: &Sender<ProgressEvent>,
     ) -> Result<TaskOutcome, BackupHelperError> {
-        let thread = std::thread::current();
-        let name = thread.name().unwrap_or("<unnamed>");
-        println!("{name}: Executing SourceToTargetCopy");
-
         let source_path = ctx
             .source_path
             .as_ref()
@@ -169,9 +209,9 @@ impl TaskExecutor for SourceToTargetCopy {
         copy::copy_tree(source_path, target_path, |progress| {
             progress::report(
                 progress_tx,
-                ProgressEvent::Test {
+                ProgressEvent::Updated {
                     task_id: ctx.task_id,
-                    test: format!("copied {:?}", progress.relative_path),
+                    message: format!("copied {:?}", progress.relative_path),
                 },
             );
         })?;
@@ -193,10 +233,6 @@ impl TaskExecutor for SourceToTargetSync {
         _ctx: &TaskContext,
         _progress_tx: &Sender<ProgressEvent>,
     ) -> Result<TaskOutcome, BackupHelperError> {
-        let thread = std::thread::current();
-        let name = thread.name().unwrap_or("<unnamed>");
-        println!("{name}: Executing SourceToTargetSync");
-
         todo!("implement sync")
     }
 }
@@ -214,10 +250,6 @@ impl TaskExecutor for TargetVerify {
         ctx: &TaskContext,
         progress_tx: &Sender<ProgressEvent>,
     ) -> Result<TaskOutcome, BackupHelperError> {
-        let thread = std::thread::current();
-        let name = thread.name().unwrap_or("<unnamed>");
-        println!("{name}: Executing TargetVerify");
-
         let source_hash_file = ctx
             .hash_file
             .as_ref()
@@ -258,9 +290,9 @@ impl TaskExecutor for TargetVerify {
 
                     progress::report(
                         progress_tx,
-                        ProgressEvent::Test {
+                        ProgressEvent::Updated {
                             task_id: ctx.task_id,
-                            test: format!("{:?}", verify_progress_post),
+                            message: verify_progress_message(&path, verify_progress_post.result),
                         },
                     );
 
@@ -299,6 +331,38 @@ impl TaskExecutor for TargetVerify {
     }
 }
 
+fn incremental_progress_message(progress: &IncrementalProgress) -> Option<String> {
+    match progress {
+        IncrementalProgress::FileMatch(path) => Some(format!("[OK   ] {:?} unchanged", path)),
+        IncrementalProgress::FileUnchangedSkipped(path) => {
+            Some(format!("[SKIP ] {:?} (unchanged, skipped)", path))
+        }
+        IncrementalProgress::FileChanged(path) => Some(format!("[CHG  ] {:?} modified", path)),
+        IncrementalProgress::FileChangedCorrupted(path) => {
+            Some(format!("[CORR ] {:?} corrupted", path))
+        }
+        IncrementalProgress::FileChangedOlder(path) => {
+            Some(format!("[OLD  ] {:?} local newer than hash", path))
+        }
+        IncrementalProgress::FileNew(path) => Some(format!("[NEW  ] {:?}", path)),
+        IncrementalProgress::FileRemoved(path) => Some(format!("[DEL  ] {:?}", path)),
+        _ => None,
+    }
+}
+
+fn verify_progress_message(path: &path::Path, result: VerifyResult) -> String {
+    let status = match result {
+        VerifyResult::Ok => "[OK        ]",
+        VerifyResult::FileMissing(_) => "[ERR MISS  ]",
+        VerifyResult::Mismatch => "[ERR HASH  ]",
+        VerifyResult::MismatchSize => "[ERR SIZE  ]",
+        VerifyResult::MismatchCorrupted => "[ERR CORR  ]",
+        VerifyResult::MismatchOutdatedHash => "[WARN STALE]",
+    };
+
+    format!("{status} {:?}", path)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskContext {
     pub(crate) task_id: usize,
@@ -326,6 +390,7 @@ mod tests {
     use super::*;
     use crate::source::HashType;
     use std::fs;
+    use std::panic::AssertUnwindSafe;
     use std::path::Path;
     use std::sync::mpsc;
     use testdir::testdir;
@@ -502,6 +567,50 @@ mod tests {
     }
 
     #[test]
+    fn execute_source_hash_reports_progress_lifecycle() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        fs::create_dir(&source_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let task = Task::SourceHash(SourceHash {
+            common: common(&[0]),
+            source_idx: 0,
+            options: ChecksumOptions::default(),
+        });
+        let (progress, events) = mpsc::channel();
+
+        task.execute(
+            &TaskContext {
+                task_id: 10,
+                source_path: Some(source_path.clone()),
+                target_path: None,
+                hash_file: None,
+                checksum_options: Some(ChecksumOptions::default()),
+                log_directory: Some(testdir),
+            },
+            &progress,
+        )
+        .unwrap();
+
+        let events: Vec<_> = events.try_iter().collect();
+        assert!(matches!(
+            events.first(),
+            Some(ProgressEvent::Started { task_id: 10, description })
+                if description.contains("hash") && description.contains("source")
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::Updated { task_id: 10, message }
+                if message.contains("[NEW  ]") && message.contains("file.txt")
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ProgressEvent::Finished { task_id: 10 })
+        ));
+    }
+
+    #[test]
     fn execute_source_hash_uses_configured_hash_type() {
         let testdir = testdir!();
         let source_path = testdir.join("source");
@@ -603,7 +712,7 @@ mod tests {
         let events: Vec<_> = progress_events.try_iter().collect();
         assert!(events.iter().any(|event| matches!(
             event,
-            ProgressEvent::Test { task_id: 0, test } if test.contains("file.txt")
+            ProgressEvent::Updated { task_id: 0, message } if message.contains("file.txt")
         )));
 
         assert_eq!(
@@ -656,6 +765,53 @@ mod tests {
             fs::read_to_string(target_path.join("file.txt")).unwrap(),
             "content"
         );
+    }
+
+    #[test]
+    fn execute_copy_reports_progress_lifecycle() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let task = Task::SourceToTargetCopy(SourceToTargetCopy {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+        });
+        let (progress, events) = mpsc::channel();
+
+        task.execute(
+            &TaskContext {
+                task_id: 11,
+                source_path: Some(source_path.clone()),
+                target_path: Some(target_path.clone()),
+                hash_file: None,
+                checksum_options: None,
+                log_directory: None,
+            },
+            &progress,
+        )
+        .unwrap();
+
+        let events: Vec<_> = events.try_iter().collect();
+        assert!(matches!(
+            events.first(),
+            Some(ProgressEvent::Started { task_id: 11, description })
+                if description.contains("copy")
+                    && description.contains(&*source_path.to_string_lossy())
+                    && description.contains(&*target_path.to_string_lossy())
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::Updated { task_id: 11, message }
+                if message.contains("copied") && message.contains("file.txt")
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ProgressEvent::Finished { task_id: 11 })
+        ));
     }
 
     #[test]
@@ -744,6 +900,93 @@ mod tests {
             &verified.log_file,
             &["[OK        ]", "file.txt", "checked: 1", "errors: 0"],
         );
+    }
+
+    #[test]
+    fn execute_target_verify_reports_progress_lifecycle() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("file.txt"), "content").unwrap();
+
+        let hash_file = hash_source(&source_path);
+        fs::copy(source_path.join("file.txt"), target_path.join("file.txt")).unwrap();
+        copy_collection(&hash_file, &target_path);
+
+        let task = Task::TargetVerify(TargetVerify {
+            common: common(&[1]),
+            source_idx: 0,
+            target_idx: 0,
+        });
+        let (progress, events) = mpsc::channel();
+
+        task.execute(
+            &TaskContext {
+                task_id: 12,
+                source_path: Some(source_path),
+                target_path: Some(target_path.clone()),
+                hash_file: Some(hash_file),
+                checksum_options: None,
+                log_directory: Some(testdir),
+            },
+            &progress,
+        )
+        .unwrap();
+
+        let events: Vec<_> = events.try_iter().collect();
+        assert!(matches!(
+            events.first(),
+            Some(ProgressEvent::Started { task_id: 12, description })
+                if description.contains("verify") && description.contains("target")
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::Updated { task_id: 12, message }
+                if message.contains("[OK        ]") && message.contains("file.txt")
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ProgressEvent::Finished { task_id: 12 })
+        ));
+    }
+
+    #[test]
+    fn execute_sync_reports_started_before_not_implemented_panic() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+
+        let task = Task::SourceToTargetSync(SourceToTargetSync {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+        });
+        let (progress, events) = mpsc::channel();
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            task.execute(
+                &TaskContext {
+                    task_id: 13,
+                    source_path: Some(source_path),
+                    target_path: Some(target_path),
+                    hash_file: None,
+                    checksum_options: None,
+                    log_directory: None,
+                },
+                &progress,
+            )
+        }));
+
+        assert!(result.is_err());
+        assert!(matches!(
+            events.try_iter().next(),
+            Some(ProgressEvent::Started { task_id: 13, description })
+                if description.contains("sync")
+        ));
     }
 
     #[test]
