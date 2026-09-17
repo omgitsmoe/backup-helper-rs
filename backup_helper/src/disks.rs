@@ -7,6 +7,18 @@ use std::os::unix::fs::MetadataExt;
 
 type Result<T> = std::result::Result<T, crate::BackupHelperError>;
 
+pub(crate) trait DiskMountChecker: Send + Sync {
+    fn is_mounted(&self, disk: &Disk) -> std::io::Result<bool>;
+}
+
+pub(crate) struct SystemDiskMountChecker;
+
+impl DiskMountChecker for SystemDiskMountChecker {
+    fn is_mounted(&self, disk: &Disk) -> std::io::Result<bool> {
+        disk.is_mounted()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Disk {
     pub(crate) name: String,

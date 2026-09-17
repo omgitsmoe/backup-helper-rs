@@ -8,6 +8,7 @@ use crate::task::{TaskContext, TaskOutcome};
 use crate::{
     BackupHelperError,
     backup_helper::{BackupHelper, DiskHandle},
+    disks::{DiskMountChecker, SystemDiskMountChecker},
     source::Source,
     target::Target,
     task::{CommonData, SourceHash, SourceToTargetCopy, TargetVerify, Task},
@@ -17,6 +18,8 @@ type Result<T> = std::result::Result<T, BackupHelperError>;
 
 pub struct SchedulerCore {
     state: BackupHelper,
+    mount_checker: Arc<dyn DiskMountChecker>,
+    log_directory: Option<std::path::PathBuf>,
     // all tasks
     // indexed by TaskId
     tasks: Vec<TaskEntry>,
@@ -68,8 +71,15 @@ pub enum TaskState {
 
 impl SchedulerShared {
     pub fn new(state: BackupHelper) -> Result<Self> {
+        Self::new_with_mount_checker(state, Arc::new(SystemDiskMountChecker))
+    }
+
+    pub(crate) fn new_with_mount_checker(
+        state: BackupHelper,
+        mount_checker: Arc<dyn DiskMountChecker>,
+    ) -> Result<Self> {
         Ok(Self {
-            core: Mutex::new(SchedulerCore::new(state)?),
+            core: Mutex::new(SchedulerCore::new_with_mount_checker(state, mount_checker)?),
             runnable: Condvar::new(),
             cancel_requested: AtomicBool::new(false),
         })
@@ -102,10 +112,20 @@ impl SchedulerShared {
 }
 
 impl SchedulerCore {
+    #[cfg(test)]
     pub fn new(state: BackupHelper) -> Result<Self> {
+        Self::new_with_mount_checker(state, Arc::new(SystemDiskMountChecker))
+    }
+
+    pub(crate) fn new_with_mount_checker(
+        state: BackupHelper,
+        mount_checker: Arc<dyn DiskMountChecker>,
+    ) -> Result<Self> {
         let disks_busy = state.disks().iter().map(|_| false).collect();
         let mut s = Self {
             state,
+            mount_checker,
+            log_directory: None,
             tasks: vec![],
             dependents: vec![],
             errors: vec![],
@@ -252,7 +272,7 @@ impl SchedulerCore {
                         return Ok(false);
                     }
 
-                    self.state.disks()[disk.0].is_mounted()
+                    self.mount_checker.is_mounted(&self.state.disks()[disk.0])
                 })?;
 
             if can_run
@@ -388,7 +408,7 @@ impl SchedulerCore {
                         .checksum_options()
                         .clone(),
                 ),
-                log_directory: None,
+                log_directory: self.log_directory.clone(),
             },
             Task::SourceToTargetCopy(t) => {
                 let source = &self.state.sources()[t.source_idx];
@@ -398,7 +418,7 @@ impl SchedulerCore {
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
                     checksum_options: None,
-                    log_directory: None,
+                    log_directory: self.log_directory.clone(),
                 }
             }
             Task::SourceToTargetSync(t) => {
@@ -409,7 +429,7 @@ impl SchedulerCore {
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: None,
                     checksum_options: None,
-                    log_directory: None,
+                    log_directory: self.log_directory.clone(),
                 }
             }
             Task::TargetVerify(t) => {
@@ -420,7 +440,7 @@ impl SchedulerCore {
                     target_path: Some(source.targets()[t.target_idx].path().to_path_buf()),
                     hash_file: source.hash_file().to_owned(),
                     checksum_options: None,
-                    log_directory: None,
+                    log_directory: self.log_directory.clone(),
                 }
             }
         }
@@ -565,10 +585,18 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse, target::VerifiedInfo};
+    use crate::{disks::Disk, parse, target::VerifiedInfo};
     use serde_json::Value;
     use std::path::Path;
     use testdir::testdir;
+
+    struct MountedDiskChecker;
+
+    impl DiskMountChecker for MountedDiskChecker {
+        fn is_mounted(&self, _disk: &Disk) -> std::io::Result<bool> {
+            Ok(true)
+        }
+    }
 
     fn state(config: &str) -> BackupHelper {
         let mut state = BackupHelper::default();
@@ -599,8 +627,10 @@ mod tests {
     fn state_with_verify(config: &str, verify: bool) -> BackupHelper {
         let serialized = state(config).serialize().unwrap();
         let mut json: Value = serde_json::from_str(&serialized).unwrap();
-        for target in json["sources"][0]["targets"].as_array_mut().unwrap() {
-            target["verify"] = verify.into();
+        for source in json["sources"].as_array_mut().unwrap() {
+            for target in source["targets"].as_array_mut().unwrap() {
+                target["verify"] = verify.into();
+            }
         }
 
         BackupHelper::from_state(&serde_json::to_string(&json).unwrap()).unwrap()
@@ -648,6 +678,34 @@ mod tests {
                 target {second_target} {{ transfer_mode copy verify {verify} }}
             }}
         "#
+        )
+    }
+
+    fn parallel_config(root: &Path) -> String {
+        let disk_a = path_literal(&root.join("disk-a"));
+        let disk_b = path_literal(&root.join("disk-b"));
+        let disk_c = path_literal(&root.join("disk-c"));
+        let disk_d = path_literal(&root.join("disk-d"));
+        let source_a = path_literal(&root.join("disk-a/source"));
+        let target_a = path_literal(&root.join("disk-b/target"));
+        let source_c = path_literal(&root.join("disk-c/source"));
+        let target_c = path_literal(&root.join("disk-d/target"));
+
+        format!(
+            r#"
+            disks {{
+                disk "a" {{ path {disk_a} }}
+                disk "b" {{ path {disk_b} }}
+                disk "c" {{ path {disk_c} }}
+                disk "d" {{ path {disk_d} }}
+            }}
+            source {source_a} {{
+                target {target_a} {{ transfer_mode copy verify #false }}
+            }}
+            source {source_c} {{
+                target {target_c} {{ transfer_mode copy verify #false }}
+            }}
+            "#
         )
     }
 
@@ -918,6 +976,42 @@ mod tests {
     }
 
     #[test]
+    fn tasks_sharing_a_disk_are_serialized_but_disjoint_tasks_can_run_in_parallel() {
+        let root = testdir!();
+        let checker = Arc::new(MountedDiskChecker);
+        let mut core = SchedulerCore::new_with_mount_checker(
+            state_with_verify(&parallel_config(&root), false),
+            checker,
+        )
+        .unwrap();
+
+        assert_eq!(core.tasks.len(), 4);
+        assert_eq!(core.pick_next().unwrap(), Some(0));
+
+        core.start_task(0);
+        assert_eq!(core.disks_busy, vec![true, false, false, false]);
+
+        // The second source hash uses disk C, so it can run while source A is
+        // being hashed. A task using disk A must remain unavailable.
+        assert_eq!(core.pick_next().unwrap(), Some(2));
+        core.start_task(2);
+        assert_eq!(core.disks_busy, vec![true, false, true, false]);
+        assert_eq!(core.pick_next().unwrap(), None);
+
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        core.finish_task(
+            2,
+            Ok(TaskOutcome::SourceHash {
+                hash_file: root.join("source-c.sha512"),
+                hash_log_file: root.join("source-c.log"),
+            }),
+        );
+
+        assert_eq!(core.disks_busy, vec![false, false, false, false]);
+        assert_eq!(core.pick_next().unwrap(), Some(1));
+    }
+
+    #[test]
     fn failed_copy_does_not_mark_unrelated_target_transferred() {
         let root = testdir!();
         let mut core =
@@ -1003,6 +1097,112 @@ mod tests {
         assert!(reloaded.sources()[0].targets()[0].is_verified());
         let reloaded_core = SchedulerCore::new(reloaded).unwrap();
         assert!(reloaded_core.tasks.is_empty());
+    }
+
+    #[test]
+    fn end_to_end_run_works_with_temporary_directories() {
+        let root = testdir!();
+        let source_path = root.join("source-disk/source");
+        let target_path = root.join("target-disk/target");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::create_dir_all(&target_path).unwrap();
+        std::fs::write(source_path.join("file.txt"), "content").unwrap();
+        std::fs::create_dir_all(source_path.join("nested/deeper")).unwrap();
+        std::fs::create_dir_all(source_path.join("another")).unwrap();
+        std::fs::write(source_path.join("nested/child.txt"), "nested content").unwrap();
+        std::fs::write(
+            source_path.join("nested/deeper/leaf.bin"),
+            [0, 1, 2, 127, 128, 255],
+        )
+        .unwrap();
+        std::fs::write(source_path.join("another/file.txt"), "another content").unwrap();
+
+        let scheduler = Arc::new(
+            SchedulerShared::new_with_mount_checker(
+                state(&normal_config(&root)),
+                Arc::new(MountedDiskChecker),
+            )
+            .unwrap(),
+        );
+        scheduler.core.lock().unwrap().log_directory = Some(root.clone());
+
+        run(&scheduler).unwrap();
+        let state = scheduler.close().unwrap();
+        let state_path = root.join("state.json");
+        state.persist(&state_path).unwrap();
+        let persisted_state = BackupHelper::from_file(&state_path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target_path.join("file.txt")).unwrap(),
+            "content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target_path.join("nested/child.txt")).unwrap(),
+            "nested content"
+        );
+        assert_eq!(
+            std::fs::read(target_path.join("nested/deeper/leaf.bin")).unwrap(),
+            [0, 1, 2, 127, 128, 255]
+        );
+        assert_eq!(
+            std::fs::read_to_string(target_path.join("another/file.txt")).unwrap(),
+            "another content"
+        );
+        assert!(persisted_state.sources()[0].targets()[0].is_transferred());
+        assert!(persisted_state.sources()[0].targets()[0].is_verified());
+    }
+
+    #[test]
+    fn modified_source_is_reported_by_verification_after_copy() {
+        let root = testdir!();
+        let source_path = root.join("source-disk/source");
+        let target_path = root.join("target-disk/target");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::create_dir_all(&target_path).unwrap();
+        let source_file = source_path.join("file.txt");
+        std::fs::write(&source_file, "before data").unwrap();
+
+        let mut core = SchedulerCore::new_with_mount_checker(
+            state(&normal_config(&root)),
+            Arc::new(MountedDiskChecker),
+        )
+        .unwrap();
+        core.log_directory = Some(root.clone());
+        let (progress, _progress_rx) = mpsc::channel();
+
+        let hash_task = core.start_task(0);
+        let hash_context = core.context(0, &hash_task);
+        let hash_outcome = hash_task.execute(&hash_context, &progress).unwrap();
+        core.finish_task(0, Ok(hash_outcome));
+
+        std::fs::write(&source_file, "after data!").unwrap();
+
+        let scheduler = Arc::new(SchedulerShared {
+            core: Mutex::new(core),
+            runnable: Condvar::new(),
+            cancel_requested: AtomicBool::new(false),
+        });
+        run(&scheduler).unwrap();
+        let state = scheduler.close().unwrap();
+        let target = &state.sources()[0].targets()[0];
+        let serialized: Value = serde_json::from_str(&state.serialize().unwrap()).unwrap();
+        let verified = &serialized["sources"][0]["targets"][0]["verified"];
+        let log_file = verified["log_file"].as_str().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target_path.join("file.txt")).unwrap(),
+            "after data!"
+        );
+        assert_eq!(verified["checked"], 1);
+        assert_eq!(verified["errors"], 1);
+        assert_eq!(verified["crc_errors"], 1);
+        assert!(
+            std::fs::read_to_string(log_file)
+                .unwrap()
+                .contains("[WARN STALE]")
+        );
+        assert!(target.is_transferred());
+        assert!(target.is_verified());
     }
 
     #[test]
