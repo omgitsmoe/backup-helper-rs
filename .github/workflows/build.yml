@@ -1,0 +1,60 @@
+name: Build executables
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Build on Ubuntu 20.04
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build release executables
+        run: |
+          docker run --rm \
+            --volume "${{ github.workspace }}:/workspace" \
+            --workdir /workspace \
+            ubuntu:20.04 \
+            bash -euc '
+            apt-get update
+            apt-get install --yes --no-install-recommends build-essential ca-certificates curl pkg-config
+            curl --proto https --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal
+            source "$HOME/.cargo/env"
+            cargo build --locked --release -p backup_helper -p checksum_helper_cli
+          '
+
+      - name: Upload Linux executables
+        uses: actions/upload-artifact@v5
+        with:
+          name: executables-linux-x86_64
+          path: |
+            target/release/backup_helper
+            target/release/checksum_helper_cli
+
+  windows:
+    name: Build on Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build release executables
+        run: cargo build --locked --release -p backup_helper -p checksum_helper_cli
+
+      - name: Upload Windows executables
+        uses: actions/upload-artifact@v5
+        with:
+          name: executables-windows-x86_64
+          path: |
+            target/release/backup_helper.exe
+            target/release/checksum_helper_cli.exe
