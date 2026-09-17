@@ -873,6 +873,39 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_after_hash_and_transfer_preserves_state_and_only_schedules_verification() {
+        let root = testdir!();
+        let config = normal_config(&root);
+        let mut core = SchedulerCore::new(state(&config)).unwrap();
+
+        core.start_task(0);
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        core.start_task(1);
+        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+
+        let mut helper = core.close();
+        assert!(helper.sources()[0].hash_file().is_some());
+        assert!(helper.sources()[0].targets()[0].is_transferred());
+        assert!(!helper.sources()[0].targets()[0].is_verified());
+
+        helper.reconcile(parse::parse(&config).unwrap()).unwrap();
+
+        assert!(helper.sources()[0].hash_file().is_some());
+        assert!(helper.sources()[0].targets()[0].is_transferred());
+        assert!(!helper.sources()[0].targets()[0].is_verified());
+
+        let mut core = SchedulerCore::new(helper).unwrap();
+        assert_eq!(core.tasks.len(), 1);
+        assert!(matches!(core.tasks[0].task, Task::TargetVerify(_)));
+        assert!(core.tasks[0].dependencies.is_empty());
+
+        core.start_task(0);
+        core.finish_task(0, Ok(verify_outcome(&root)));
+        assert!(core.state.sources()[0].targets()[0].is_verified());
+        assert!(core.finished());
+    }
+
+    #[test]
     fn existing_source_hash_makes_copy_ready_without_a_dependency() {
         let root = testdir!();
         let source_disk = path_literal(&root.join("source-disk"));
