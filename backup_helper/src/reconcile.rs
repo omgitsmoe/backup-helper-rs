@@ -15,8 +15,6 @@ pub fn reconcile(args: ReconcileArgs) -> Result<()> {
     bh.reconcile(parsed)?;
     bh.persist(&args.common.state)?;
 
-    println!("after reconcile:\n{}", bh.serialize()?);
-
     Ok(())
 }
 
