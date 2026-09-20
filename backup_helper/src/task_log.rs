@@ -13,6 +13,16 @@ pub(crate) struct TaskLog {
     verify: VerifyCounts,
 }
 
+pub(crate) enum TaskLogType<'a> {
+    SourceHash {
+        root: &'a Path,
+    },
+    TargetVerify {
+        root: &'a Path,
+        checksum_file: &'a Path,
+    },
+}
+
 #[derive(Default)]
 struct IncrementalCounts {
     unchanged: u64,
@@ -35,10 +45,16 @@ struct VerifyCounts {
 
 impl TaskLog {
     pub(crate) fn new(
-        subject: &Path,
-        task: &str,
+        log_type: TaskLogType<'_>,
         output_directory: Option<&Path>,
     ) -> io::Result<Self> {
+        let (subject, task, header_label, header_path) = match log_type {
+            TaskLogType::SourceHash { root } => (root, "SourceHash", "Root", root),
+            TaskLogType::TargetVerify {
+                root,
+                checksum_file,
+            } => (root, "TargetVerify", "Checksum file", checksum_file),
+        };
         let prefix = sanitized_path_prefix(subject);
         let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S");
         let filename = format!("{prefix}_{task}_{timestamp}.log");
@@ -49,16 +65,22 @@ impl TaskLog {
         let path = directory.join(filename);
         let writer = BufWriter::new(File::create(&path)?);
 
-        Ok(Self {
+        let mut log = Self {
             path,
             writer,
             incremental: IncrementalCounts::default(),
             verify: VerifyCounts::default(),
-        })
+        };
+        log.write_path_header(header_label, header_path)?;
+        Ok(log)
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn write_path_header(&mut self, label: &str, path: &Path) -> io::Result<()> {
+        writeln!(self.writer, "{label}: {:?}", absolute_path(path)?)
     }
 
     pub(crate) fn report_incremental(&mut self, progress: &IncrementalProgress) -> io::Result<()> {
@@ -182,9 +204,17 @@ fn sanitized_path_prefix(path: &Path) -> String {
     result[start..].to_owned()
 }
 
+fn absolute_path(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TaskLog, sanitized_path_prefix};
+    use super::{TaskLog, TaskLogType, sanitized_path_prefix};
     use checksum_helper::{checksum_helper::IncrementalProgress, hashed_file::VerifyResult};
     use std::path::Path;
     use testdir::testdir;
@@ -209,7 +239,8 @@ mod tests {
     fn reports_all_incremental_statuses_and_summary_counts() {
         let root = testdir!();
         let subject = root.join("source");
-        let mut log = TaskLog::new(&subject, "SourceHash", Some(&root)).unwrap();
+        let mut log =
+            TaskLog::new(TaskLogType::SourceHash { root: &subject }, Some(&root)).unwrap();
 
         let statuses = [
             IncrementalProgress::FileMatch("unchanged.txt".into()),
@@ -230,6 +261,8 @@ mod tests {
         let log_path = log.path().to_owned();
         drop(log);
         let contents = std::fs::read_to_string(log_path).unwrap();
+        let expected_root = format!("Root: {:?}", subject);
+        assert_eq!(contents.lines().next(), Some(expected_root.as_str()));
 
         for expected in [
             "[OK   ] \"unchanged.txt\" unchanged",
@@ -259,7 +292,15 @@ mod tests {
     fn reports_all_verification_statuses_and_summary_counts() {
         let root = testdir!();
         let subject = root.join("target");
-        let mut log = TaskLog::new(&subject, "TargetVerify", Some(&root)).unwrap();
+        let checksum_file = subject.join("checksums.cshd");
+        let mut log = TaskLog::new(
+            TaskLogType::TargetVerify {
+                root: &subject,
+                checksum_file: &checksum_file,
+            },
+            Some(&root),
+        )
+        .unwrap();
 
         for (path, result) in [
             ("ok.txt", VerifyResult::Ok),
@@ -279,6 +320,11 @@ mod tests {
         let log_path = log.path().to_owned();
         drop(log);
         let contents = std::fs::read_to_string(log_path).unwrap();
+        let expected_checksum_file = format!("Checksum file: {:?}", checksum_file);
+        assert_eq!(
+            contents.lines().next(),
+            Some(expected_checksum_file.as_str())
+        );
 
         for expected in [
             "[OK        ] \"ok.txt\"",

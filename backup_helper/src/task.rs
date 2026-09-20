@@ -12,7 +12,7 @@ use crate::{
     progress::{self, ProgressEvent},
     source::ChecksumOptions,
     target::VerifiedInfo,
-    task_log::TaskLog,
+    task_log::{TaskLog, TaskLogType},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +142,10 @@ impl TaskExecutor for SourceHash {
             .hash_files_matcher(checksum_options.checksum_files.clone().try_into()?)
             .all_files_matcher(checksum_options.all_files.clone().try_into()?);
         let mut ch = ChecksumHelper::with_options(source_path, options)?;
-        let mut log = TaskLog::new(source_path, "SourceHash", ctx.log_directory.as_deref())?;
+        let mut log = TaskLog::new(
+            TaskLogType::SourceHash { root: source_path },
+            ctx.log_directory.as_deref(),
+        )?;
         let mut log_error = None;
         let collection = ch.incremental(|progress| {
             if let Some(message) = incremental_progress_message(&progress) {
@@ -268,7 +271,13 @@ impl TaskExecutor for TargetVerify {
         let target_collection_path = target_path.join(collection_file_name);
 
         let collection = ch.read_collection(&target_collection_path)?;
-        let mut log = TaskLog::new(target_path, "TargetVerify", ctx.log_directory.as_deref())?;
+        let mut log = TaskLog::new(
+            TaskLogType::TargetVerify {
+                root: target_path,
+                checksum_file: &target_collection_path,
+            },
+            ctx.log_directory.as_deref(),
+        )?;
         let mut log_error = None;
         let mut verified = VerifiedInfo {
             checked: 0,
@@ -443,7 +452,15 @@ mod tests {
             panic!("SourceHash task returned the wrong outcome");
         };
 
-        assert_log_contains(&hash_log_file, &["[NEW  ]", "Summary:", "Done."]);
+        assert_log_contains(
+            &hash_log_file,
+            &[
+                &format!("Root: {:?}", source_path),
+                "[NEW  ]",
+                "Summary:",
+                "Done.",
+            ],
+        );
 
         hash_file
     }
@@ -471,7 +488,17 @@ mod tests {
         let TaskOutcome::TargetVerify(verified) = outcome else {
             panic!("TargetVerify task returned the wrong outcome");
         };
-        assert_log_contains(&verified.log_file, &["Summary:", "Done."]);
+        assert_log_contains(
+            &verified.log_file,
+            &[
+                &format!(
+                    "Checksum file: {:?}",
+                    target_path.join(hash_file.file_name().unwrap())
+                ),
+                "Summary:",
+                "Done.",
+            ],
+        );
         verified
     }
 
@@ -544,7 +571,7 @@ mod tests {
             .execute(
                 &TaskContext {
                     task_id: 0,
-                    source_path: Some(source_path),
+                    source_path: Some(source_path.clone()),
                     target_path: None,
                     hash_file: None,
                     checksum_options: Some(ChecksumOptions::default()),
@@ -564,7 +591,14 @@ mod tests {
         assert!(hash_file.is_file());
         assert_log_contains(
             &hash_log_file,
-            &["[NEW  ]", "file.txt", "Summary:", "  new: 1", "Done."],
+            &[
+                &format!("Root: {:?}", source_path),
+                "[NEW  ]",
+                "file.txt",
+                "Summary:",
+                "  new: 1",
+                "Done.",
+            ],
         );
     }
 
@@ -900,7 +934,16 @@ mod tests {
         assert_eq!(verified.crc_errors, 0);
         assert_log_contains(
             &verified.log_file,
-            &["[OK        ]", "file.txt", "checked: 1", "errors: 0"],
+            &[
+                &format!(
+                    "Checksum file: {:?}",
+                    target_path.join(hash_file.file_name().unwrap())
+                ),
+                "[OK        ]",
+                "file.txt",
+                "checked: 1",
+                "errors: 0",
+            ],
         );
     }
 
