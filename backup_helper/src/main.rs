@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{path, sync::Arc};
 
 use checksum_helper::pathmatcher::PathMatcherError;
@@ -175,14 +175,24 @@ fn start(args: CommonArgs) -> std::result::Result<(), BackupHelperError> {
     let bh = BackupHelper::from_file(&args.state)?;
     let scheduler = Scheduler::new(SchedulerShared::new(bh)?);
 
+    let state_path = args.state.clone();
     let cancellation_request_count = Arc::new(AtomicUsize::new(0));
     const EXIT_AFTER_COUNT_CANCEL_REQUESTS: usize = 3;
+    // guard against spamming Ctrl+C writing to state multiple times
+    let persist_done = Arc::new(AtomicBool::new(false));
     let signal_scheduler = Arc::downgrade(&scheduler);
     ctrlc::set_handler(move || {
         let count = cancellation_request_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         if count >= EXIT_AFTER_COUNT_CANCEL_REQUESTS {
-            eprintln!("Forced exit...");
+            eprintln!("Forced exit; persisting state...");
+            // guard so only one handler thread writes, even on a burst of Ctrl-C
+            if !persist_done.swap(true, Ordering::AcqRel)
+                && let Some(scheduler) = signal_scheduler.upgrade()
+                && let Err(e) = scheduler.persist_state(&state_path)
+            {
+                eprintln!("Failed to persist state on forced exit: {e}");
+            }
             std::process::exit(130);
         }
 

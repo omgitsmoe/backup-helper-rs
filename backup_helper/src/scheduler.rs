@@ -106,6 +106,15 @@ impl SchedulerShared {
         self.runnable.notify_all();
     }
 
+    /// Writes the current scheduler state to `path` under the core lock, so the
+    /// snapshot cannot contain half-applied task outcomes. Used to persist
+    /// completed tasks before a forced (third Ctrl-C) exit.
+    pub fn persist_state(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        // Recover from a poisoned lock so a worker panic doesn't block the snapshot.
+        let guard = self.core.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.state.persist(path)
+    }
+
     pub fn cancel_requested(&self) -> bool {
         self.cancel_requested.load(Ordering::Acquire)
     }
@@ -1299,5 +1308,62 @@ mod tests {
             panic!("expected a scheduler error");
         };
         assert!(message.contains("Fatal error: Scheduler: ready tasks cannot run"));
+    }
+
+    #[test]
+    fn persist_state_snapshots_completed_tasks() {
+        let root = testdir!();
+        let core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+        let scheduler = Arc::new(SchedulerShared {
+            core: Mutex::new(core),
+            runnable: Condvar::new(),
+            cancel_requested: AtomicBool::new(false),
+        });
+
+        // finish the source hash
+        scheduler.core.lock().unwrap().start_task(0);
+        scheduler
+            .core
+            .lock()
+            .unwrap()
+            .finish_task(0, Ok(source_hash_outcome(&root)));
+
+        // finish the copy
+        scheduler.core.lock().unwrap().start_task(1);
+        scheduler
+            .core
+            .lock()
+            .unwrap()
+            .finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+
+        let state_path = root.join("state.json");
+        scheduler.persist_state(&state_path).unwrap();
+
+        let reloaded = BackupHelper::from_file(&state_path).unwrap();
+        assert_eq!(
+            reloaded.sources()[0].hash_file(),
+            &Some(root.join("source.sha512"))
+        );
+        assert!(reloaded.sources()[0].targets()[0].is_transferred());
+    }
+
+    #[test]
+    fn persist_state_excludes_in_flight_tasks() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+        core.start_task(0); // the hash starts but never finishes
+
+        let scheduler = Arc::new(SchedulerShared {
+            core: Mutex::new(core),
+            runnable: Condvar::new(),
+            cancel_requested: AtomicBool::new(false),
+        });
+
+        let state_path = root.join("state.json");
+        scheduler.persist_state(&state_path).unwrap();
+
+        let reloaded = BackupHelper::from_file(&state_path).unwrap();
+        assert_eq!(reloaded.sources()[0].hash_file(), &None);
+        assert!(!reloaded.sources()[0].targets()[0].is_transferred());
     }
 }
