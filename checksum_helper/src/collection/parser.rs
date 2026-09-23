@@ -8,6 +8,7 @@ use hex;
 use log::{error, warn};
 use pathdiff::diff_paths;
 
+use std::borrow::Cow;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -79,46 +80,125 @@ pub fn parse_single_hash<R: BufRead>(
     collection_path: impl AsRef<Path>,
     file_tree: &mut FileTree,
 ) -> Result<HashCollection> {
+    let mut reader = reader;
     let mut result = HashCollection::new(Some(&collection_path), None)
         .expect("should always succeed without root");
     let prefix = ft_to_collection_root_prefix(&result, file_tree)?;
-    for line in reader.lines() {
-        match line {
-            Ok(line) => {
-                // programs like TotalCmd used to write a BOM
-                let line = line.strip_prefix('\u{feff}').unwrap_or(&line);
-                let (hash_hex, mut file_path) = line.split_once(' ').ok_or_else(|| {
-                    HashCollectionError::InvalidSingleHashLine((line.to_string(), "".to_string()))
-                })?;
-                // strip ' ' (text mode) and '*' (binary mode) from GNU md5sum-style files
-                if file_path.starts_with(' ') || file_path.starts_with('*') {
-                    file_path = &file_path[1..];
-                }
-                let file_path = prefix.join(file_path);
-                let path_handle = file_tree
-                    .add(&file_path, false)
-                    .map_err(HashCollectionError::FileTreeError)?;
-                result.update(
-                    path_handle.clone(),
-                    FileRaw::new(
-                        path_handle.clone(),
-                        None,
-                        None,
-                        hash_type,
-                        hex::decode(hash_hex).map_err(|_| {
-                            HashCollectionError::InvalidSingleHashLine((
-                                hash_hex.to_string(),
-                                format!("{:?}", file_path),
-                            ))
-                        })?,
-                    ),
-                )
-            }
-            Err(e) => return Err(HashCollectionError::IOError(e.kind())),
-        };
+    let mut line_buf = Vec::new();
+    let mut first_line = true;
+    let mut warned_encoding_fallback = false;
+    while let Some(line) = next_line(
+        &mut reader,
+        &mut line_buf,
+        &mut first_line,
+        &mut warned_encoding_fallback,
+    )? {
+        let (hash_hex, mut file_path) = line.split_once(' ').ok_or_else(|| {
+            HashCollectionError::InvalidSingleHashLine((line.to_string(), "".to_string()))
+        })?;
+        // strip ' ' (text mode) and '*' (binary mode) from GNU md5sum-style files
+        if file_path.starts_with(' ') || file_path.starts_with('*') {
+            file_path = &file_path[1..];
+        }
+        let file_path = prefix.join(file_path);
+        let path_handle = file_tree
+            .add(&file_path, false)
+            .map_err(HashCollectionError::FileTreeError)?;
+        result.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle.clone(),
+                None,
+                None,
+                hash_type,
+                hex::decode(hash_hex).map_err(|_| {
+                    HashCollectionError::InvalidSingleHashLine((
+                        hash_hex.to_string(),
+                        format!("{:?}", file_path),
+                    ))
+                })?,
+            ),
+        );
     }
 
     Ok(result)
+}
+
+/// Read the next line from `reader` as raw bytes and decode it to a string.
+///
+/// Used only for single-hash files (external format produced by other tools).
+/// Behavior matches `BufRead::lines` for the line/stripping semantics (a
+/// trailing `\n` and, if present, `\r` are removed), but unlike `lines()` the
+/// bytes are decoded as UTF-8 with a Windows-1252 fallback, matching the
+/// Python checksum_helper. Some tools (e.g. TotalCmd) wrote hash files in the
+/// ANSI codepage instead of UTF-8. A UTF-8 BOM is only valid at the very start
+/// of a file, so it is stripped from the first line only.
+///
+/// The `.cshd` format (see `parse`) is controlled by this project and stays
+/// strict UTF-8, hence does not use this fallback.
+fn next_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    first_line: &mut bool,
+    warned_encoding_fallback: &mut bool,
+) -> Result<Option<String>> {
+    buf.clear();
+    if reader
+        .read_until(b'\n', buf)
+        .map_err(|e| HashCollectionError::IOError(e.kind()))?
+        == 0
+    {
+        return Ok(None);
+    }
+    let line_bytes = if buf.ends_with(b"\n") {
+        let end = buf.len() - 1;
+        if end > 0 && buf[end - 1] == b'\r' {
+            &buf[..end - 1]
+        } else {
+            &buf[..end]
+        }
+    } else {
+        &buf[..]
+    };
+
+    let mut line = decode_line_bytes(line_bytes, warned_encoding_fallback);
+    if *first_line {
+        // programs like TotalCmd used to write a BOM
+        *first_line = false;
+        line = match line {
+            std::borrow::Cow::Borrowed(s) => {
+                std::borrow::Cow::Borrowed(s.strip_prefix('\u{feff}').unwrap_or(s))
+            }
+            std::borrow::Cow::Owned(mut s) => {
+                if s.starts_with('\u{feff}') {
+                    s.remove(0);
+                }
+                std::borrow::Cow::Owned(s)
+            }
+        };
+    }
+    Ok(Some(line.into_owned()))
+}
+
+fn decode_line_bytes<'a>(bytes: &'a [u8], warned_encoding_fallback: &mut bool) -> Cow<'a, str> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Cow::Borrowed(s),
+        Err(_) => {
+            if !*warned_encoding_fallback {
+                *warned_encoding_fallback = true;
+                warn!(
+                    "Non-UTF-8 line found in hash file, decoding as Windows-1252. \
+                    Consider re-generating the hash file as UTF-8."
+                );
+            }
+            Cow::Owned(
+                encoding_rs::WINDOWS_1252
+                    .decode_without_bom_handling(bytes)
+                    .0
+                    .into_owned(),
+            )
+        }
+    }
 }
 
 fn parse_line(
@@ -670,6 +750,36 @@ abcdefff *foo/xer.mp4
         assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
 
         // only the first line carries a BOM; the rest parse normally
+        assert_eq!(hc.map.len(), 2);
+        let key = ft.find("foo/bar/baz").unwrap();
+        assert!(hc.map.contains_key(&key));
+    }
+
+    #[test]
+    fn test_parse_single_hash_falls_back_to_cp1252() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        // 0x96 is '–' (EN DASH) in Windows-1252; that byte sequence contains
+        // no valid UTF-8, so decoding must fall back to cp1252 like the
+        // Python checksum_helper does.
+        let content: &[u8] =
+            b"abcdefff *info_research/Multiple encryption \x96 A Few Thoughts.pdf\nabcdefff foo/bar/baz\n";
+        let hc = parse_single_hash(
+            Cursor::new(content),
+            HashType::Sha512,
+            abs("foo/hc.cshd"),
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .unwrap();
+
+        let key = ft
+            .find("info_research/Multiple encryption \u{2013} A Few Thoughts.pdf")
+            .unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.hash_type(), HashType::Sha512);
+        assert_eq!(hf.hash_bytes(), hex::decode("abcdefff").unwrap());
+
+        // a UTF-8 line following the fallback line parses unchanged
         assert_eq!(hc.map.len(), 2);
         let key = ft.find("foo/bar/baz").unwrap();
         assert!(hc.map.contains_key(&key));
