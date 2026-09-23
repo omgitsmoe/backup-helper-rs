@@ -444,6 +444,12 @@ pub struct ChecksumHelperOptions {
 
     /// If Some, periodically flushes the incremental hash collection
     /// to disk upon the next modification after the specified time interval.
+    ///
+    /// When enabled, [`ChecksumHelper::incremental`] writes the hash file
+    /// itself (including a final flush at the end of the run) and returns an
+    /// emptied collection. Calling [`ChecksumHelper::write_collection`] on the
+    /// result is then a safe no-op (the file already exists), so callers may
+    /// always write unconditionally.
     pub incremental_periodic_write_interval: Option<std::time::Duration>,
 
     /// Up to which depth should the root and its subdirectories be searched

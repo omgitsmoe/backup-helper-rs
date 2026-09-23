@@ -11,6 +11,8 @@ pub fn incremental(args: IncrementalArgs, verbose: u8) -> Result<(), Box<dyn std
     reporter.set_verbose(verbose);
     let inc = ch.incremental(|p| reporter.report_incremental(p))?;
 
+    // With a periodic write interval, `incremental` already flushed the
+    // collection to disk during the run; `write_collection` is then a no-op.
     ch.write_collection(&inc)?;
     println!("\nWrote collection at: {:?}", inc.full_path()?);
 

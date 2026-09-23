@@ -170,6 +170,8 @@ impl TaskExecutor for SourceHash {
         }
 
         log.finish_incremental()?;
+        // With a periodic write interval, `incremental` already wrote the
+        // collection to disk; `write_collection` is then a no-op.
         ch.write_collection(&collection)?;
 
         Ok(TaskOutcome::SourceHash {

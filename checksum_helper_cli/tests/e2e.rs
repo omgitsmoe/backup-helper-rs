@@ -571,6 +571,57 @@ new.txt",
 }
 
 #[test]
+fn test_incremental_with_periodic_write_interval() {
+    let root = common::testdir();
+    common::create_ftree(
+        &root,
+        "\
+file1.txt
+subdir/file2.txt",
+    );
+
+    // Regression test for the double-write bug: with a periodic write
+    // interval, `incremental` already creates the hash file during the run,
+    // so the CLI must not attempt to create it a second time.
+    let (stdout, stderr, success) = common::run_cli(&[
+        "incremental",
+        &root.to_string_lossy(),
+        "--skip-unchanged",
+        "--periodic-write-interval-seconds",
+        "60",
+    ]);
+    assert!(success, "incremental failed: stderr={}", stderr);
+
+    let output_path = common::parse_collection_path(&stdout)
+        .unwrap_or_else(|| panic!("expected 'Wrote collection at:' in stdout: {}", stdout));
+    assert!(
+        output_path.exists(),
+        "output file not found: {:?}",
+        output_path
+    );
+
+    let contents = std::fs::read_to_string(&output_path).unwrap();
+    assert!(
+        contents.contains(" file1.txt"),
+        "expected file1.txt in output: {}",
+        contents
+    );
+    assert!(
+        contents.contains(" subdir/file2.txt"),
+        "expected subdir/file2.txt in output: {}",
+        contents
+    );
+    // The collection is written by the periodic flush, so it must not be
+    // empty: both files were hashed by this run.
+    assert_eq!(
+        common::cshd_strip_mtime(&contents).lines().count(),
+        2,
+        "expected 2 entries, got: {}",
+        contents
+    );
+}
+
+#[test]
 fn test_fill_basic() {
     let root = common::testdir();
     common::create_ftree(

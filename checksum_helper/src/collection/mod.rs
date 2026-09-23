@@ -237,7 +237,17 @@ impl HashCollection {
     }
 
     pub(crate) fn write_to_disk(&self, file_tree: &FileTree) -> Result<()> {
-        let mut file = std::fs::File::create_new(self.full_path()?)?;
+        let full_path = self.full_path()?;
+        // An incremental run with a periodic write interval already persisted
+        // its collection (and emptied it) during the run. Writing it again
+        // would collide with the existing file, so treat "already on disk" as
+        // done. The `create_new` below still prevents overwriting any other
+        // existing hash file.
+        if self.map.is_empty() && std::fs::exists(&full_path).unwrap_or(false) {
+            return Ok(());
+        }
+
+        let mut file = std::fs::File::create_new(full_path)?;
         self.serialize(&mut file, file_tree)
     }
 
@@ -692,6 +702,60 @@ pub mod test {
   foo/bar/baz.txt
   xer.mp4
 }"
+        );
+    }
+
+    #[test]
+    fn write_to_disk_empty_skips_existing_file() {
+        let testdir = testdir!();
+        let path = testdir.join("foo.cshd");
+        let ft = FileTree::new(&testdir).unwrap();
+        let hc = HashCollection::new(Some(&path), None).unwrap();
+
+        fs::write(&path, "existing content").unwrap();
+
+        // An empty collection whose file already exists was already persisted
+        // (e.g. by a periodic flush during an incremental run): writing must
+        // be a no-op instead of failing with AlreadyExists.
+        hc.write_to_disk(&ft).unwrap();
+
+        let read_back = fs::read_to_string(&path).unwrap();
+        assert_eq!(read_back, "existing content");
+    }
+
+    #[test]
+    fn write_to_disk_empty_creates_header_only_file() {
+        let testdir = testdir!();
+        let path = testdir.join("foo.cshd");
+        let ft = FileTree::new(&testdir).unwrap();
+        let hc = HashCollection::new(Some(&path), None).unwrap();
+
+        // An empty collection on a non-existing path still creates the file
+        // (header only), preserving the marker-file behavior for runs without
+        // anything to persist.
+        hc.write_to_disk(&ft).unwrap();
+
+        assert!(path.exists());
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "# version 1\n");
+    }
+
+    #[test]
+    fn write_to_disk_nonempty_never_overwrites() {
+        let testdir = testdir!();
+        let path = testdir.join("foo.cshd");
+        let (mut hc, ft, _) = setup_minimal_hc(&testdir);
+        hc.relocate(&testdir);
+        hc.rename(&OsString::from("foo.cshd"));
+        fs::write(&path, "foo").unwrap();
+
+        // Non-empty collections must never overwrite an existing hash file.
+        let result = hc.write_to_disk(&ft);
+        assert_eq!(
+            result,
+            Err(HashCollectionError::IOError(
+                std::io::ErrorKind::AlreadyExists
+            ))
         );
     }
 
