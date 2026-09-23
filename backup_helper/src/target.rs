@@ -183,6 +183,7 @@ mod tests {
         let disks = vec![Disk {
             name: "backup".into(),
             path: "/backup".into(),
+            mounted: true,
         }];
         let mut target = target(TransferMode::Copy, true);
 

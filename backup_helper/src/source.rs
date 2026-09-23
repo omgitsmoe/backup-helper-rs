@@ -327,10 +327,12 @@ mod tests {
             Disk {
                 name: "source".into(),
                 path: "/data".into(),
+                mounted: true,
             },
             Disk {
                 name: "backup".into(),
                 path: "/backup".into(),
+                mounted: true,
             },
         ];
         let mut source = Source::new("/data/files", None::<&str>);

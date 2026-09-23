@@ -38,7 +38,12 @@ mod tests {
             &config_path,
             crate::test_utils::config_with_absolute_paths(
                 r#"
-                disks { disk "main" { path "/mnt" } }
+                disks {
+                    disk "main" {
+                        path "/mnt"
+                        mounted #false
+                    }
+                }
                 source "/mnt/source" {
                     target "/mnt/backup" { transfer_mode copy }
                 }
@@ -61,7 +66,7 @@ mod tests {
             serde_json::from_str(&crate::test_utils::config_with_absolute_paths(
                 r#"{
                 "version": 1,
-                "disks": [{"name": "main", "path": "/mnt"}],
+                "disks": [{"name": "main", "path": "/mnt", "mounted": false}],
                 "sources": [{
                     "path": "/mnt/source",
                     "hash_file": null,

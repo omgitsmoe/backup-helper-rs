@@ -34,8 +34,14 @@ fn config_for_paths(
     format!(
         r#"
         disks {{
-            disk "source" {{ path {:?} }}
-            disk "target" {{ path {:?} }}
+            disk "source" {{
+                path {:?}
+                mounted #false
+            }}
+            disk "target" {{
+                path {:?}
+                mounted #false
+            }}
         }}
         source {:?} {{
             target {:?} {{ transfer_mode copy verify #true }}

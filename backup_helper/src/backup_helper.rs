@@ -204,6 +204,7 @@ mod tests {
             disks: vec![crate::disks::Disk {
                 name: "main".into(),
                 path: "/mnt".into(),
+                mounted: false,
             }],
             sources: vec![source],
         }
@@ -228,8 +229,14 @@ mod tests {
     fn reconcile_from_empty_state_assigns_nested_disks_and_updates_state() {
         let config = r#"
             disks {
-                disk "main" { path "/mnt" }
-                disk "photos" { path "/mnt/photos" }
+                disk "main" {
+                    path "/mnt"
+                    mounted #false
+                }
+                disk "photos" {
+                    path "/mnt/photos"
+                    mounted #false
+                }
             }
             source "/mnt/photos/raw" {
                 hash_file "/mnt/photos/raw.sha512"
@@ -242,8 +249,8 @@ mod tests {
             r#"{
                 "version": 1,
                 "disks": [
-                    {"name": "main", "path": "/mnt"},
-                    {"name": "photos", "path": "/mnt/photos"}
+                    {"name": "main", "path": "/mnt", "mounted": false},
+                    {"name": "photos", "path": "/mnt/photos", "mounted": false}
                 ],
                 "sources": [{
                     "path": "/mnt/photos/raw",
@@ -302,8 +309,14 @@ mod tests {
         "#;
         let config = r#"
             disks {
-                disk "main" { path "/mnt/new" }
-                disk "archive" { path "/archive" }
+                disk "main" {
+                    path "/mnt/new"
+                    mounted #false
+                }
+                disk "archive" {
+                    path "/archive"
+                    mounted #false
+                }
             }
             source "/mnt/new/source" {
                 target "/archive/old-target" {
@@ -322,8 +335,8 @@ mod tests {
             r#"{
                 "version": 1,
                 "disks": [
-                    {"name": "main", "path": "/mnt/new"},
-                    {"name": "archive", "path": "/archive"}
+                    {"name": "main", "path": "/mnt/new", "mounted": false},
+                    {"name": "archive", "path": "/archive", "mounted": false}
                 ],
                 "sources": [{
                     "path": "/mnt/new/source",
@@ -381,7 +394,12 @@ mod tests {
     #[test]
     fn missing_source_or_target_disk_is_a_reconcile_conflict() {
         let config = r#"
-            disks { disk "main" { path "/mnt/source" } }
+            disks {
+                disk "main" {
+                    path "/mnt/source"
+                    mounted #false
+                }
+            }
             source "/outside/source" {
                 target "/mnt/target" { transfer_mode copy }
             }
@@ -409,7 +427,10 @@ mod tests {
         "#;
 
         conflict(
-            reconcile_state(state, "disks { disk \"main\" { path \"/mnt\" } }"),
+            reconcile_state(
+                state,
+                "disks {\n disk \"main\" {\n path \"/mnt\"\n mounted #false\n }\n}",
+            ),
             "drop source",
         );
     }
@@ -428,7 +449,12 @@ mod tests {
             }
         "#;
         let config = r#"
-            disks { disk "main" { path "/mnt" } }
+            disks {
+                disk "main" {
+                    path "/mnt"
+                    mounted #false
+                }
+            }
             source "/mnt/new-source" { target "/mnt/backup" { transfer_mode copy } }
         "#;
 
@@ -449,11 +475,15 @@ mod tests {
             }
         "#;
 
-        let actual = reconcile_state(state, "disks { disk \"main\" { path \"/mnt\" } }").unwrap();
+        let actual = reconcile_state(
+            state,
+            "disks {\n disk \"main\" {\n path \"/mnt\"\n mounted #false\n }\n}",
+        )
+        .unwrap();
         let expected = json_state(
             r#"{
                 "version": 1,
-                "disks": [{"name": "main", "path": "/mnt"}],
+                "disks": [{"name": "main", "path": "/mnt", "mounted": false}],
                 "sources": []
             }"#,
         );

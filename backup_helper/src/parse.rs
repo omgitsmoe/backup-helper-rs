@@ -317,6 +317,7 @@ fn parse_disk(node: &KdlNode, contents: &str) -> Result<Disk> {
     let name = name.expect("checked above");
 
     let mut path = None;
+    let mut mounted = None;
     for child in node.iter_children() {
         let name = child.name().value();
         match name {
@@ -337,10 +338,21 @@ fn parse_disk(node: &KdlNode, contents: &str) -> Result<Disk> {
                     child.span().offset(),
                 )?;
             }
+            "mounted" => match child.get(0).and_then(|a| a.as_bool()) {
+                Some(declared) => mounted = Some(declared),
+                None => {
+                    let line_nr = span_to_line_number(contents, child.span().offset());
+                    return Err(BackupHelperError::InvalidConfig(format!(
+                        "Expected boolean argument for `mounted`, got `{:?}` on line {}",
+                        child.get(0),
+                        line_nr
+                    )));
+                }
+            },
             _ => {
                 let line_nr = span_to_line_number(contents, child.span().offset());
                 return Err(BackupHelperError::InvalidConfig(format!(
-                    "Expected `path` as child node of `disk`, got `{}` on line {}",
+                    "Expected `path` or `mounted` as child node of `disk`, got `{}` on line {}",
                     name, line_nr
                 )));
             }
@@ -356,9 +368,19 @@ fn parse_disk(node: &KdlNode, contents: &str) -> Result<Disk> {
     }
     let path = path.expect("we exit early above if none");
 
+    if mounted.is_none() {
+        let line_nr = span_to_line_number(contents, node.span().offset());
+        return Err(BackupHelperError::InvalidConfig(format!(
+            "Missing mandatory child node `mounted` for `disk` on line {}",
+            line_nr
+        )));
+    }
+    let mounted = mounted.expect("we exit early above if none");
+
     Ok(Disk {
         name: name.to_string(),
         path: path::PathBuf::from(path),
+        mounted,
     })
 }
 
@@ -413,6 +435,7 @@ mod tests {
             disks {
                 disk "main" {
                     path "/mnt/main"
+                    mounted #true
                 }
             }
 
@@ -459,6 +482,7 @@ mod tests {
             parsed.disks[0].path,
             crate::test_utils::fixture_path("/mnt/main")
         );
+        assert!(parsed.disks[0].mounted);
 
         assert_eq!(parsed.sources.len(), 1);
         let source = &parsed.sources[0];
@@ -656,6 +680,7 @@ mod tests {
             disks {
                 disk "main" {
                     path "/mnt/main"
+                    mounted #false
                 }
             }
             source "/mnt/source" {
@@ -1035,7 +1060,49 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `path` as child node of `disk`");
+        assert_config_err(result, "Expected `path` or `mounted` as child node of `disk`");
+    }
+
+    #[test]
+    fn test_parse_disk_mounted_non_boolean() {
+        let input = r#"
+            disks {
+                disk "mydisk" {
+                    path "/mnt/disk"
+                    mounted "yes"
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Expected boolean argument for `mounted`");
+    }
+
+    #[test]
+    fn test_parse_disk_missing_mounted() {
+        let input = r#"
+            disks {
+                disk "mydisk" {
+                    path "/mnt/disk"
+                }
+            }
+        "#;
+        let result = parse(input);
+        assert_config_err(result, "Missing mandatory child node `mounted` for `disk`");
+    }
+
+    #[test]
+    fn test_parse_disk_mounted_false() {
+        let input = r#"
+            disks {
+                disk "mydisk" {
+                    path "/mnt/disk"
+                    mounted #false
+                }
+            }
+        "#;
+        let parsed = parse(input).expect("should parse successfully");
+        assert_eq!(parsed.disks.len(), 1);
+        assert!(!parsed.disks[0].mounted);
     }
 
     #[test]

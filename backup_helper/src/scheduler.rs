@@ -8,7 +8,6 @@ use crate::task::{TaskContext, TaskOutcome};
 use crate::{
     BackupHelperError,
     backup_helper::{BackupHelper, DiskHandle},
-    disks::{DiskMountChecker, SystemDiskMountChecker},
     source::Source,
     target::Target,
     task::{CommonData, SourceHash, SourceToTargetCopy, TargetVerify, Task},
@@ -18,7 +17,6 @@ type Result<T> = std::result::Result<T, BackupHelperError>;
 
 pub struct SchedulerCore {
     state: BackupHelper,
-    mount_checker: Arc<dyn DiskMountChecker>,
     log_directory: Option<std::path::PathBuf>,
     // all tasks
     // indexed by TaskId
@@ -71,15 +69,8 @@ pub enum TaskState {
 
 impl SchedulerShared {
     pub fn new(state: BackupHelper) -> Result<Self> {
-        Self::new_with_mount_checker(state, Arc::new(SystemDiskMountChecker))
-    }
-
-    pub(crate) fn new_with_mount_checker(
-        state: BackupHelper,
-        mount_checker: Arc<dyn DiskMountChecker>,
-    ) -> Result<Self> {
         Ok(Self {
-            core: Mutex::new(SchedulerCore::new_with_mount_checker(state, mount_checker)?),
+            core: Mutex::new(SchedulerCore::new(state)?),
             runnable: Condvar::new(),
             cancel_requested: AtomicBool::new(false),
         })
@@ -121,19 +112,10 @@ impl SchedulerShared {
 }
 
 impl SchedulerCore {
-    #[cfg(test)]
     pub fn new(state: BackupHelper) -> Result<Self> {
-        Self::new_with_mount_checker(state, Arc::new(SystemDiskMountChecker))
-    }
-
-    pub(crate) fn new_with_mount_checker(
-        state: BackupHelper,
-        mount_checker: Arc<dyn DiskMountChecker>,
-    ) -> Result<Self> {
         let disks_busy = state.disks().iter().map(|_| false).collect();
         let mut s = Self {
             state,
-            mount_checker,
             log_directory: None,
             tasks: vec![],
             dependents: vec![],
@@ -281,7 +263,7 @@ impl SchedulerCore {
                         return Ok(false);
                     }
 
-                    self.mount_checker.is_mounted(&self.state.disks()[disk.0])
+                    self.state.disks()[disk.0].is_mounted()
                 })?;
 
             if can_run
@@ -594,18 +576,10 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{disks::Disk, parse, target::VerifiedInfo};
+    use crate::{parse, target::VerifiedInfo};
     use serde_json::Value;
     use std::path::Path;
     use testdir::testdir;
-
-    struct MountedDiskChecker;
-
-    impl DiskMountChecker for MountedDiskChecker {
-        fn is_mounted(&self, _disk: &Disk) -> std::io::Result<bool> {
-            Ok(true)
-        }
-    }
 
     fn state(config: &str) -> BackupHelper {
         let mut state = BackupHelper::default();
@@ -658,8 +632,14 @@ mod tests {
         format!(
             r#"
             disks {{
-                disk "source" {{ path {source_disk} }}
-                disk "target" {{ path {target_disk} }}
+                disk "source" {{
+                    path {source_disk}
+                    mounted #true
+                }}
+                disk "target" {{
+                    path {target_disk}
+                    mounted #true
+                }}
             }}
             source {source} {{
                 target {target} {{ transfer_mode copy verify #true }}
@@ -679,8 +659,14 @@ mod tests {
         format!(
             r#"
             disks {{
-                disk "source" {{ path {source_disk} }}
-                disk "target" {{ path {target_disk} }}
+                disk "source" {{
+                    path {source_disk}
+                    mounted #false
+                }}
+                disk "target" {{
+                    path {target_disk}
+                    mounted #false
+                }}
             }}
             source {source} {{
                 target {first_target} {{ transfer_mode copy verify {verify} }}
@@ -703,10 +689,22 @@ mod tests {
         format!(
             r#"
             disks {{
-                disk "a" {{ path {disk_a} }}
-                disk "b" {{ path {disk_b} }}
-                disk "c" {{ path {disk_c} }}
-                disk "d" {{ path {disk_d} }}
+                disk "a" {{
+                    path {disk_a}
+                    mounted #true
+                }}
+                disk "b" {{
+                    path {disk_b}
+                    mounted #true
+                }}
+                disk "c" {{
+                    path {disk_c}
+                    mounted #true
+                }}
+                disk "d" {{
+                    path {disk_d}
+                    mounted #true
+                }}
             }}
             source {source_a} {{
                 target {target_a} {{ transfer_mode copy verify #false }}
@@ -840,8 +838,14 @@ mod tests {
         let config = format!(
             r#"
             disks {{
-                disk "source" {{ path {source_disk} }}
-                disk "target" {{ path {target_disk} }}
+                disk "source" {{
+                    path {source_disk}
+                    mounted #false
+                }}
+                disk "target" {{
+                    path {target_disk}
+                    mounted #false
+                }}
             }}
             source {source} {{
                 hash_file {hash_file}
@@ -865,8 +869,14 @@ mod tests {
         let config = format!(
             r#"
             disks {{
-                disk "source" {{ path {source_disk} }}
-                disk "target" {{ path {target_disk} }}
+                disk "source" {{
+                    path {source_disk}
+                    mounted #false
+                }}
+                disk "target" {{
+                    path {target_disk}
+                    mounted #false
+                }}
             }}
             source {source} {{
                 hash_file {hash_file}
@@ -925,8 +935,14 @@ mod tests {
         let config = format!(
             r#"
             disks {{
-                disk "source" {{ path {source_disk} }}
-                disk "target" {{ path {target_disk} }}
+                disk "source" {{
+                    path {source_disk}
+                    mounted #false
+                }}
+                disk "target" {{
+                    path {target_disk}
+                    mounted #false
+                }}
             }}
             source {source} {{
                 hash_file {hash_file}
@@ -986,8 +1002,14 @@ mod tests {
         let config = format!(
             r#"
             disks {{
-                disk "source" {{ path {source_disk} }}
-                disk "target" {{ path {target_disk} }}
+                disk "source" {{
+                    path {source_disk}
+                    mounted #false
+                }}
+                disk "target" {{
+                    path {target_disk}
+                    mounted #false
+                }}
             }}
             source {source} {{
                 hash_file {hash_file}
@@ -1020,12 +1042,11 @@ mod tests {
     #[test]
     fn tasks_sharing_a_disk_are_serialized_but_disjoint_tasks_can_run_in_parallel() {
         let root = testdir!();
-        let checker = Arc::new(MountedDiskChecker);
-        let mut core = SchedulerCore::new_with_mount_checker(
-            state_with_verify(&parallel_config(&root), false),
-            checker,
-        )
-        .unwrap();
+        for name in ["a", "b", "c", "d"] {
+            std::fs::create_dir_all(root.join(format!("disk-{name}"))).unwrap();
+        }
+        let mut core =
+            SchedulerCore::new(state_with_verify(&parallel_config(&root), false)).unwrap();
 
         assert_eq!(core.tasks.len(), 4);
         assert_eq!(core.pick_next().unwrap(), Some(0));
@@ -1159,13 +1180,7 @@ mod tests {
         .unwrap();
         std::fs::write(source_path.join("another/file.txt"), "another content").unwrap();
 
-        let scheduler = Arc::new(
-            SchedulerShared::new_with_mount_checker(
-                state(&normal_config(&root)),
-                Arc::new(MountedDiskChecker),
-            )
-            .unwrap(),
-        );
+        let scheduler = Arc::new(SchedulerShared::new(state(&normal_config(&root))).unwrap());
         scheduler.core.lock().unwrap().log_directory = Some(root.clone());
 
         run(&scheduler).unwrap();
@@ -1204,11 +1219,7 @@ mod tests {
         let source_file = source_path.join("file.txt");
         std::fs::write(&source_file, "before data").unwrap();
 
-        let mut core = SchedulerCore::new_with_mount_checker(
-            state(&normal_config(&root)),
-            Arc::new(MountedDiskChecker),
-        )
-        .unwrap();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
         core.log_directory = Some(root.clone());
         let (progress, _progress_rx) = mpsc::channel();
 
@@ -1295,7 +1306,12 @@ mod tests {
         let target = path_literal(&root.join("missing-disk/target"));
         let config = format!(
             r#"
-            disks {{ disk "missing" {{ path {missing_disk} }} }}
+            disks {{
+                disk "missing" {{
+                    path {missing_disk}
+                    mounted #true
+                }}
+            }}
             source {source} {{
                 target {target} {{ transfer_mode copy }}
             }}
