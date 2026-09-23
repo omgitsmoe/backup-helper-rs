@@ -85,6 +85,8 @@ pub fn parse_single_hash<R: BufRead>(
     for line in reader.lines() {
         match line {
             Ok(line) => {
+                // programs like TotalCmd used to write a BOM
+                let line = line.strip_prefix('\u{feff}').unwrap_or(&line);
                 let (hash_hex, mut file_path) = line.split_once(' ').ok_or_else(|| {
                     HashCollectionError::InvalidSingleHashLine((line.to_string(), "".to_string()))
                 })?;
@@ -642,6 +644,35 @@ abcdefff *foo/xer.mp4
   foo/xer.mp4
 }"
         );
+    }
+
+    #[test]
+    fn test_parse_single_hash_strips_bom() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        let hash_type = HashType::Sha512;
+        let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
+        // BOM (0xEF 0xBB 0xBF) as written by e.g. TotalCmd
+        let hc = parse_single_hash(
+            Cursor::new(format!(
+                "\u{feff}{} *cmdTxts/besitzer-und-rechte.bat\nabcdefff foo/bar/baz\n",
+                hash_hex
+            )),
+            hash_type,
+            abs("foo/hc.cshd"),
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .unwrap();
+
+        let key = ft.find("cmdTxts/besitzer-und-rechte.bat").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
+
+        // only the first line carries a BOM; the rest parse normally
+        assert_eq!(hc.map.len(), 2);
+        let key = ft.find("foo/bar/baz").unwrap();
+        assert!(hc.map.contains_key(&key));
     }
 
     #[test]
