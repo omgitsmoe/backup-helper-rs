@@ -93,6 +93,15 @@ pub fn parse_single_hash<R: BufRead>(
         &mut first_line,
         &mut warned_encoding_fallback,
     )? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if line.starts_with('#') || line.starts_with(';') {
+            // used as comment characters
+            continue;
+        }
+
         let (hash_hex, mut file_path) = line.split_once(' ').ok_or_else(|| {
             HashCollectionError::InvalidSingleHashLine((line.to_string(), "".to_string()))
         })?;
@@ -1062,25 +1071,67 @@ garbage_line
     }
 
     #[test]
-    fn test_parse_single_hash_empty_line_returns_error() {
+    fn test_parse_single_hash_skips_empty_lines() {
         let mut ft = FileTree::new(abs("foo")).unwrap();
-        let result = parse_single_hash(
+        let hc = parse_single_hash(
             Cursor::new(
                 "\
 abcdefff foo/bar/baz
 
+
+   \t
 abcdefff foo/xer.mp4
 ",
             ),
             HashType::Sha512,
             abs("foo/hc.cshd"),
             &mut ft,
-        );
-        assert!(
-            matches!(result, Err(HashCollectionError::InvalidSingleHashLine(..))),
-            "expected InvalidSingleHashLine, got {:?}",
-            result
-        );
+        )
+        .inspect_err(|e| println!("{}", e))
+        .unwrap();
+
+        assert_eq!(hc.map.len(), 2);
+        let key = ft.find("foo/bar/baz").unwrap();
+        assert!(hc.map.contains_key(&key));
+        let key = ft.find("foo/xer.mp4").unwrap();
+        assert!(hc.map.contains_key(&key));
+    }
+
+    #[test]
+    fn test_parse_single_hash_skips_comment_lines() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        let hash_type = HashType::Sha512;
+        let hash_hex = "90b834a83748223190dd1cce445bb1e7582e55948234e962aba9a3004cc558ce061c865a4fae255e048768e7d7011f958dad463243bb3560ee49335ec4c9e8a0";
+        let hc = parse_single_hash(
+            Cursor::new(format!(
+                "\
+# leading '#'
+; leading ';'
+{} .gitignore
+# a comment between entries
+; another comment
+abcdefff foo/bar/baz
+; trailing comment
+# done
+",
+                hash_hex
+            )),
+            hash_type,
+            abs("foo/hc.cshd"),
+            &mut ft,
+        )
+        .inspect_err(|e| println!("{}", e))
+        .unwrap();
+
+        assert_eq!(hc.map.len(), 2);
+
+        let key = ft.find(".gitignore").unwrap();
+        let hf = &hc.map[&key];
+        assert_eq!(hf.hash_type(), hash_type);
+        assert_eq!(hf.hash_bytes(), hex::decode(hash_hex).unwrap());
+
+        let key = ft.find("foo/bar/baz").unwrap();
+        assert!(hc.map.contains_key(&key));
     }
 
     #[test]
