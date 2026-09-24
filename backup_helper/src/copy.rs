@@ -1,9 +1,108 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
+
+#[cfg(unix)]
+use libc::{EIO, EREMOTEIO, ESTALE};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    ERROR_BAD_NET_NAME, ERROR_BAD_NET_RESP, ERROR_BAD_NETPATH, ERROR_DEV_NOT_EXIST,
+    ERROR_IO_PENDING, ERROR_NETNAME_DELETED, ERROR_NETWORK_ACCESS_DENIED, ERROR_NETWORK_BUSY,
+    ERROR_NETWORK_UNREACHABLE, ERROR_NO_SYSTEM_RESOURCES, ERROR_OPERATION_ABORTED,
+    ERROR_SEM_TIMEOUT, ERROR_SHARING_VIOLATION,
 };
 
 use crate::BackupHelperError;
+
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+];
+
+pub(crate) fn is_directory(path: &Path) -> io::Result<bool> {
+    Ok(retry_io(|| fs::metadata(path))?.is_dir())
+}
+
+fn retry_io<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    retry_io_with(&mut operation, &RETRY_DELAYS, &mut |delay| {
+        thread::sleep(delay)
+    })
+}
+
+fn retry_io_with<T>(
+    operation: &mut impl FnMut() -> io::Result<T>,
+    retry_delays: &[Duration],
+    sleep: &mut impl FnMut(Duration),
+) -> io::Result<T> {
+    let mut retry_index = 0;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_retryable_io_error(&error) && retry_index < retry_delays.len() => {
+                sleep(retry_delays[retry_index]);
+                retry_index += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub(crate) fn is_retryable_io_error(error: &io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NetworkDown
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::StaleNetworkFileHandle
+            | io::ErrorKind::ResourceBusy
+            | io::ErrorKind::WriteZero
+            | io::ErrorKind::UnexpectedEof
+    ) {
+        return true;
+    }
+
+    is_retryable_raw_os_error(error)
+}
+
+// Network filesystems can expose transient failures as uncategorized raw errors.
+#[cfg(unix)]
+fn is_retryable_raw_os_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code) if code == EIO || code == EREMOTEIO || code == ESTALE)
+}
+
+#[cfg(windows)]
+fn is_retryable_raw_os_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code) if code as u32 == ERROR_BAD_NET_NAME
+        || code as u32 == ERROR_BAD_NETPATH
+        || code as u32 == ERROR_BAD_NET_RESP
+        || code as u32 == ERROR_DEV_NOT_EXIST
+        || code as u32 == ERROR_IO_PENDING
+        || code as u32 == ERROR_NETNAME_DELETED
+        || code as u32 == ERROR_NETWORK_ACCESS_DENIED
+        || code as u32 == ERROR_NETWORK_BUSY
+        || code as u32 == ERROR_NETWORK_UNREACHABLE
+        || code as u32 == ERROR_NO_SYSTEM_RESOURCES
+        || code as u32 == ERROR_OPERATION_ABORTED
+        || code as u32 == ERROR_SEM_TIMEOUT
+        || code as u32 == ERROR_SHARING_VIOLATION)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_retryable_raw_os_error(_error: &io::Error) -> bool {
+    false
+}
 
 pub fn copy_tree(
     source: impl AsRef<Path>,
@@ -13,8 +112,8 @@ pub fn copy_tree(
     let source = source.as_ref();
     let destination = destination.as_ref();
 
-    let source_meta = std::fs::metadata(source).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+    let source_meta = retry_io(|| fs::metadata(source)).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound && !is_retryable_io_error(&e) {
             BackupHelperError::CopyError(format!("Source at {:?} does not exist: {}", source, e))
         } else {
             BackupHelperError::CopyError(format!("Failed to get source path metadata: {}", e))
@@ -29,7 +128,7 @@ pub fn copy_tree(
     }
 
     reject_overlapping_paths(source, destination)?;
-    fs::create_dir_all(destination)
+    retry_io(|| fs::create_dir_all(destination))
         .map_err(|error| copy_io_error("create destination directory", destination, error))?;
 
     let iter =
@@ -50,7 +149,7 @@ fn copy_tree_entries(
 ) -> Result<(), BackupHelperError> {
     for entry in iter.by_ref() {
         let source_path = entry.entry.path();
-        let meta = fs::symlink_metadata(&source_path)
+        let meta = retry_io(|| fs::symlink_metadata(&source_path))
             .map_err(|error| copy_io_error("read source metadata", &source_path, error))?;
         let relative = source_path
             .strip_prefix(source)
@@ -58,20 +157,20 @@ fn copy_tree_entries(
         let destination_path = destination.join(relative);
 
         if meta.is_dir() {
-            fs::create_dir_all(&destination_path).map_err(|error| {
+            retry_io(|| fs::create_dir_all(&destination_path)).map_err(|error| {
                 copy_io_error("create destination directory", &destination_path, error)
             })?;
         } else if meta.file_type().is_symlink() {
-            let target_meta = fs::metadata(&source_path).map_err(|error| {
+            let target_meta = retry_io(|| fs::metadata(&source_path)).map_err(|error| {
                 copy_io_error("read symlink target metadata", &source_path, error)
             })?;
             // Copy linked files as regular files, but do not follow linked directories.
             if target_meta.is_file() {
-                fs::copy(&source_path, &destination_path)
+                retry_io(|| fs::copy(&source_path, &destination_path))
                     .map_err(|error| copy_io_error("copy symlink target", &source_path, error))?;
             }
         } else {
-            fs::copy(&source_path, &destination_path)
+            retry_io(|| fs::copy(&source_path, &destination_path))
                 .map_err(|error| copy_io_error("copy source file", &source_path, error))?;
         }
 
@@ -128,18 +227,36 @@ fn reject_overlapping_paths(source: &Path, destination: &Path) -> Result<(), Bac
     Ok(())
 }
 
-fn canonicalize_for_comparison(path: &Path) -> std::io::Result<std::path::PathBuf> {
-    if path.exists() {
-        return fs::canonicalize(path);
+fn canonicalize_for_comparison(path: &Path) -> io::Result<PathBuf> {
+    match retry_io(|| fs::metadata(path)) {
+        Ok(_) => retry_io(|| fs::canonicalize(path)),
+        Err(error)
+            if !is_retryable_io_error(&error)
+                && matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+        {
+            let file_name = path
+                .file_name()
+                .expect("a non-empty path must have a file name");
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let mut result = canonicalize_for_comparison(parent)?;
+            result.push(file_name);
+            Ok(result)
+        }
+        Err(error) => Err(error),
     }
+}
 
-    let file_name = path
-        .file_name()
-        .expect("a non-empty path must have a file name");
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut result = canonicalize_for_comparison(parent)?;
-    result.push(file_name);
-    Ok(result)
+fn entry_file_type(entry: &fs::DirEntry, path: &Path) -> io::Result<fs::FileType> {
+    match entry.file_type() {
+        Ok(file_type) => Ok(file_type),
+        Err(error) if is_retryable_io_error(&error) => {
+            retry_io(|| fs::symlink_metadata(path).map(|metadata| metadata.file_type()))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub struct WalkTree {
@@ -160,9 +277,12 @@ impl Iterator for WalkTree {
         }
 
         while let Some(dir) = self.stack.last_mut() {
+            // ReadDir is terminal after an iteration error, so propagate it
+            // instead of retrying the exhausted handle.
             match dir.next() {
                 Some(Ok(entry)) => {
-                    let file_type = match entry.file_type() {
+                    let path = entry.path();
+                    let file_type = match entry_file_type(&entry, &path) {
                         Ok(file_type) => file_type,
                         Err(error) => {
                             self.error = Some(error);
@@ -171,7 +291,7 @@ impl Iterator for WalkTree {
                     };
 
                     if file_type.is_dir() {
-                        match fs::read_dir(entry.path()) {
+                        match retry_io(|| fs::read_dir(&path)) {
                             Ok(children) => self.stack.push(children),
                             Err(error) => {
                                 self.error = Some(error);
@@ -182,8 +302,8 @@ impl Iterator for WalkTree {
 
                     return Some(DirItem { entry });
                 }
-                Some(Err(e)) => {
-                    self.error = Some(e);
+                Some(Err(error)) => {
+                    self.error = Some(error);
                     return None;
                 }
                 None => {
@@ -198,8 +318,10 @@ impl Iterator for WalkTree {
 
 impl WalkTree {
     pub fn new(root: impl AsRef<Path>) -> io::Result<Self> {
+        let root = root.as_ref();
+        let children = retry_io(|| fs::read_dir(root))?;
         Ok(Self {
-            stack: vec![fs::read_dir(root)?],
+            stack: vec![children],
             error: None,
         })
     }
@@ -260,6 +382,138 @@ mod tests {
         let result = WalkTree::new(root);
 
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn retry_io_retries_transient_errors_until_success() {
+        let retry_delays = [Duration::from_millis(0), Duration::from_millis(0)];
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let mut operation = || -> io::Result<&'static str> {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            } else {
+                Ok("copied")
+            }
+        };
+
+        let result = retry_io_with(&mut operation, &retry_delays, &mut |delay| {
+            sleeps.push(delay);
+        });
+
+        assert_eq!(result.unwrap(), "copied");
+        assert_eq!(attempts, 3);
+        assert_eq!(sleeps, retry_delays);
+    }
+
+    #[test]
+    fn retry_io_stops_after_retry_budget() {
+        let retry_delays = [Duration::from_millis(0), Duration::from_millis(0)];
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let mut operation = || -> io::Result<()> {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::ConnectionReset))
+        };
+
+        let result = retry_io_with(&mut operation, &retry_delays, &mut |delay| {
+            sleeps.push(delay);
+        });
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset
+        ));
+        assert_eq!(attempts, retry_delays.len() + 1);
+        assert_eq!(sleeps, retry_delays);
+    }
+
+    #[test]
+    fn retry_io_does_not_retry_permanent_errors() {
+        let retry_delays = [Duration::from_millis(0)];
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let mut operation = || -> io::Result<()> {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        };
+
+        let result = retry_io_with(&mut operation, &retry_delays, &mut |delay| {
+            sleeps.push(delay);
+        });
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(attempts, 1);
+        assert!(sleeps.is_empty());
+    }
+
+    #[test]
+    fn common_transient_error_kinds_are_retryable() {
+        for kind in [
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::NetworkDown,
+            io::ErrorKind::NetworkUnreachable,
+            io::ErrorKind::HostUnreachable,
+            io::ErrorKind::StaleNetworkFileHandle,
+            io::ErrorKind::ResourceBusy,
+            io::ErrorKind::WriteZero,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(
+                is_retryable_io_error(&io::Error::from(kind)),
+                "expected {kind:?} to be retryable"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn eagain_is_retryable() {
+        let error = io::Error::from_raw_os_error(11);
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(is_retryable_io_error(&error));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uncategorized_unix_io_errors_are_retryable() {
+        for code in [libc::EIO, libc::EREMOTEIO, libc::ESTALE] {
+            let error = io::Error::from_raw_os_error(code);
+
+            assert!(
+                is_retryable_io_error(&error),
+                "expected raw Unix error {code} to be retryable"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uncategorized_windows_io_errors_are_retryable() {
+        for code in [
+            windows_sys::Win32::Foundation::ERROR_BAD_NETPATH,
+            windows_sys::Win32::Foundation::ERROR_BAD_NET_NAME,
+            windows_sys::Win32::Foundation::ERROR_NETWORK_BUSY,
+        ] {
+            let error = io::Error::from_raw_os_error(code as i32);
+
+            assert!(
+                is_retryable_io_error(&error),
+                "expected raw Windows error {code} to be retryable"
+            );
+        }
     }
 
     #[test]

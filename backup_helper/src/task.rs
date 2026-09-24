@@ -203,14 +203,26 @@ impl TaskExecutor for SourceToTargetCopy {
             .as_ref()
             .expect("ctx must have a target_path for SourceToTargetCopy task");
 
-        if !source_path.is_dir() {
-            return Err(BackupHelperError::TaskError(String::from(
-                "SourceToTargetCopy task requires the source path to be a directory!",
-            )));
-        }
-
-        if let Some(p) = target_path.parent() {
-            std::fs::create_dir_all(p)?;
+        match copy::is_directory(source_path) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(BackupHelperError::TaskError(String::from(
+                    "SourceToTargetCopy task requires the source path to be a directory!",
+                )));
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && !copy::is_retryable_io_error(&error) =>
+            {
+                return Err(BackupHelperError::TaskError(String::from(
+                    "SourceToTargetCopy task requires the source path to be a directory!",
+                )));
+            }
+            Err(error) => {
+                return Err(BackupHelperError::CopyError(format!(
+                    "Failed to get source path metadata: {error}"
+                )));
+            }
         }
 
         copy::copy_tree(source_path, target_path, |progress| {
