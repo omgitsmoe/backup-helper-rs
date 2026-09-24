@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::{
     backup_helper::BackupHelper,
+    copy::CopyPolicy,
     scheduler::{Scheduler, SchedulerShared},
 };
 
@@ -148,11 +149,21 @@ struct ReconcileArgs {
     config: path::PathBuf,
 }
 
+#[derive(Args)]
+struct StartArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Overwrite existing files even when their size and modification time match
+    #[arg(long)]
+    force_overwrite: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     Reconcile(ReconcileArgs),
 
-    Start(CommonArgs),
+    Start(StartArgs),
 }
 
 fn main() -> std::result::Result<(), BackupHelperError> {
@@ -160,22 +171,29 @@ fn main() -> std::result::Result<(), BackupHelperError> {
 
     match cli.command {
         Commands::Reconcile(reconcile_args) => reconcile::reconcile(reconcile_args),
-        Commands::Start(common_args) => start(common_args),
+        Commands::Start(start_args) => start(start_args),
     }
 }
 
-fn start(args: CommonArgs) -> std::result::Result<(), BackupHelperError> {
-    if !std::fs::exists(&args.state)? {
+fn start(args: StartArgs) -> std::result::Result<(), BackupHelperError> {
+    if !std::fs::exists(&args.common.state)? {
         return Err(BackupHelperError::IoError(format!(
             "state file does not exist: {:?}",
-            args.state
+            args.common.state
         )));
     }
 
-    let bh = BackupHelper::from_file(&args.state)?;
-    let scheduler = Scheduler::new(SchedulerShared::new(bh)?);
+    let bh = BackupHelper::from_file(&args.common.state)?;
+    let scheduler = if args.force_overwrite {
+        Scheduler::new(SchedulerShared::new_with_copy_policy(
+            bh,
+            CopyPolicy::ForceOverwrite,
+        )?)
+    } else {
+        Scheduler::new(SchedulerShared::new(bh)?)
+    };
 
-    let state_path = args.state.clone();
+    let state_path = args.common.state.clone();
     let cancellation_request_count = Arc::new(AtomicUsize::new(0));
     const EXIT_AFTER_COUNT_CANCEL_REQUESTS: usize = 3;
     // guard against spamming Ctrl+C writing to state multiple times
@@ -210,7 +228,7 @@ fn start(args: CommonArgs) -> std::result::Result<(), BackupHelperError> {
     let result = scheduler::run(&scheduler);
 
     let bh = scheduler.close()?;
-    bh.persist(&args.state)?;
+    bh.persist(&args.common.state)?;
 
     result
 }

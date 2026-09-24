@@ -5,6 +5,8 @@ use std::{
     time::Duration,
 };
 
+use filetime::FileTime;
+
 #[cfg(unix)]
 use libc::{EIO, EREMOTEIO, ESTALE};
 #[cfg(windows)]
@@ -104,9 +106,16 @@ fn is_retryable_raw_os_error(_error: &io::Error) -> bool {
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyPolicy {
+    SkipUnchanged,
+    ForceOverwrite,
+}
+
 pub fn copy_tree(
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
+    policy: CopyPolicy,
     mut on_progress: impl FnMut(CopyProgress),
 ) -> Result<(), BackupHelperError> {
     let source = source.as_ref();
@@ -130,21 +139,240 @@ pub fn copy_tree(
     reject_overlapping_paths(source, destination)?;
     retry_io(|| fs::create_dir_all(destination))
         .map_err(|error| copy_io_error("create destination directory", destination, error))?;
+    reject_destination_symlink_components(destination, destination)?;
 
     let iter =
         WalkTree::new(source).map_err(|error| copy_io_error("walk source", source, error))?;
-    copy_tree_entries(source, destination, iter, &mut on_progress)
+    copy_tree_entries(source, destination, iter, policy, &mut on_progress)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyAction {
+    Copied,
+    SkippedUnchanged,
+    Directory,
+    Ignored,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyProgress {
     pub relative_path: PathBuf,
+    pub action: CopyAction,
+}
+
+#[derive(Debug, Clone)]
+struct PreservedMetadata {
+    modified: FileTime,
+    #[cfg(unix)]
+    permissions: fs::Permissions,
+}
+
+fn preserved_metadata(metadata: &fs::Metadata) -> io::Result<PreservedMetadata> {
+    let modified = metadata.modified().map(FileTime::from)?;
+
+    Ok(PreservedMetadata {
+        modified,
+        #[cfg(unix)]
+        permissions: metadata.permissions(),
+    })
+}
+
+fn restore_metadata(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
+    restore_file_times(path, metadata)?;
+
+    #[cfg(unix)]
+    fs::set_permissions(path, metadata.permissions.clone())?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restore_file_times(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
+    filetime::set_file_mtime(path, metadata.modified)
+}
+
+#[cfg(windows)]
+fn restore_file_times(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_WRITE_ATTRIBUTES,
+    };
+
+    // Attribute-only access lets read-only destinations receive the source mtime.
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    filetime::set_file_handle_times(&file, None, Some(metadata.modified))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn restore_file_times(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
+    filetime::set_file_mtime(path, metadata.modified)
+}
+
+// Temporarily clear an existing read-only attribute, then restore it after replacement.
+#[cfg(windows)]
+struct ReadOnlyDestination {
+    path: PathBuf,
+    permissions: fs::Permissions,
+}
+
+#[cfg(windows)]
+impl ReadOnlyDestination {
+    fn restore(self) -> io::Result<()> {
+        retry_io(|| fs::set_permissions(&self.path, self.permissions.clone()))
+    }
+}
+
+#[cfg(windows)]
+fn prepare_destination_for_copy(
+    path: &Path,
+) -> Result<Option<ReadOnlyDestination>, BackupHelperError> {
+    let metadata = match retry_io(|| fs::symlink_metadata(path)) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !is_retryable_io_error(&error) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(copy_io_error("read destination metadata", path, error)),
+    };
+
+    let original_permissions = metadata.permissions();
+    if !original_permissions.readonly() {
+        return Ok(None);
+    }
+
+    let mut writable_permissions = original_permissions.clone();
+    writable_permissions.set_readonly(false);
+    retry_io(|| fs::set_permissions(path, writable_permissions.clone()))
+        .map_err(|error| copy_io_error("make destination writable", path, error))?;
+
+    Ok(Some(ReadOnlyDestination {
+        path: path.to_path_buf(),
+        permissions: original_permissions,
+    }))
+}
+
+fn metadata_matches(
+    source: &PreservedMetadata,
+    source_len: u64,
+    destination: &fs::Metadata,
+) -> bool {
+    destination.is_file()
+        && source_len == destination.len()
+        && destination
+            .modified()
+            .map(FileTime::from)
+            .is_ok_and(|modified| modified == source.modified)
+}
+
+fn reject_destination_symlink_components(
+    destination: &Path,
+    destination_path: &Path,
+) -> Result<(), BackupHelperError> {
+    let relative = destination_path
+        .strip_prefix(destination)
+        .expect("destination path is outside the destination root");
+    let mut current = destination.to_path_buf();
+
+    if !destination_component_exists(&current)? {
+        return Ok(());
+    }
+
+    for component in relative.components() {
+        if matches!(component, std::path::Component::CurDir) {
+            continue;
+        }
+
+        current.push(component.as_os_str());
+        if !destination_component_exists(&current)? {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn destination_component_exists(path: &Path) -> Result<bool, BackupHelperError> {
+    match retry_io(|| fs::symlink_metadata(path)) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(BackupHelperError::CopyError(
+            format!("Destination path {:?} contains a symbolic link", path),
+        )),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !is_retryable_io_error(&error) => {
+            Ok(false)
+        }
+        Err(error) => Err(copy_io_error("read destination metadata", path, error)),
+    }
+}
+
+fn copy_file(
+    source: &Path,
+    destination: &Path,
+    source_metadata: &PreservedMetadata,
+    source_len: u64,
+    source_is_file: bool,
+    operation: &str,
+    policy: CopyPolicy,
+) -> Result<CopyAction, BackupHelperError> {
+    if source_is_file && policy == CopyPolicy::SkipUnchanged {
+        let destination_metadata = match retry_io(|| fs::symlink_metadata(destination)) {
+            Ok(metadata) => Some(metadata),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && !is_retryable_io_error(&error) =>
+            {
+                None
+            }
+            Err(error) => {
+                return Err(copy_io_error(
+                    "read destination metadata",
+                    destination,
+                    error,
+                ));
+            }
+        };
+
+        if let Some(destination_metadata) = destination_metadata
+            && metadata_matches(source_metadata, source_len, &destination_metadata)
+        {
+            return Ok(CopyAction::SkippedUnchanged);
+        }
+    }
+
+    #[cfg(windows)]
+    let read_only_destination = if source_is_file {
+        prepare_destination_for_copy(destination)?
+    } else {
+        None
+    };
+
+    let copy_result = retry_io(|| fs::copy(source, destination));
+    #[cfg(windows)]
+    let restore_read_only_result = match read_only_destination {
+        Some(destination) => destination.restore(),
+        None => Ok(()),
+    };
+
+    if let Err(error) = copy_result {
+        return Err(copy_io_error(operation, source, error));
+    }
+    #[cfg(windows)]
+    restore_read_only_result
+        .map_err(|error| copy_io_error("restore destination permissions", destination, error))?;
+
+    retry_io(|| restore_metadata(destination, source_metadata))
+        .map_err(|error| copy_io_error("restore destination metadata", destination, error))?;
+
+    Ok(CopyAction::Copied)
 }
 
 fn copy_tree_entries(
     source: &Path,
     destination: &Path,
     mut iter: WalkTree,
+    policy: CopyPolicy,
     on_progress: &mut impl FnMut(CopyProgress),
 ) -> Result<(), BackupHelperError> {
     for entry in iter.by_ref() {
@@ -155,27 +383,51 @@ fn copy_tree_entries(
             .strip_prefix(source)
             .expect("walker yielded a path outside its root");
         let destination_path = destination.join(relative);
+        reject_destination_symlink_components(destination, &destination_path)?;
 
-        if meta.is_dir() {
+        let action = if meta.is_dir() {
             retry_io(|| fs::create_dir_all(&destination_path)).map_err(|error| {
                 copy_io_error("create destination directory", &destination_path, error)
             })?;
+            CopyAction::Directory
         } else if meta.file_type().is_symlink() {
             let target_meta = retry_io(|| fs::metadata(&source_path)).map_err(|error| {
                 copy_io_error("read symlink target metadata", &source_path, error)
             })?;
             // Copy linked files as regular files, but do not follow linked directories.
             if target_meta.is_file() {
-                retry_io(|| fs::copy(&source_path, &destination_path))
-                    .map_err(|error| copy_io_error("copy symlink target", &source_path, error))?;
+                let metadata = preserved_metadata(&target_meta).map_err(|error| {
+                    copy_io_error("read symlink target metadata", &source_path, error)
+                })?;
+                copy_file(
+                    &source_path,
+                    &destination_path,
+                    &metadata,
+                    target_meta.len(),
+                    true,
+                    "copy symlink target",
+                    policy,
+                )?
+            } else {
+                CopyAction::Ignored
             }
         } else {
-            retry_io(|| fs::copy(&source_path, &destination_path))
-                .map_err(|error| copy_io_error("copy source file", &source_path, error))?;
-        }
+            let metadata = preserved_metadata(&meta)
+                .map_err(|error| copy_io_error("read source metadata", &source_path, error))?;
+            copy_file(
+                &source_path,
+                &destination_path,
+                &metadata,
+                meta.len(),
+                meta.is_file(),
+                "copy source file",
+                policy,
+            )?
+        };
 
         on_progress(CopyProgress {
             relative_path: relative.to_path_buf(),
+            action,
         });
     }
 
@@ -520,7 +772,7 @@ mod tests {
     fn copy_tree_rejects_same_source_and_destination() {
         let root = testdir!();
 
-        let result = copy_tree(&root, &root, |_| {});
+        let result = copy_tree(&root, &root, CopyPolicy::SkipUnchanged, |_| {});
 
         assert!(
             matches!(result, Err(BackupHelperError::CopyError(message)) if message.contains("same path"))
@@ -532,7 +784,12 @@ mod tests {
         let root = testdir!();
         let source = root.join("missing-source");
 
-        let result = copy_tree(&source, root.join("destination"), |_| {});
+        let result = copy_tree(
+            &source,
+            root.join("destination"),
+            CopyPolicy::SkipUnchanged,
+            |_| {},
+        );
 
         assert!(matches!(
             result,
@@ -547,7 +804,12 @@ mod tests {
         let source = root.join("source");
         fs::write(&source, "not a directory").unwrap();
 
-        let result = copy_tree(&source, root.join("destination"), |_| {});
+        let result = copy_tree(
+            &source,
+            root.join("destination"),
+            CopyPolicy::SkipUnchanged,
+            |_| {},
+        );
 
         assert!(matches!(
             result,
@@ -564,7 +826,7 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(&destination, "not a directory").unwrap();
 
-        let result = copy_tree(&source, &destination, |_| {});
+        let result = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {});
 
         assert!(matches!(
             result,
@@ -582,7 +844,7 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(&file_parent, "not a directory").unwrap();
 
-        let result = copy_tree(&source, &destination, |_| {});
+        let result = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {});
 
         assert!(matches!(
             result,
@@ -596,7 +858,7 @@ mod tests {
         let root = testdir!();
         let destination = root.join("nested/destination");
 
-        let result = copy_tree(&root, &destination, |_| {});
+        let result = copy_tree(&root, &destination, CopyPolicy::SkipUnchanged, |_| {});
 
         assert!(
             matches!(result, Err(BackupHelperError::CopyError(message)) if message.contains("inside source"))
@@ -610,7 +872,7 @@ mod tests {
         let source = root.join("source");
         fs::create_dir(&source).unwrap();
 
-        let result = copy_tree(&source, &root, |_| {});
+        let result = copy_tree(&source, &root, CopyPolicy::SkipUnchanged, |_| {});
 
         assert!(
             matches!(result, Err(BackupHelperError::CopyError(message)) if message.contains("inside destination"))
@@ -624,7 +886,7 @@ mod tests {
         let destination = root.join("destination");
         fs::create_dir(&source).unwrap();
 
-        let result = copy_tree(&source, &destination, |_| {});
+        let result = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {});
 
         assert!(result.is_ok());
     }
@@ -640,12 +902,274 @@ mod tests {
         fs::create_dir_all(&nested_destination).unwrap();
         fs::write(nested_source.join("file.txt"), "content").unwrap();
 
-        let result = copy_tree(&source, &destination, |_| {});
+        let result = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {});
 
         assert!(result.is_ok());
         assert_eq!(
             fs::read_to_string(nested_destination.join("file.txt")).unwrap(),
             "content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_rejects_destination_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let outside = root.join("outside");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(source.join("nested/file.txt"), "source").unwrap();
+        fs::write(outside.join("file.txt"), "outside").unwrap();
+        symlink(&outside, destination.join("nested")).unwrap();
+
+        let result = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {});
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::CopyError(message))
+                if message.contains("symbolic link")
+        ));
+        assert_eq!(
+            fs::read_to_string(outside.join("file.txt")).unwrap(),
+            "outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_rejects_destination_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        let outside = root.join("outside.txt");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("file.txt"), "source").unwrap();
+        fs::write(&outside, "outside").unwrap();
+        symlink(&outside, destination.join("file.txt")).unwrap();
+
+        let result = copy_tree(&source, &destination, CopyPolicy::ForceOverwrite, |_| {});
+
+        assert!(matches!(
+            result,
+            Err(BackupHelperError::CopyError(message))
+                if message.contains("symbolic link")
+        ));
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside");
+    }
+
+    #[test]
+    fn copy_tree_skips_file_when_size_and_mtime_match() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("file.txt"), "source").unwrap();
+        fs::write(destination.join("file.txt"), "target").unwrap();
+
+        let mtime = FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        filetime::set_file_mtime(source.join("file.txt"), mtime).unwrap();
+        filetime::set_file_mtime(destination.join("file.txt"), mtime).unwrap();
+
+        let mut progress = Vec::new();
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |entry| {
+            progress.push(entry)
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("file.txt")).unwrap(),
+            "target"
+        );
+        assert!(progress.iter().any(|entry| {
+            entry.relative_path == PathBuf::from("file.txt")
+                && entry.action == CopyAction::SkippedUnchanged
+        }));
+    }
+
+    #[test]
+    fn copy_tree_force_overwrites_file_when_size_and_mtime_match() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("file.txt"), "source").unwrap();
+        fs::write(destination.join("file.txt"), "target").unwrap();
+
+        let mtime = FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        filetime::set_file_mtime(source.join("file.txt"), mtime).unwrap();
+        filetime::set_file_mtime(destination.join("file.txt"), mtime).unwrap();
+
+        let mut progress = Vec::new();
+        copy_tree(&source, &destination, CopyPolicy::ForceOverwrite, |entry| {
+            progress.push(entry)
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("file.txt")).unwrap(),
+            "source"
+        );
+        assert!(progress.iter().any(|entry| {
+            entry.relative_path == PathBuf::from("file.txt") && entry.action == CopyAction::Copied
+        }));
+    }
+
+    #[test]
+    fn copy_tree_preserves_file_mtime() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        let source_file = source.join("file.txt");
+        fs::write(&source_file, "content").unwrap();
+
+        let mtime = FileTime::from_unix_time(1_600_000_000, 456_000_000);
+        filetime::set_file_mtime(&source_file, mtime).unwrap();
+        let source_metadata = fs::metadata(&source_file).unwrap();
+        let expected_mtime = FileTime::from_last_modification_time(&source_metadata);
+
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        let destination_metadata = fs::metadata(destination.join("file.txt")).unwrap();
+        assert_eq!(
+            FileTime::from_last_modification_time(&destination_metadata),
+            expected_mtime
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_preserves_unix_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        let source_file = source.join("file.txt");
+        fs::write(&source_file, "content").unwrap();
+        fs::set_permissions(&source_file, fs::Permissions::from_mode(0o640)).unwrap();
+        let expected_mode = fs::metadata(&source_file).unwrap().permissions().mode() & 0o777;
+
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        let mode = fs::metadata(destination.join("file.txt"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, expected_mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_ignores_unix_permissions_when_skipping() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let source_file = source.join("file.txt");
+        let destination_file = destination.join("file.txt");
+        fs::write(&source_file, "source").unwrap();
+        fs::write(&destination_file, "target").unwrap();
+
+        let mtime = FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        filetime::set_file_mtime(&source_file, mtime).unwrap();
+        let source_mode = fs::metadata(&source_file).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(
+            &destination_file,
+            fs::Permissions::from_mode(source_mode ^ 0o111),
+        )
+        .unwrap();
+        filetime::set_file_mtime(&destination_file, mtime).unwrap();
+
+        let destination_mode = fs::metadata(&destination_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        if source_mode == destination_mode {
+            return;
+        }
+
+        let mut progress = Vec::new();
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |entry| {
+            progress.push(entry)
+        })
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&destination_file).unwrap(), "target");
+        assert_eq!(
+            fs::metadata(&destination_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            destination_mode
+        );
+        assert!(progress.iter().any(|entry| {
+            entry.relative_path == PathBuf::from("file.txt")
+                && entry.action == CopyAction::SkippedUnchanged
+        }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_tree_handles_read_only_destination() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let source_file = source.join("file.txt");
+        let destination_file = destination.join("file.txt");
+        fs::write(&source_file, "content").unwrap();
+        fs::write(&destination_file, "content").unwrap();
+
+        let mtime = FileTime::from_unix_time(1_600_000_000, 456_000_000);
+        filetime::set_file_mtime(&source_file, mtime).unwrap();
+        filetime::set_file_mtime(&destination_file, mtime).unwrap();
+        let mut permissions = fs::metadata(&destination_file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&destination_file, permissions).unwrap();
+
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        let destination_metadata = fs::metadata(&destination_file).unwrap();
+        assert_eq!(
+            FileTime::from_last_modification_time(&destination_metadata),
+            mtime
+        );
+
+        fs::write(&source_file, "updated").unwrap();
+        filetime::set_file_mtime(
+            &source_file,
+            FileTime::from_unix_time(1_700_000_000, 123_000_000),
+        )
+        .unwrap();
+        copy_tree(&source, &destination, CopyPolicy::ForceOverwrite, |_| {}).unwrap();
+        assert_eq!(fs::read_to_string(&destination_file).unwrap(), "updated");
+        assert!(
+            fs::metadata(&destination_file)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert_eq!(
+            FileTime::from_last_modification_time(&fs::metadata(&source_file).unwrap()),
+            FileTime::from_last_modification_time(&fs::metadata(&destination_file).unwrap())
         );
     }
 
@@ -663,7 +1187,7 @@ mod tests {
         create_dir_symlink(&nested, &source.join("dir-link"));
 
         let mut progress = Vec::new();
-        copy_tree(&source, &destination, |entry| {
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |entry| {
             progress.push(entry.relative_path);
         })
         .unwrap();
@@ -698,7 +1222,13 @@ mod tests {
             error: Some(io::Error::other("forced iterator failure")),
         };
 
-        let result = copy_tree_entries(&source, &destination, iter, &mut |_| {});
+        let result = copy_tree_entries(
+            &source,
+            &destination,
+            iter,
+            CopyPolicy::SkipUnchanged,
+            &mut |_| {},
+        );
 
         assert!(matches!(
             result,

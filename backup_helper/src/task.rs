@@ -186,6 +186,7 @@ pub(crate) struct SourceToTargetCopy {
     pub(crate) common: CommonData,
     pub(crate) source_idx: usize,
     pub(crate) target_idx: usize,
+    pub(crate) copy_policy: copy::CopyPolicy,
 }
 
 impl TaskExecutor for SourceToTargetCopy {
@@ -225,12 +226,18 @@ impl TaskExecutor for SourceToTargetCopy {
             }
         }
 
-        copy::copy_tree(source_path, target_path, |progress| {
+        copy::copy_tree(source_path, target_path, self.copy_policy, |progress| {
+            let action = match progress.action {
+                copy::CopyAction::Copied => "copied",
+                copy::CopyAction::SkippedUnchanged => "skipped unchanged",
+                copy::CopyAction::Directory => "directory ready",
+                copy::CopyAction::Ignored => "ignored",
+            };
             progress::report(
                 progress_tx,
                 ProgressEvent::Updated {
                     task_id: ctx.task_id,
-                    message: format!("copied {:?}", progress.relative_path),
+                    message: format!("{} {:?}", action, progress.relative_path),
                 },
             );
         })?;
@@ -549,6 +556,7 @@ mod tests {
                 common: common(&[2, 3]),
                 source_idx: 0,
                 target_idx: 0,
+                copy_policy: copy::CopyPolicy::SkipUnchanged,
             }),
             Task::SourceToTargetSync(SourceToTargetSync {
                 common: common(&[4, 5]),
@@ -744,6 +752,7 @@ mod tests {
             common: common(&[0, 1]),
             source_idx: 0,
             target_idx: 0,
+            copy_policy: copy::CopyPolicy::SkipUnchanged,
         });
         let (progress, progress_events) = mpsc::channel();
         let outcome = task.execute(
@@ -796,6 +805,7 @@ mod tests {
             common: common(&[0, 1]),
             source_idx: 0,
             target_idx: 0,
+            copy_policy: copy::CopyPolicy::SkipUnchanged,
         });
         let progress = progress_sender();
         let outcome = task.execute(
@@ -829,6 +839,7 @@ mod tests {
             common: common(&[0, 1]),
             source_idx: 0,
             target_idx: 0,
+            copy_policy: copy::CopyPolicy::SkipUnchanged,
         });
         let (progress, events) = mpsc::channel();
 
@@ -877,6 +888,7 @@ mod tests {
             common: common(&[0, 1]),
             source_idx: 0,
             target_idx: 0,
+            copy_policy: copy::CopyPolicy::SkipUnchanged,
         });
         let progress = progress_sender();
         let outcome = task.execute(
@@ -905,6 +917,7 @@ mod tests {
             common: common(&[0, 1]),
             source_idx: 0,
             target_idx: 0,
+            copy_policy: copy::CopyPolicy::SkipUnchanged,
         });
         let progress = progress_sender();
         let outcome = task.execute(

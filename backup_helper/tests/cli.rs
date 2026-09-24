@@ -44,7 +44,10 @@ fn config_for_paths(
             }}
         }}
         source {:?} {{
-            target {:?} {{ transfer_mode copy verify #true }}
+            target {:?} {{
+                transfer_mode copy
+                verify #true
+            }}
         }}
         "#,
         source_disk, target_disk, source, target,
@@ -156,5 +159,14 @@ fn start_loads_completed_state_and_is_idempotent() {
 
     let second_start = run_cli(&["start".into(), "--state".into(), arg(&state_path)]);
     assert!(second_start.status.success(), "{second_start:?}");
+    assert_eq!(std::fs::read_to_string(&state_path).unwrap(), first_state);
+
+    let force_start = run_cli(&[
+        "start".into(),
+        "--force-overwrite".into(),
+        "--state".into(),
+        arg(&state_path),
+    ]);
+    assert!(force_start.status.success(), "{force_start:?}");
     assert_eq!(std::fs::read_to_string(state_path).unwrap(), first_state);
 }

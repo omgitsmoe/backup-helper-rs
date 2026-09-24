@@ -8,6 +8,7 @@ use crate::task::{TaskContext, TaskOutcome};
 use crate::{
     BackupHelperError,
     backup_helper::{BackupHelper, DiskHandle},
+    copy::CopyPolicy,
     source::Source,
     target::Target,
     task::{CommonData, SourceHash, SourceToTargetCopy, TargetVerify, Task},
@@ -18,6 +19,7 @@ type Result<T> = std::result::Result<T, BackupHelperError>;
 pub struct SchedulerCore {
     state: BackupHelper,
     log_directory: Option<std::path::PathBuf>,
+    copy_policy: CopyPolicy,
     // all tasks
     // indexed by TaskId
     tasks: Vec<TaskEntry>,
@@ -76,6 +78,14 @@ impl SchedulerShared {
         })
     }
 
+    pub fn new_with_copy_policy(state: BackupHelper, copy_policy: CopyPolicy) -> Result<Self> {
+        Ok(Self {
+            core: Mutex::new(SchedulerCore::new_with_copy_policy(state, copy_policy)?),
+            runnable: Condvar::new(),
+            cancel_requested: AtomicBool::new(false),
+        })
+    }
+
     pub fn worker_count(&self) -> usize {
         let guard = self.core.lock().unwrap();
         guard.disks_total()
@@ -102,7 +112,10 @@ impl SchedulerShared {
     /// completed tasks before a forced (third Ctrl-C) exit.
     pub fn persist_state(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         // Recover from a poisoned lock so a worker panic doesn't block the snapshot.
-        let guard = self.core.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = self
+            .core
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.state.persist(path)
     }
 
@@ -113,10 +126,15 @@ impl SchedulerShared {
 
 impl SchedulerCore {
     pub fn new(state: BackupHelper) -> Result<Self> {
+        Self::new_with_copy_policy(state, CopyPolicy::SkipUnchanged)
+    }
+
+    pub fn new_with_copy_policy(state: BackupHelper, copy_policy: CopyPolicy) -> Result<Self> {
         let disks_busy = state.disks().iter().map(|_| false).collect();
         let mut s = Self {
             state,
             log_directory: None,
+            copy_policy,
             tasks: vec![],
             dependents: vec![],
             errors: vec![],
@@ -195,6 +213,7 @@ impl SchedulerCore {
                             },
                             source_idx: source_index,
                             target_idx: target_index,
+                            copy_policy: self.copy_policy,
                         }),
                         state: match dependencies.len() {
                             0 => TaskState::Ready,
@@ -642,7 +661,10 @@ mod tests {
                 }}
             }}
             source {source} {{
-                target {target} {{ transfer_mode copy verify #true }}
+                target {target} {{
+                    transfer_mode copy
+                    verify #true
+                }}
             }}
         "#
         )
@@ -1160,6 +1182,44 @@ mod tests {
         assert!(reloaded.sources()[0].targets()[0].is_verified());
         let reloaded_core = SchedulerCore::new(reloaded).unwrap();
         assert!(reloaded_core.tasks.is_empty());
+    }
+
+    #[test]
+    fn force_overwrite_replaces_matching_destination_file() {
+        let root = testdir!();
+        let source_path = root.join("source-disk/source");
+        let target_path = root.join("target-disk/target");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::create_dir_all(&target_path).unwrap();
+        let source_file = source_path.join("file.txt");
+        let target_file = target_path.join("file.txt");
+        std::fs::write(&source_file, "source").unwrap();
+        std::fs::write(&target_file, "target").unwrap();
+        let mtime = filetime::FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        filetime::set_file_mtime(&source_file, mtime).unwrap();
+        filetime::set_file_mtime(&target_file, mtime).unwrap();
+
+        let config = normal_config(&root).replace("verify #true", "verify #false");
+        let mut core =
+            SchedulerCore::new_with_copy_policy(state(&config), CopyPolicy::ForceOverwrite)
+                .unwrap();
+        core.log_directory = Some(root.clone());
+        let scheduler = Arc::new(SchedulerShared {
+            core: Mutex::new(core),
+            runnable: Condvar::new(),
+            cancel_requested: AtomicBool::new(false),
+        });
+
+        run(&scheduler).unwrap();
+        assert_eq!(std::fs::read_to_string(&target_file).unwrap(), "source");
+
+        let state = scheduler.close().unwrap();
+        let log_file = state.sources()[0].hash_log_file();
+        assert!(
+            log_file
+                .as_ref()
+                .is_some_and(|path| path.starts_with(&root))
+        );
     }
 
     #[test]
