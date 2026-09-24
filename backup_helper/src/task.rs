@@ -46,6 +46,24 @@ impl Task {
         }
     }
 
+    pub(crate) fn progress_display(&self, ctx: &TaskContext) -> progress::TaskDisplay {
+        let source = ctx
+            .source_path
+            .as_deref()
+            .map(|path| path.display().to_string());
+        let target = ctx
+            .target_path
+            .as_deref()
+            .map(|path| path.display().to_string());
+
+        match self {
+            Task::SourceHash(_) => progress::TaskDisplay::new("hash", source, None),
+            Task::SourceToTargetCopy(_) => progress::TaskDisplay::new("copy", source, target),
+            Task::SourceToTargetSync(_) => progress::TaskDisplay::new("sync", source, target),
+            Task::TargetVerify(_) => progress::TaskDisplay::new("verify", None, target),
+        }
+    }
+
     pub fn involved_disks(&self) -> &[DiskHandle] {
         match self {
             Task::SourceHash(t) => &t.common.involved_disks[..],
@@ -64,7 +82,7 @@ impl Task {
             progress,
             ProgressEvent::Started {
                 task_id: ctx.task_id,
-                description: self.description(ctx),
+                display: self.progress_display(ctx),
             },
         );
 
@@ -75,11 +93,17 @@ impl Task {
             Task::TargetVerify(t) => t.execute(ctx, progress),
         };
 
+        let verify_summary = match &outcome {
+            Ok(TaskOutcome::TargetVerify { summary, .. }) => Some(summary.clone()),
+            _ => None,
+        };
+
         match &outcome {
             Ok(_) => progress::report(
                 progress,
                 ProgressEvent::Finished {
                     task_id: ctx.task_id,
+                    verify_summary,
                 },
             ),
             Err(error) => progress::report(
@@ -659,8 +683,12 @@ mod tests {
         let events: Vec<_> = events.try_iter().collect();
         assert!(matches!(
             events.first(),
-            Some(ProgressEvent::Started { task_id: 10, description })
-                if description.contains("hash") && description.contains("source")
+            Some(ProgressEvent::Started { task_id: 10, display })
+                if display.operation == "hash"
+                    && display
+                        .source
+                        .as_deref()
+                        .is_some_and(|path| path.contains("source"))
         ));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -669,7 +697,7 @@ mod tests {
         )));
         assert!(matches!(
             events.last(),
-            Some(ProgressEvent::Finished { task_id: 10 })
+            Some(ProgressEvent::Finished { task_id: 10, .. })
         ));
     }
 
@@ -864,10 +892,16 @@ mod tests {
         let events: Vec<_> = events.try_iter().collect();
         assert!(matches!(
             events.first(),
-            Some(ProgressEvent::Started { task_id: 11, description })
-                if description.contains("copy")
-                    && description.contains(&*source_path.to_string_lossy())
-                    && description.contains(&*target_path.to_string_lossy())
+            Some(ProgressEvent::Started { task_id: 11, display })
+                if display.operation == "copy"
+                    && display
+                        .source
+                        .as_deref()
+                        .is_some_and(|path| path.contains("source"))
+                    && display
+                        .target
+                        .as_deref()
+                        .is_some_and(|path| path.contains("target"))
         ));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -876,7 +910,7 @@ mod tests {
         )));
         assert!(matches!(
             events.last(),
-            Some(ProgressEvent::Finished { task_id: 11 })
+            Some(ProgressEvent::Finished { task_id: 11, .. })
         ));
     }
 
@@ -1017,8 +1051,12 @@ mod tests {
         let events: Vec<_> = events.try_iter().collect();
         assert!(matches!(
             events.first(),
-            Some(ProgressEvent::Started { task_id: 12, description })
-                if description.contains("verify") && description.contains("target")
+            Some(ProgressEvent::Started { task_id: 12, display })
+                if display.operation == "verify"
+                    && display
+                        .target
+                        .as_deref()
+                        .is_some_and(|path| path.contains("target"))
         ));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1027,7 +1065,10 @@ mod tests {
         )));
         assert!(matches!(
             events.last(),
-            Some(ProgressEvent::Finished { task_id: 12 })
+            Some(ProgressEvent::Finished {
+                task_id: 12,
+                verify_summary: Some(summary),
+            }) if summary.to_string().contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0")
         ));
     }
 
@@ -1063,8 +1104,8 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             events.try_iter().next(),
-            Some(ProgressEvent::Started { task_id: 13, description })
-                if description.contains("sync")
+            Some(ProgressEvent::Started { task_id: 13, display })
+                if display.operation == "sync"
         ));
     }
 

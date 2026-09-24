@@ -223,6 +223,10 @@ fn start_prints_task_verify_summaries_and_log_locations() {
     assert!(stdout.contains("========== VERIFY SUMMARY =========="));
     assert!(stdout.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"));
     assert!(stdout.contains("ALL FILES VERIFIED SUCCESSFULLY"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("========== VERIFY SUMMARY =========="));
+    assert!(stderr.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"));
 }
 
 #[test]

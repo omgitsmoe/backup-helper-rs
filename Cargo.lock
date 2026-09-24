@@ -134,6 +134,7 @@ dependencies = [
  "serde",
  "serde_json",
  "testdir",
+ "unicode-width",
  "windows-sys 0.61.2",
 ]
 

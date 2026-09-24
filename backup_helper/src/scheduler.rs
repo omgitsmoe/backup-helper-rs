@@ -646,9 +646,7 @@ fn worker(scheduler: &Scheduler, progress: mpsc::Sender<ProgressEvent>) {
 pub fn run(scheduler: &Scheduler) -> Result<()> {
     let (progress_tx, progress_rx) = std::sync::mpsc::channel();
 
-    let reporter = thread::spawn(move || {
-        progress::progress_reporter(progress_rx);
-    });
+    let reporter = thread::spawn(move || progress::progress_reporter(progress_rx));
 
     let handles = (0..scheduler.worker_count())
         .map(|i| {
@@ -668,7 +666,10 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
         h.join().expect("worker panicked");
     }
 
-    reporter.join().expect("progress reporter panicked");
+    let reporter_result = reporter
+        .join()
+        .map_err(|_| BackupHelperError::SchedulerError("progress reporter panicked".into()))?;
+    reporter_result?;
 
     if scheduler.cancel_requested() {
         return Err(BackupHelperError::Interrupted);
