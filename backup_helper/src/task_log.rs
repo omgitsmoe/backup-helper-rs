@@ -10,7 +10,7 @@ pub(crate) struct TaskLog {
     path: PathBuf,
     writer: BufWriter<File>,
     incremental: IncrementalCounts,
-    verify: VerifyCounts,
+    verify: VerifySummary,
 }
 
 pub(crate) enum TaskLogType<'a> {
@@ -35,12 +35,111 @@ struct IncrementalCounts {
 }
 
 #[derive(Default)]
-struct VerifyCounts {
-    checked: u64,
-    errors: u64,
-    missing: u64,
-    crc_errors: u64,
-    stale: u64,
+struct VerifySummary {
+    ok: u64,
+    missing: Vec<PathBuf>,
+    mismatch: Vec<PathBuf>,
+    mismatch_size: Vec<PathBuf>,
+    corrupted: Vec<PathBuf>,
+    outdated: Vec<PathBuf>,
+}
+
+impl VerifySummary {
+    fn record(&mut self, path: &Path, result: VerifyResult) {
+        match result {
+            VerifyResult::Ok => self.ok += 1,
+            VerifyResult::FileMissing(_) => self.missing.push(path.to_path_buf()),
+            VerifyResult::Mismatch => self.mismatch.push(path.to_path_buf()),
+            VerifyResult::MismatchSize => self.mismatch_size.push(path.to_path_buf()),
+            VerifyResult::MismatchCorrupted => self.corrupted.push(path.to_path_buf()),
+            VerifyResult::MismatchOutdatedHash => self.outdated.push(path.to_path_buf()),
+        }
+    }
+
+    fn total(&self) -> u64 {
+        self.ok
+            + self.missing.len() as u64
+            + self.mismatch.len() as u64
+            + self.mismatch_size.len() as u64
+            + self.corrupted.len() as u64
+            + self.outdated.len() as u64
+    }
+
+    fn error_count(&self) -> u64 {
+        self.missing.len() as u64
+            + self.mismatch.len() as u64
+            + self.mismatch_size.len() as u64
+            + self.corrupted.len() as u64
+    }
+
+    fn all_error_count(&self) -> u64 {
+        self.error_count() + self.outdated.len() as u64
+    }
+
+    fn checksum_error_count(&self) -> u64 {
+        self.mismatch.len() as u64
+            + self.mismatch_size.len() as u64
+            + self.corrupted.len() as u64
+            + self.outdated.len() as u64
+    }
+
+    fn has_errors(&self) -> bool {
+        self.error_count() > 0
+    }
+
+    fn has_warnings(&self) -> bool {
+        !self.outdated.is_empty()
+    }
+
+    fn write<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        writeln!(writer, "\n========== VERIFY SUMMARY ==========")?;
+        writeln!(
+            writer,
+            "Total: {} | OK: {} | ERR: {} | WARN: {}",
+            self.total(),
+            self.ok,
+            self.error_count(),
+            self.outdated.len()
+        )?;
+
+        if self.has_errors() {
+            writeln!(writer, "❌ VERIFICATION FAILED\n")?;
+            write_result_paths(writer, "Missing files", "[ERR MISS  ]", &self.missing)?;
+            write_result_paths(writer, "Hash mismatches", "[ERR HASH  ]", &self.mismatch)?;
+            write_result_paths(
+                writer,
+                "Size mismatches",
+                "[ERR SIZE  ]",
+                &self.mismatch_size,
+            )?;
+            write_result_paths(writer, "Corrupted files", "[ERR CORR  ]", &self.corrupted)?;
+        } else {
+            writeln!(writer, "✅ ALL FILES VERIFIED SUCCESSFULLY")?;
+        }
+
+        if self.has_warnings() {
+            write_result_paths(writer, "Outdated hashes", "[WARN STALE]", &self.outdated)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn write_result_paths<W: Write>(
+    writer: &mut W,
+    title: &str,
+    status: &str,
+    paths: &[PathBuf],
+) -> io::Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(writer, "--- {title} ({}) ---", paths.len())?;
+    for path in paths {
+        writeln!(writer, "{status} {path:?}")?;
+    }
+    writeln!(writer)
 }
 
 impl TaskLog {
@@ -69,7 +168,7 @@ impl TaskLog {
             path,
             writer,
             incremental: IncrementalCounts::default(),
-            verify: VerifyCounts::default(),
+            verify: VerifySummary::default(),
         };
         log.write_path_header(header_label, header_path)?;
         Ok(log)
@@ -120,35 +219,14 @@ impl TaskLog {
     }
 
     pub(crate) fn report_verify(&mut self, path: &Path, result: VerifyResult) -> io::Result<()> {
-        self.verify.checked += 1;
+        self.verify.record(path, result);
         let status = match result {
             VerifyResult::Ok => "[OK        ]",
-            VerifyResult::FileMissing(_) => {
-                self.verify.errors += 1;
-                self.verify.missing += 1;
-                "[ERR MISS  ]"
-            }
-            VerifyResult::Mismatch => {
-                self.verify.errors += 1;
-                self.verify.crc_errors += 1;
-                "[ERR HASH  ]"
-            }
-            VerifyResult::MismatchSize => {
-                self.verify.errors += 1;
-                self.verify.crc_errors += 1;
-                "[ERR SIZE  ]"
-            }
-            VerifyResult::MismatchCorrupted => {
-                self.verify.errors += 1;
-                self.verify.crc_errors += 1;
-                "[ERR CORR  ]"
-            }
-            VerifyResult::MismatchOutdatedHash => {
-                self.verify.errors += 1;
-                self.verify.crc_errors += 1;
-                self.verify.stale += 1;
-                "[WARN STALE]"
-            }
+            VerifyResult::FileMissing(_) => "[ERR MISS  ]",
+            VerifyResult::Mismatch => "[ERR HASH  ]",
+            VerifyResult::MismatchSize => "[ERR SIZE  ]",
+            VerifyResult::MismatchCorrupted => "[ERR CORR  ]",
+            VerifyResult::MismatchOutdatedHash => "[WARN STALE]",
         };
 
         writeln!(self.writer, "{status} {:?}", path)
@@ -175,11 +253,21 @@ impl TaskLog {
     pub(crate) fn finish_verify(&mut self) -> io::Result<()> {
         writeln!(self.writer)?;
         writeln!(self.writer, "Summary:")?;
-        writeln!(self.writer, "  checked: {}", self.verify.checked)?;
-        writeln!(self.writer, "  errors: {}", self.verify.errors)?;
-        writeln!(self.writer, "  missing: {}", self.verify.missing)?;
-        writeln!(self.writer, "  checksum errors: {}", self.verify.crc_errors)?;
-        writeln!(self.writer, "  outdated hashes: {}", self.verify.stale)?;
+        writeln!(self.writer, "  checked: {}", self.verify.total())?;
+        writeln!(self.writer, "  errors: {}", self.verify.all_error_count())?;
+        writeln!(self.writer, "  missing: {}", self.verify.missing.len())?;
+        writeln!(
+            self.writer,
+            "  checksum errors: {}",
+            self.verify.checksum_error_count()
+        )?;
+        writeln!(
+            self.writer,
+            "  outdated hashes: {}",
+            self.verify.outdated.len()
+        )?;
+        // Keep the compact counts above while adding the detailed CLI-style report.
+        self.verify.write(&mut self.writer)?;
         writeln!(self.writer, "\nDone.")?;
         self.writer.flush()
     }
@@ -338,6 +426,14 @@ mod tests {
             "  missing: 1",
             "  checksum errors: 4",
             "  outdated hashes: 1",
+            "========== VERIFY SUMMARY ==========",
+            "Total: 6 | OK: 1 | ERR: 4 | WARN: 1",
+            "❌ VERIFICATION FAILED",
+            "--- Missing files (1) ---",
+            "--- Hash mismatches (1) ---",
+            "--- Size mismatches (1) ---",
+            "--- Corrupted files (1) ---",
+            "--- Outdated hashes (1) ---",
             "Done.",
         ] {
             assert!(
@@ -345,5 +441,61 @@ mod tests {
                 "missing {expected:?}:\n{contents}"
             );
         }
+    }
+
+    #[test]
+    fn reports_success_for_verification_without_errors() {
+        let root = testdir!();
+        let subject = root.join("target");
+        let checksum_file = subject.join("checksums.cshd");
+        let mut log = TaskLog::new(
+            TaskLogType::TargetVerify {
+                root: &subject,
+                checksum_file: &checksum_file,
+            },
+            Some(&root),
+        )
+        .unwrap();
+
+        log.report_verify(Path::new("ok.txt"), VerifyResult::Ok)
+            .unwrap();
+        log.finish_verify().unwrap();
+
+        let log_path = log.path().to_owned();
+        drop(log);
+        let contents = std::fs::read_to_string(log_path).unwrap();
+        assert!(contents.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"));
+        assert!(contents.contains("✅ ALL FILES VERIFIED SUCCESSFULLY"));
+        assert!(!contents.contains("❌ VERIFICATION FAILED"));
+    }
+
+    #[test]
+    fn reports_outdated_hashes_as_warnings() {
+        let root = testdir!();
+        let subject = root.join("target");
+        let checksum_file = subject.join("checksums.cshd");
+        let mut log = TaskLog::new(
+            TaskLogType::TargetVerify {
+                root: &subject,
+                checksum_file: &checksum_file,
+            },
+            Some(&root),
+        )
+        .unwrap();
+
+        log.report_verify(
+            Path::new("outdated.txt"),
+            VerifyResult::MismatchOutdatedHash,
+        )
+        .unwrap();
+        log.finish_verify().unwrap();
+
+        let log_path = log.path().to_owned();
+        drop(log);
+        let contents = std::fs::read_to_string(log_path).unwrap();
+        assert!(contents.contains("Total: 1 | OK: 0 | ERR: 0 | WARN: 1"));
+        assert!(contents.contains("✅ ALL FILES VERIFIED SUCCESSFULLY"));
+        assert!(contents.contains("--- Outdated hashes (1) ---"));
+        assert!(contents.contains("[WARN STALE] \"outdated.txt\""));
     }
 }

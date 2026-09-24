@@ -970,6 +970,8 @@ mod tests {
                 "file.txt",
                 "checked: 1",
                 "errors: 0",
+                "Total: 1 | OK: 1 | ERR: 0 | WARN: 0",
+                "✅ ALL FILES VERIFIED SUCCESSFULLY",
             ],
         );
     }
@@ -1187,6 +1189,11 @@ mod tests {
                 "errors: 3",
                 "missing: 1",
                 "checksum errors: 2",
+                "Total: 4 | OK: 1 | ERR: 2 | WARN: 1",
+                "❌ VERIFICATION FAILED",
+                "--- Missing files (1) ---",
+                "--- Size mismatches (1) ---",
+                "--- Outdated hashes (1) ---",
             ],
         );
     }
