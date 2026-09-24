@@ -226,6 +226,7 @@ fn start(args: StartArgs) -> std::result::Result<(), BackupHelperError> {
     .expect("Error setting Ctrl-C handler");
 
     let result = scheduler::run(&scheduler);
+    print!("{}", scheduler.task_summary());
 
     let bh = scheduler.close()?;
     bh.persist(&args.common.state)?;

@@ -6,7 +6,12 @@ use serde_json::Value;
 use testdir::testdir;
 
 fn run_cli(args: &[OsString]) -> std::process::Output {
+    run_cli_from(Path::new("."), args)
+}
+
+fn run_cli_from(root: &Path, args: &[OsString]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_backup_helper"))
+        .current_dir(root)
         .args(args)
         .output()
         .expect("failed to run backup_helper")
@@ -59,6 +64,27 @@ fn write_config(root: &Path) -> (PathBuf, PathBuf) {
     let state_path = root.join("state.json");
     std::fs::write(&config_path, config(root)).unwrap();
     (config_path, state_path)
+}
+
+fn mark_disks_mounted(state: &mut Value) {
+    for disk in state["disks"].as_array_mut().unwrap() {
+        disk["mounted"] = true.into();
+    }
+}
+
+fn reconcile_with_mounted_disks(config_path: &Path, state_path: &Path) {
+    let output = run_cli(&[
+        "reconcile".into(),
+        arg(config_path),
+        "--state".into(),
+        arg(state_path),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+
+    let mut state: Value =
+        serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+    mark_disks_mounted(&mut state);
+    std::fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 }
 
 #[test]
@@ -169,4 +195,58 @@ fn start_loads_completed_state_and_is_idempotent() {
     ]);
     assert!(force_start.status.success(), "{force_start:?}");
     assert_eq!(std::fs::read_to_string(state_path).unwrap(), first_state);
+}
+
+#[test]
+fn start_prints_task_verify_summaries_and_log_locations() {
+    let root = testdir!();
+    let (config_path, state_path) = write_config(&root);
+    let source_path = root.join("source-disk/source");
+    let target_path = root.join("target-disk/target");
+    std::fs::create_dir_all(&source_path).unwrap();
+    std::fs::create_dir_all(&target_path).unwrap();
+    std::fs::write(source_path.join("file.txt"), "content").unwrap();
+    reconcile_with_mounted_disks(&config_path, &state_path);
+
+    let output = run_cli_from(&root, &["start".into(), "--state".into(), arg(&state_path)]);
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("========== TASK SUMMARY =========="));
+    assert!(stdout.contains("Ran: 3 | Successful: 3 | Errored: 0"));
+    assert!(stdout.contains("[OK] 0: hash"));
+    assert!(stdout.contains("[OK] 1: copy"));
+    assert!(stdout.contains("[OK] 2: verify"));
+    assert_eq!(stdout.matches("Full log:").count(), 2);
+    assert!(stdout.contains("SourceHash_"));
+    assert!(stdout.contains("TargetVerify_"));
+    assert!(stdout.contains("========== VERIFY SUMMARY =========="));
+    assert!(stdout.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"));
+    assert!(stdout.contains("ALL FILES VERIFIED SUCCESSFULLY"));
+}
+
+#[test]
+fn start_prints_failed_task_summary_when_run_fails() {
+    let root = testdir!();
+    let (config_path, state_path) = write_config(&root);
+    let source_path = root.join("source-disk/source");
+    let target_path = root.join("target-disk/target");
+    std::fs::create_dir_all(&source_path).unwrap();
+    std::fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+    std::fs::write(source_path.join("file.txt"), "content").unwrap();
+    std::fs::write(&target_path, "not a directory").unwrap();
+    reconcile_with_mounted_disks(&config_path, &state_path);
+
+    let output = run_cli_from(&root, &["start".into(), "--state".into(), arg(&state_path)]);
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Ran: 2 | Successful: 1 | Errored: 1"));
+    assert!(stdout.contains("[OK] 0: hash"));
+    assert!(stdout.contains("Full log:"));
+    assert!(stdout.contains("SourceHash_"));
+    assert!(stdout.contains("[ERR] 1: copy"));
+    assert!(stdout.contains("CopyError:"));
+    assert!(!stdout.contains("[ERR] 2: verify"));
+    assert!(!stdout.contains("========== VERIFY SUMMARY =========="));
 }

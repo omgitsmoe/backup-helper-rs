@@ -1,5 +1,6 @@
 use checksum_helper::{checksum_helper::IncrementalProgress, hashed_file::VerifyResult};
 use chrono::Local;
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -34,8 +35,8 @@ struct IncrementalCounts {
     removed: u64,
 }
 
-#[derive(Default)]
-struct VerifySummary {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct VerifySummary {
     ok: u64,
     missing: Vec<PathBuf>,
     mismatch: Vec<PathBuf>,
@@ -90,11 +91,13 @@ impl VerifySummary {
     fn has_warnings(&self) -> bool {
         !self.outdated.is_empty()
     }
+}
 
-    fn write<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        writeln!(writer, "\n========== VERIFY SUMMARY ==========")?;
+impl fmt::Display for VerifySummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "\n========== VERIFY SUMMARY ==========")?;
         writeln!(
-            writer,
+            f,
             "Total: {} | OK: {} | ERR: {} | WARN: {}",
             self.total(),
             self.ok,
@@ -103,34 +106,29 @@ impl VerifySummary {
         )?;
 
         if self.has_errors() {
-            writeln!(writer, "❌ VERIFICATION FAILED\n")?;
-            write_result_paths(writer, "Missing files", "[ERR MISS  ]", &self.missing)?;
-            write_result_paths(writer, "Hash mismatches", "[ERR HASH  ]", &self.mismatch)?;
-            write_result_paths(
-                writer,
-                "Size mismatches",
-                "[ERR SIZE  ]",
-                &self.mismatch_size,
-            )?;
-            write_result_paths(writer, "Corrupted files", "[ERR CORR  ]", &self.corrupted)?;
+            writeln!(f, "❌ VERIFICATION FAILED\n")?;
+            write_result_paths(f, "Missing files", "[ERR MISS  ]", &self.missing)?;
+            write_result_paths(f, "Hash mismatches", "[ERR HASH  ]", &self.mismatch)?;
+            write_result_paths(f, "Size mismatches", "[ERR SIZE  ]", &self.mismatch_size)?;
+            write_result_paths(f, "Corrupted files", "[ERR CORR  ]", &self.corrupted)?;
         } else {
-            writeln!(writer, "✅ ALL FILES VERIFIED SUCCESSFULLY")?;
+            writeln!(f, "✅ ALL FILES VERIFIED SUCCESSFULLY")?;
         }
 
         if self.has_warnings() {
-            write_result_paths(writer, "Outdated hashes", "[WARN STALE]", &self.outdated)?;
+            write_result_paths(f, "Outdated hashes", "[WARN STALE]", &self.outdated)?;
         }
 
         Ok(())
     }
 }
 
-fn write_result_paths<W: Write>(
+fn write_result_paths<W: fmt::Write>(
     writer: &mut W,
     title: &str,
     status: &str,
     paths: &[PathBuf],
-) -> io::Result<()> {
+) -> fmt::Result {
     if paths.is_empty() {
         return Ok(());
     }
@@ -267,9 +265,13 @@ impl TaskLog {
             self.verify.outdated.len()
         )?;
         // Keep the compact counts above while adding the detailed CLI-style report.
-        self.verify.write(&mut self.writer)?;
+        write!(self.writer, "{}", self.verify)?;
         writeln!(self.writer, "\nDone.")?;
         self.writer.flush()
+    }
+
+    pub(crate) fn into_verify_summary(self) -> VerifySummary {
+        self.verify
     }
 }
 

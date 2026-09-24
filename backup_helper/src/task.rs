@@ -12,7 +12,7 @@ use crate::{
     progress::{self, ProgressEvent},
     source::ChecksumOptions,
     target::VerifiedInfo,
-    task_log::{TaskLog, TaskLogType},
+    task_log::{TaskLog, TaskLogType, VerifySummary},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,10 +356,12 @@ impl TaskExecutor for TargetVerify {
             return Err(error.into());
         }
 
+        let log_file = log.path().to_path_buf();
         log.finish_verify()?;
-        verified.log_file = log.path().to_path_buf();
+        verified.log_file = log_file;
+        let summary = log.into_verify_summary();
 
-        Ok(TaskOutcome::TargetVerify(verified))
+        Ok(TaskOutcome::TargetVerify { verified, summary })
     }
 }
 
@@ -414,7 +416,10 @@ pub(crate) enum TaskOutcome {
     SourceToTargetCopy,
     #[allow(dead_code)]
     SourceToTargetSync,
-    TargetVerify(VerifiedInfo),
+    TargetVerify {
+        verified: VerifiedInfo,
+        summary: VerifySummary,
+    },
 }
 
 #[cfg(test)]
@@ -506,7 +511,7 @@ mod tests {
         )
         .unwrap();
 
-        let TaskOutcome::TargetVerify(verified) = outcome else {
+        let TaskOutcome::TargetVerify { verified, .. } = outcome else {
             panic!("TargetVerify task returned the wrong outcome");
         };
         assert_log_contains(

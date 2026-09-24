@@ -1,10 +1,12 @@
 use std::fmt::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 
 use crate::progress::{self, ProgressEvent};
 use crate::task::{TaskContext, TaskOutcome};
+use crate::task_log::VerifySummary;
 use crate::{
     BackupHelperError,
     backup_helper::{BackupHelper, DiskHandle},
@@ -45,9 +47,21 @@ pub type Scheduler = Arc<SchedulerShared>;
 
 type TaskId = usize;
 
+enum TaskExecutionResult {
+    NotRun,
+    Succeeded {
+        log_file: Option<PathBuf>,
+        verify_summary: Option<VerifySummary>,
+    },
+    Failed {
+        message: String,
+    },
+}
+
 pub struct TaskEntry {
     task: Task,
     state: TaskState,
+    execution: TaskExecutionResult,
     // tasks that this task depends on
     dependencies: Vec<TaskId>,
     remaining_deps: usize,
@@ -122,6 +136,13 @@ impl SchedulerShared {
     pub fn cancel_requested(&self) -> bool {
         self.cancel_requested.load(Ordering::Acquire)
     }
+
+    pub fn task_summary(&self) -> String {
+        self.core
+            .lock()
+            .expect("scheduler mutex poisoned")
+            .task_summary()
+    }
 }
 
 impl SchedulerCore {
@@ -185,6 +206,7 @@ impl SchedulerCore {
                         options: source.checksum_options().clone(),
                     }),
                     state: TaskState::Ready,
+                    execution: TaskExecutionResult::NotRun,
                     dependencies: vec![],
                     remaining_deps: 0,
                     priority: 0,
@@ -219,6 +241,7 @@ impl SchedulerCore {
                             0 => TaskState::Ready,
                             _ => TaskState::Pending,
                         },
+                        execution: TaskExecutionResult::NotRun,
                         remaining_deps: dependencies.len(),
                         dependencies,
                         priority: 1,
@@ -248,6 +271,7 @@ impl SchedulerCore {
                             0 => TaskState::Ready,
                             _ => TaskState::Pending,
                         },
+                        execution: TaskExecutionResult::NotRun,
                         remaining_deps: dependencies.len(),
                         dependencies,
                         priority: 0,
@@ -312,7 +336,7 @@ impl SchedulerCore {
     }
 
     pub fn finish_task(&mut self, task_id: TaskId, outcome: Result<TaskOutcome>) {
-        let task = &mut self.tasks[task_id];
+        let task = &self.tasks[task_id];
         for disk_id in task.involved_disks() {
             let busy = self.disks_busy[disk_id.0];
             assert!(busy, "all disks of a running task must be busy!");
@@ -321,12 +345,12 @@ impl SchedulerCore {
 
         self.running -= 1;
 
-        match outcome {
-            Ok(o) => {
+        let execution = match outcome {
+            Ok(outcome) => {
                 self.done += 1;
-                task.state = TaskState::Done;
+                self.tasks[task_id].state = TaskState::Done;
 
-                self.update_state(task_id, o);
+                let (log_file, verify_summary) = self.update_state(task_id, outcome);
 
                 // update other tasks that might have become ready
                 for &dependent in &self.dependents[task_id] {
@@ -340,16 +364,29 @@ impl SchedulerCore {
                         entry.state = TaskState::Ready;
                     }
                 }
+
+                TaskExecutionResult::Succeeded {
+                    log_file,
+                    verify_summary,
+                }
             }
-            Err(e) => {
-                task.state = TaskState::Failed;
-                self.errors.push(e);
+            Err(error) => {
+                self.tasks[task_id].state = TaskState::Failed;
+                let message = error.to_string();
+                self.errors.push(error);
                 self.mark_failed_dependents(task_id);
+
+                TaskExecutionResult::Failed { message }
             }
-        }
+        };
+        self.tasks[task_id].execution = execution;
     }
 
-    fn update_state(&mut self, task_id: TaskId, outcome: TaskOutcome) {
+    fn update_state(
+        &mut self,
+        task_id: TaskId,
+        outcome: TaskOutcome,
+    ) -> (Option<PathBuf>, Option<VerifySummary>) {
         let task = &mut self.tasks[task_id].task;
         match outcome {
             TaskOutcome::SourceHash {
@@ -362,7 +399,8 @@ impl SchedulerCore {
 
                 let source = self.state.source_mut(task.source_idx);
                 source.set_hash_file(hash_file);
-                source.set_hash_log_file(hash_log_file);
+                source.set_hash_log_file(hash_log_file.clone());
+                (Some(hash_log_file), None)
             }
             TaskOutcome::SourceToTargetCopy => {
                 let Task::SourceToTargetCopy(task) = task else {
@@ -372,6 +410,7 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
                 target.transferred();
+                (None, None)
             }
             TaskOutcome::SourceToTargetSync => {
                 let Task::SourceToTargetSync(task) = task else {
@@ -381,15 +420,18 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
                 target.transferred();
+                (None, None)
             }
-            TaskOutcome::TargetVerify(verified_info) => {
+            TaskOutcome::TargetVerify { verified, summary } => {
                 let Task::TargetVerify(task) = task else {
                     unreachable!("outcome doesn't match task");
                 };
 
+                let log_file = verified.log_file.clone();
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
-                target.verified(verified_info);
+                target.verified(verified);
+                (Some(log_file), Some(summary))
             }
         }
     }
@@ -462,6 +504,76 @@ impl SchedulerCore {
 
     fn has_ready_tasks(&self) -> bool {
         self.tasks.iter().any(|task| task.state == TaskState::Ready)
+    }
+
+    fn task_summary(&self) -> String {
+        let successful = self
+            .tasks
+            .iter()
+            .filter(|entry| matches!(&entry.execution, TaskExecutionResult::Succeeded { .. }))
+            .count();
+        let errored = self
+            .tasks
+            .iter()
+            .filter(|entry| matches!(&entry.execution, TaskExecutionResult::Failed { .. }))
+            .count();
+        let ran = successful + errored;
+
+        let mut output = String::new();
+        writeln!(output, "\n========== TASK SUMMARY ==========").unwrap();
+        writeln!(
+            output,
+            "Ran: {ran} | Successful: {successful} | Errored: {errored}"
+        )
+        .unwrap();
+
+        if successful > 0 {
+            writeln!(output, "\nSuccessful ({successful}):").unwrap();
+            for (task_id, entry) in self.tasks.iter().enumerate() {
+                let TaskExecutionResult::Succeeded {
+                    log_file,
+                    verify_summary: _,
+                } = &entry.execution
+                else {
+                    continue;
+                };
+
+                let description = entry.task.description(&self.context(task_id, &entry.task));
+                writeln!(output, "  [OK] {task_id}: {description}").unwrap();
+                if let Some(log_file) = log_file {
+                    writeln!(output, "         Full log: {log_file:?}").unwrap();
+                }
+            }
+        }
+
+        if errored > 0 {
+            writeln!(output, "\nErrored ({errored}):").unwrap();
+            for (task_id, entry) in self.tasks.iter().enumerate() {
+                let TaskExecutionResult::Failed { message } = &entry.execution else {
+                    continue;
+                };
+
+                let description = entry.task.description(&self.context(task_id, &entry.task));
+                writeln!(output, "  [ERR] {task_id}: {description}").unwrap();
+                writeln!(output, "         {}", message.replace('\n', "\n         ")).unwrap();
+            }
+        }
+
+        for (task_id, entry) in self.tasks.iter().enumerate() {
+            let TaskExecutionResult::Succeeded {
+                verify_summary: Some(verify_summary),
+                ..
+            } = &entry.execution
+            else {
+                continue;
+            };
+
+            let description = entry.task.description(&self.context(task_id, &entry.task));
+            writeln!(output, "\nVerify task {task_id}: {description}").unwrap();
+            write!(output, "{verify_summary}").unwrap();
+        }
+
+        output
     }
 
     pub fn close(self) -> BackupHelper {
@@ -746,13 +858,16 @@ mod tests {
     }
 
     fn verify_outcome(root: &Path) -> TaskOutcome {
-        TaskOutcome::TargetVerify(VerifiedInfo {
-            checked: 1,
-            errors: 0,
-            missing: 0,
-            crc_errors: 0,
-            log_file: root.join("verify.log"),
-        })
+        TaskOutcome::TargetVerify {
+            verified: VerifiedInfo {
+                checked: 1,
+                errors: 0,
+                missing: 0,
+                crc_errors: 0,
+                log_file: root.join("verify.log"),
+            },
+            summary: VerifySummary::default(),
+        }
     }
 
     #[test]
@@ -784,6 +899,50 @@ mod tests {
     }
 
     #[test]
+    fn task_summary_reports_results_verify_details_and_log_locations() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+
+        core.start_task(0);
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        core.start_task(1);
+        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+        core.start_task(2);
+        core.finish_task(2, Ok(verify_outcome(&root)));
+
+        let summary = core.task_summary();
+
+        assert!(summary.contains("Ran: 3 | Successful: 3 | Errored: 0"));
+        assert!(summary.contains("[OK] 0: hash"));
+        assert!(summary.contains("[OK] 1: copy"));
+        assert!(summary.contains("[OK] 2: verify"));
+        assert_eq!(summary.matches("Full log:").count(), 2);
+        assert!(summary.contains(&format!("{:?}", root.join("source.log"))));
+        assert!(summary.contains(&format!("{:?}", root.join("verify.log"))));
+        assert!(summary.contains("Verify task 2: verify"));
+        assert!(summary.contains("========== VERIFY SUMMARY =========="));
+        assert!(summary.contains("Total: 0 | OK: 0 | ERR: 0 | WARN: 0"));
+    }
+
+    #[test]
+    fn task_summary_omits_tasks_that_did_not_run() {
+        let root = testdir!();
+        let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
+
+        core.start_task(0);
+        core.finish_task(0, Err(BackupHelperError::TaskError("source failed".into())));
+
+        let summary = core.task_summary();
+
+        assert!(summary.contains("Ran: 1 | Successful: 0 | Errored: 1"));
+        assert!(summary.contains("[ERR] 0: hash"));
+        assert!(summary.contains("TaskError: source failed"));
+        assert!(!summary.contains("[OK]"));
+        assert!(!summary.contains("copy "));
+        assert!(!summary.contains("verify "));
+    }
+
+    #[test]
     fn finish_target_verify_persists_verified_info() {
         let root = testdir!();
         let mut core = SchedulerCore::new(state(&normal_config(&root))).unwrap();
@@ -801,7 +960,13 @@ mod tests {
             log_file: root.join("verification.log"),
         };
         core.start_task(2);
-        core.finish_task(2, Ok(TaskOutcome::TargetVerify(verified.clone())));
+        core.finish_task(
+            2,
+            Ok(TaskOutcome::TargetVerify {
+                verified: verified.clone(),
+                summary: VerifySummary::default(),
+            }),
+        );
 
         assert!(core.state.sources()[0].targets()[0].is_verified());
 
