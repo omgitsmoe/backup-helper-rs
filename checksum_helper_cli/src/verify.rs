@@ -159,7 +159,7 @@ pub fn verify_root(
     let mut reporter = ProgressReporter::new();
     reporter.set_verbose(verbose);
     let mut summary = VerifySummary::default();
-    ch.verify_root(
+    let verify_root = ch.verify_root(
         |path| matcher.is_match(path) && !matcher.is_excluded(path),
         |p| {
             if let VerifyRootProgress::Verify(VerifyProgress::Post(post)) = p {
@@ -167,7 +167,10 @@ pub fn verify_root(
             }
             reporter.report_verify_root(p);
         },
-    )?;
+    );
+    // The most current totals were already reported when verification started.
+    reporter.finish();
+    verify_root?;
 
     let result = summary.report();
     result.as_result()?;
@@ -201,7 +204,7 @@ pub fn verify_file(
     let mut summary = VerifySummary::default();
 
     let hc = ch.read_collection(path)?;
-    ch.verify(
+    let verify = ch.verify(
         &hc,
         |path| matcher.is_match(path) && !matcher.is_excluded(path),
         |p| {
@@ -210,7 +213,9 @@ pub fn verify_file(
             }
             reporter.report_verify(p);
         },
-    )?;
+    );
+    reporter.finish();
+    verify?;
 
     let result = summary.report();
     result.as_result()?;

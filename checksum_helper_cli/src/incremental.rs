@@ -9,7 +9,9 @@ pub fn incremental(args: IncrementalArgs, verbose: u8) -> Result<(), Box<dyn std
 
     let mut reporter = ProgressReporter::new();
     reporter.set_verbose(verbose);
-    let inc = ch.incremental(|p| reporter.report_incremental(p))?;
+    let incremental = ch.incremental(|p| reporter.report_incremental(p));
+    reporter.report_totals();
+    let inc = incremental?;
 
     // With a periodic write interval, `incremental` already flushed the
     // collection to disk during the run; `write_collection` is then a no-op.
@@ -26,7 +28,9 @@ pub fn fill(args: IncrementalArgs, verbose: u8) -> Result<(), Box<dyn std::error
 
     let mut reporter = ProgressReporter::new();
     reporter.set_verbose(verbose);
-    let hc = ch.fill_missing(|p| reporter.report_incremental(p))?;
+    let fill = ch.fill_missing(|p| reporter.report_incremental(p));
+    reporter.report_totals();
+    let hc = fill?;
     ch.write_collection(&hc)?;
 
     println!("\nWrote collection at: {:?}", hc.full_path()?);

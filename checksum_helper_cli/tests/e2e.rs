@@ -253,6 +253,38 @@ existing.txt",
     );
 }
 
+#[test]
+fn test_build_reports_missing_files_once() {
+    let root = common::testdir();
+
+    let mut cshd = String::from("# version 1\n");
+    for i in 0..500 {
+        cshd.push_str(&format!(
+            ",,sha512,{} deleted_{i:04}.txt\n",
+            "a".repeat(128)
+        ));
+    }
+    std::fs::write(root.join("data.cshd"), cshd).unwrap();
+
+    let (stdout, stderr, success) = common::run_cli(&["build", &root.to_string_lossy()]);
+    assert!(success, "build failed: stderr={}", stderr);
+
+    assert!(
+        stdout.contains("filtered missing: 500"),
+        "expected the exact number of missing files: {}",
+        stdout
+    );
+    // Without a terminal there is no status line to redraw, so the counts are
+    // reported once by the summary and not once per file.
+    assert_eq!(
+        stdout.matches("missing:").count(),
+        1,
+        "expected a single report: {}",
+        stdout
+    );
+    assert!(!stdout.contains("\r"), "unexpected redraw: {:?}", stdout);
+}
+
 // ============================================================
 // Phase B: verify
 // ============================================================

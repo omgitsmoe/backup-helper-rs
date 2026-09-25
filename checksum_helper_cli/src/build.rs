@@ -15,7 +15,7 @@ pub fn build(
 
     let mut reporter = ProgressReporter::new();
     reporter.set_verbose(verbose);
-    ch.with_most_current(
+    let result = ch.with_most_current(
         |p| reporter.report_most_current(p),
         |ch, c| {
             ch.write_collection(c)?;
@@ -23,7 +23,9 @@ pub fn build(
 
             Ok(())
         },
-    )?;
+    );
+    reporter.report_totals();
+    result?;
 
     Ok(())
 }
@@ -39,7 +41,9 @@ pub fn missing(
 
     let mut reporter = ProgressReporter::new();
     reporter.set_verbose(verbose);
-    let result = ch.check_missing(|p| reporter.report_incremental(p))?;
+    let result = ch.check_missing(|p| reporter.report_incremental(p));
+    reporter.report_totals();
+    let result = result?;
 
     if result.directories.is_empty() && result.files.is_empty() {
         println!("Success! All files have checksums!");
