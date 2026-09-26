@@ -4,7 +4,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use filetime::FileTime;
@@ -39,6 +39,11 @@ const TEMP_NAME_MAX: usize = 255;
 
 /// How many names to try before giving up on reserving a temp name.
 const TEMP_RESERVE_ATTEMPTS: u32 = 8;
+
+/// Age at which a temp file is assumed to be a leftover rather than a copy that is
+/// still running. Long enough that no live copy can own one, since the sweep runs
+/// once per destination directory before that directory is written to.
+const TEMP_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub(crate) fn is_directory(path: &Path) -> io::Result<bool> {
     Ok(retry_io(|| fs::metadata(path))?.is_dir())
@@ -155,6 +160,7 @@ pub fn copy_tree(
     retry_io(|| fs::create_dir_all(destination))
         .map_err(|error| copy_io_error("create destination directory", destination, error))?;
     reject_destination_symlink_components(destination, destination)?;
+    sweep_stale_temps(destination);
 
     let iter =
         WalkTree::new(source).map_err(|error| copy_io_error("walk source", source, error))?;
@@ -418,6 +424,59 @@ impl Drop for TempFile {
     }
 }
 
+/// Whether `name` is exactly the shape [`temp_file_name`] produces. The destination
+/// is a share that is browsed by hand, so a file that merely looks similar belongs
+/// to the user and must never be swept.
+fn is_temp_file_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((source_name, ids)) = rest.rsplit_once(TEMP_MARKER) else {
+        return false;
+    };
+
+    !source_name.is_empty()
+        && ids.split_once('-').is_some_and(|(pid, attempt)| {
+            !pid.is_empty()
+                && !attempt.is_empty()
+                && pid
+                    .bytes()
+                    .chain(attempt.bytes())
+                    .all(|b| b.is_ascii_digit())
+        })
+}
+
+/// Removes temp files left behind by a run that died mid-copy.
+///
+/// Best-effort by design: a temp file we are not allowed to delete must not abort
+/// a backup of the whole tree. Silent for the same reason — `CopyProgress` is
+/// per-file and the status line has a fixed width budget.
+fn sweep_stale_temps(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if !is_temp_file_name(&entry.file_name()) {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        // `duration_since` fails for a timestamp in the future, which leaves files
+        // with clock skew alone.
+        if SystemTime::now()
+            .duration_since(modified)
+            .is_ok_and(|age| age >= TEMP_STALE_AFTER)
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn temp_file_name(file_name: &OsStr, attempt: u32) -> OsString {
     let suffix = format!("{TEMP_MARKER}{}-{attempt}", std::process::id());
     // The marker and the pid are ASCII, so their length is the same in bytes and
@@ -576,6 +635,9 @@ fn copy_tree_entries(
             retry_io(|| fs::create_dir_all(&destination_path)).map_err(|error| {
                 copy_io_error("create destination directory", &destination_path, error)
             })?;
+            // The walker yields every directory exactly once, so each one is swept
+            // exactly once and never while it holds a file of our own.
+            sweep_stale_temps(&destination_path);
             CopyAction::Directory
         } else if meta.file_type().is_symlink() {
             let target_meta = retry_io(|| fs::metadata(&source_path)).map_err(|error| {
@@ -1337,13 +1399,7 @@ mod tests {
         let temp = TempFile::reserve(&destination).unwrap();
         let temp_path = temp.path().to_path_buf();
         assert!(temp_path.exists());
-        assert!(
-            temp_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with('.')
-        );
+        assert!(is_temp_file_name(temp_path.file_name().unwrap()));
 
         drop(temp);
 
@@ -1409,6 +1465,47 @@ mod tests {
             "content"
         );
         assert_eq!(entry_names(&destination), [OsString::from(long_name)]);
+    }
+
+    #[test]
+    fn temp_file_names_are_matched_exactly() {
+        let temp_name = temp_file_name(OsStr::new("file.txt"), 0);
+        assert!(is_temp_file_name(&temp_name));
+        assert!(temp_name.as_encoded_bytes().len() <= TEMP_NAME_MAX);
+
+        for name in [
+            "file.txt.bh-tmp-4242-0",      // not hidden
+            ".file.txt.bh-tmp-abc",        // ids are not numeric
+            ".file.txt.bh-tmp-4242",       // no attempt
+            ".file.txt.bh-tmp-4242-0.txt", // trailing suffix
+            ".mine.bh-tmp-abc.txt",        // a user file that mentions the marker
+            ".bh-tmp-4242-0",              // no source name
+        ] {
+            assert!(
+                !is_temp_file_name(OsStr::new(name)),
+                "expected {name:?} not to be treated as a temp file"
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_temp_files() {
+        let root = testdir!();
+        let stale = root.join(format!(".old.txt{TEMP_MARKER}4242-0"));
+        let fresh = root.join(format!(".new.txt{TEMP_MARKER}4242-0"));
+        let lookalike = root.join(format!(".mine{TEMP_MARKER}abc.txt"));
+        let real = root.join("real.txt");
+        for path in [&stale, &fresh, &lookalike, &real] {
+            fs::write(path, "content").unwrap();
+        }
+        filetime::set_file_mtime(&stale, FileTime::from_unix_time(1_000_000, 0)).unwrap();
+
+        sweep_stale_temps(&root);
+
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        assert!(lookalike.exists());
+        assert!(real.exists());
     }
 
     #[cfg(unix)]
