@@ -1,4 +1,5 @@
 use std::{
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
     thread,
@@ -24,6 +25,19 @@ const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(200),
     Duration::from_millis(400),
 ];
+
+/// Marks a destination file that has not been published yet. The name is built as
+/// `.{name}.bh-tmp-{pid}-{attempt}` so that a leftover from a crashed run is both
+/// identifiable as ours and traceable back to its source file.
+const TEMP_MARKER: &str = ".bh-tmp-";
+
+/// Longest single path component, in bytes on Unix and in UTF-16 code units on
+/// Windows. The temp name has to fit the same limit as the final name, otherwise a
+/// long source name fails the copy with `ENAMETOOLONG`.
+const TEMP_NAME_MAX: usize = 255;
+
+/// How many names to try before giving up on reserving a temp name.
+const TEMP_RESERVE_ATTEMPTS: u32 = 8;
 
 pub(crate) fn is_directory(path: &Path) -> io::Result<bool> {
     Ok(retry_io(|| fs::metadata(path))?.is_dir())
@@ -213,30 +227,29 @@ fn restore_file_times(path: &Path, metadata: &PreservedMetadata) -> io::Result<(
     filetime::set_file_mtime(path, metadata.modified)
 }
 
-// Temporarily clear an existing read-only attribute, then restore it after replacement.
+// Temporarily clear an existing read-only attribute, then restore it after the
+// operation that needed the file to be writable.
 #[cfg(windows)]
-struct ReadOnlyDestination {
+struct ReadOnlyFile {
     path: PathBuf,
     permissions: fs::Permissions,
 }
 
 #[cfg(windows)]
-impl ReadOnlyDestination {
+impl ReadOnlyFile {
     fn restore(self) -> io::Result<()> {
         retry_io(|| fs::set_permissions(&self.path, self.permissions.clone()))
     }
 }
 
 #[cfg(windows)]
-fn prepare_destination_for_copy(
-    path: &Path,
-) -> Result<Option<ReadOnlyDestination>, BackupHelperError> {
+fn clear_read_only_attribute(path: &Path) -> io::Result<Option<ReadOnlyFile>> {
     let metadata = match retry_io(|| fs::symlink_metadata(path)) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound && !is_retryable_io_error(&error) => {
             return Ok(None);
         }
-        Err(error) => return Err(copy_io_error("read destination metadata", path, error)),
+        Err(error) => return Err(error),
     };
 
     let original_permissions = metadata.permissions();
@@ -246,15 +259,17 @@ fn prepare_destination_for_copy(
 
     let mut writable_permissions = original_permissions.clone();
     writable_permissions.set_readonly(false);
-    retry_io(|| fs::set_permissions(path, writable_permissions.clone()))
-        .map_err(|error| copy_io_error("make destination writable", path, error))?;
+    retry_io(|| fs::set_permissions(path, writable_permissions.clone()))?;
 
-    Ok(Some(ReadOnlyDestination {
+    Ok(Some(ReadOnlyFile {
         path: path.to_path_buf(),
         permissions: original_permissions,
     }))
 }
 
+/// Whether a destination file can be left alone. Size and mtime are only a
+/// sufficient test because a copy is published by renaming a complete temp file
+/// onto the final name, so a file that exists there is never a partial transfer.
 fn metadata_matches(
     source: &PreservedMetadata,
     source_len: u64,
@@ -308,6 +323,117 @@ fn destination_component_exists(path: &Path) -> Result<bool, BackupHelperError> 
     }
 }
 
+/// Owns a destination file that has not been published yet. The file is removed on
+/// drop unless it was renamed onto its final name, so a failed copy never leaves a
+/// plausible-looking partial file behind.
+struct TempFile {
+    path: PathBuf,
+    published: bool,
+}
+
+impl TempFile {
+    /// Reserves an unused temp name next to `destination` and creates it empty.
+    ///
+    /// The temp has to live in the destination directory: `rename` is only atomic
+    /// within a filesystem, and a staging area on another device would turn the
+    /// publish into a non-atomic second copy.
+    fn reserve(destination: &Path) -> Result<Self, BackupHelperError> {
+        let directory = destination.parent().ok_or_else(|| {
+            BackupHelperError::CopyError(format!(
+                "Destination path {:?} has no parent directory",
+                destination
+            ))
+        })?;
+        let file_name = destination.file_name().ok_or_else(|| {
+            BackupHelperError::CopyError(format!(
+                "Destination path {:?} has no file name",
+                destination
+            ))
+        })?;
+
+        for attempt in 0..TEMP_RESERVE_ATTEMPTS {
+            let path = directory.join(temp_file_name(file_name, attempt));
+            let reservation = retry_io(|| {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+            });
+            match reservation {
+                Ok(_) => {
+                    return Ok(Self {
+                        path,
+                        published: false,
+                    });
+                }
+                // A temp from an earlier run holds the name until the stale sweep
+                // is old enough to remove it, so move on to the next attempt.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(copy_io_error("create destination temp file", &path, error));
+                }
+            }
+        }
+
+        Err(BackupHelperError::CopyError(format!(
+            "Failed to create a destination temp file for {:?}: all {TEMP_RESERVE_ATTEMPTS} names are taken",
+            destination
+        )))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Keeps the file, because it now lives under its final name.
+    fn publish(&mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn temp_file_name(file_name: &OsStr, attempt: u32) -> OsString {
+    let suffix = format!("{TEMP_MARKER}{}-{attempt}", std::process::id());
+    // The marker and the pid are ASCII, so their length is the same in bytes and
+    // in UTF-16 code units. One byte is spent on the leading dot.
+    let budget = TEMP_NAME_MAX.saturating_sub(1).saturating_sub(suffix.len());
+
+    let mut name = OsString::from(".");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        // Cutting on a byte boundary can split a UTF-8 sequence. The result is
+        // still a valid filename, it only renders oddly, and this name only exists
+        // for the duration of a single copy.
+        let bytes = file_name.as_bytes();
+        name.push(OsStr::from_bytes(&bytes[..bytes.len().min(budget)]));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        // Cutting on a char boundary can still leave a lone high surrogate, which
+        // is not a valid Windows name.
+        let mut units: Vec<u16> = file_name.encode_wide().take(budget).collect();
+        if let Some(&unit) = units.last()
+            && (0xD800..=0xDBFF).contains(&unit)
+        {
+            units.pop();
+        }
+        name.push(OsString::from_wide(&units));
+    }
+    name.push(suffix);
+    name
+}
+
 /// Rejects a copy that wrote fewer bytes than the source holds. `fs::copy`
 /// returns the number of bytes written, which used to be discarded, so a short
 /// copy was indistinguishable from a complete one.
@@ -358,36 +484,53 @@ fn copy_file(
         }
     }
 
-    #[cfg(windows)]
-    let read_only_destination = if source_is_file {
-        prepare_destination_for_copy(destination)?
-    } else {
-        None
-    };
+    let mut temp = TempFile::reserve(destination)?;
 
-    let copy_result = retry_io(|| fs::copy(source, destination));
-    #[cfg(windows)]
-    let restore_read_only_result = match read_only_destination {
-        Some(destination) => destination.restore(),
-        None => Ok(()),
-    };
-
-    let copied = match copy_result {
-        Ok(copied) => copied,
-        Err(error) => return Err(copy_io_error(operation, source, error)),
-    };
-    #[cfg(windows)]
-    restore_read_only_result
-        .map_err(|error| copy_io_error("restore destination permissions", destination, error))?;
-
+    let copied = retry_io(|| fs::copy(source, temp.path()))
+        .map_err(|error| copy_io_error(operation, source, error))?;
     // Meaningless for sources that are not regular files, and a symlink to a file
     // reports the length of its target, which is what `fs::copy` writes.
     if source_is_file {
         ensure_complete_copy(source, copied, source_len)?;
     }
 
-    retry_io(|| restore_metadata(destination, source_metadata))
-        .map_err(|error| copy_io_error("restore destination metadata", destination, error))?;
+    // Applied before the rename so that the file is published complete: `rename`
+    // does not touch the mtime of the inode it moves.
+    retry_io(|| restore_metadata(temp.path(), source_metadata))
+        .map_err(|error| copy_io_error("restore destination metadata", temp.path(), error))?;
+    retry_io(|| sync_file(temp.path()))
+        .map_err(|error| copy_io_error("flush destination file", temp.path(), error))?;
+
+    // `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` replaces the destination but
+    // refuses to do so while the destination is read-only.
+    #[cfg(windows)]
+    let read_only_destination = if source_is_file {
+        clear_read_only_attribute(destination)
+            .map_err(|error| copy_io_error("make destination writable", destination, error))?
+    } else {
+        None
+    };
+
+    let publish_result = retry_io(|| fs::rename(temp.path(), destination));
+    // Restored even when the rename failed, otherwise the destination would stay
+    // writable.
+    #[cfg(windows)]
+    let restore_read_only_result = match read_only_destination {
+        Some(destination) => destination.restore(),
+        None => Ok(()),
+    };
+
+    if let Err(error) = publish_result {
+        return Err(copy_io_error(
+            "publish destination file",
+            destination,
+            error,
+        ));
+    }
+    temp.publish();
+    #[cfg(windows)]
+    restore_read_only_result
+        .map_err(|error| copy_io_error("restore destination permissions", destination, error))?;
 
     Ok(CopyAction::Copied)
 }
@@ -464,6 +607,31 @@ fn copy_tree_entries(
     Ok(())
 }
 
+#[cfg(unix)]
+fn sync_file(path: &Path) -> io::Result<()> {
+    // Read-only, because the source's own mode is already applied and a write-only
+    // or execute-only source has no readable handle to flush.
+    fs::File::open(path)?.sync_all()
+}
+
+// `FlushFileBuffers` requires the handle to hold `GENERIC_WRITE`, so the
+// read-only open that is enough for `fsync` is rejected with
+// `ERROR_ACCESS_DENIED` here. `fs::copy` propagates the read-only attribute from
+// the source, so a read-only source has to have it cleared for the flush.
+#[cfg(windows)]
+fn sync_file(path: &Path) -> io::Result<()> {
+    let read_only = clear_read_only_attribute(path)?;
+    let flush_result = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all());
+    let restore_result = match read_only {
+        Some(read_only) => read_only.restore(),
+        None => Ok(()),
+    };
+
+    flush_result.and(restore_result)
+}
 fn copy_io_error(operation: &str, path: &Path, error: io::Error) -> BackupHelperError {
     BackupHelperError::CopyError(format!("Failed to {operation} {:?}: {error}", path))
 }
@@ -612,6 +780,17 @@ mod tests {
     use super::*;
     use std::fs;
     use testdir::testdir;
+
+    /// The names in a directory, sorted, so a leftover temp file shows up as an
+    /// unexpected entry rather than as a wrong file count.
+    fn entry_names(directory: &Path) -> Vec<OsString> {
+        let mut names: Vec<OsString> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
 
     #[test]
     fn walk_tree_yields_nested_entries_depth_first() {
@@ -1017,6 +1196,7 @@ mod tests {
             entry.relative_path == PathBuf::from("file.txt")
                 && entry.action == CopyAction::SkippedUnchanged
         }));
+        assert_eq!(entry_names(&destination), [OsString::from("file.txt")]);
     }
 
     #[test]
@@ -1046,6 +1226,137 @@ mod tests {
         assert!(progress.iter().any(|entry| {
             entry.relative_path == PathBuf::from("file.txt") && entry.action == CopyAction::Copied
         }));
+    }
+
+    #[test]
+    fn copy_tree_leaves_no_temp_file_behind() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/file.txt"), "nested").unwrap();
+        fs::write(source.join("regular.txt"), "regular").unwrap();
+
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        assert_eq!(
+            entry_names(&destination),
+            [OsString::from("nested"), OsString::from("regular.txt")]
+        );
+        assert_eq!(
+            entry_names(&destination.join("nested")),
+            [OsString::from("file.txt")]
+        );
+    }
+
+    #[test]
+    fn copy_tree_overwrites_destination_and_preserves_source_mtime() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let source_file = source.join("file.txt");
+        let destination_file = destination.join("file.txt");
+        fs::write(&source_file, "source").unwrap();
+        fs::write(&destination_file, "target").unwrap();
+
+        let source_mtime = FileTime::from_unix_time(1_600_000_000, 456_000_000);
+        let destination_mtime = FileTime::from_unix_time(1_500_000_000, 0);
+        filetime::set_file_mtime(&source_file, source_mtime).unwrap();
+        filetime::set_file_mtime(&destination_file, destination_mtime).unwrap();
+
+        copy_tree(&source, &destination, CopyPolicy::ForceOverwrite, |_| {}).unwrap();
+
+        assert_eq!(fs::read_to_string(&destination_file).unwrap(), "source");
+        assert_eq!(
+            FileTime::from_last_modification_time(&fs::metadata(&destination_file).unwrap()),
+            source_mtime
+        );
+        assert_eq!(entry_names(&destination), [OsString::from("file.txt")]);
+    }
+
+    #[test]
+    fn unpublished_temp_file_is_removed() {
+        let root = testdir!();
+        let destination = root.join("file.txt");
+        fs::write(&destination, "existing").unwrap();
+
+        let temp = TempFile::reserve(&destination).unwrap();
+        let temp_path = temp.path().to_path_buf();
+        assert!(temp_path.exists());
+        assert!(
+            temp_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with('.')
+        );
+
+        drop(temp);
+
+        assert!(!temp_path.exists());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "existing");
+    }
+
+    #[test]
+    fn published_temp_file_is_kept() {
+        let root = testdir!();
+        let destination = root.join("file.txt");
+
+        let mut temp = TempFile::reserve(&destination).unwrap();
+        let temp_path = temp.path().to_path_buf();
+        temp.publish();
+        drop(temp);
+
+        assert!(temp_path.exists());
+    }
+
+    #[test]
+    fn copy_file_removes_the_temp_file_when_the_copy_fails() {
+        let root = testdir!();
+        // A directory as the copy source fails once the temp file exists, which
+        // is the point: the failure has to leave the destination untouched.
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let destination_file = destination.join("file.txt");
+        let metadata = preserved_metadata(&fs::metadata(&source).unwrap()).unwrap();
+
+        let result = copy_file(
+            &source,
+            &destination_file,
+            &metadata,
+            0,
+            false,
+            "copy source file",
+            CopyPolicy::ForceOverwrite,
+        );
+
+        assert!(result.is_err());
+        assert!(entry_names(&destination).is_empty());
+        assert!(!destination_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_file_name_fits_a_long_source_name() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        // Longer than a temp name derived from it would be allowed to be.
+        let long_name = "n".repeat(TEMP_NAME_MAX - 5);
+        fs::write(source.join(&long_name), "content").unwrap();
+
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join(&long_name)).unwrap(),
+            "content"
+        );
+        assert_eq!(entry_names(&destination), [OsString::from(long_name)]);
     }
 
     #[test]
@@ -1207,6 +1518,42 @@ mod tests {
             FileTime::from_last_modification_time(&fs::metadata(&source_file).unwrap()),
             FileTime::from_last_modification_time(&fs::metadata(&destination_file).unwrap())
         );
+        assert_eq!(entry_names(&destination), [OsString::from("file.txt")]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_tree_copies_a_read_only_source() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        let source_file = source.join("file.txt");
+        let destination_file = destination.join("file.txt");
+        fs::write(&source_file, "content").unwrap();
+
+        let mtime = FileTime::from_unix_time(1_600_000_000, 456_000_000);
+        filetime::set_file_mtime(&source_file, mtime).unwrap();
+        let mut permissions = fs::metadata(&source_file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source_file, permissions).unwrap();
+
+        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        // `fs::copy` propagates the read-only attribute, so the flush needs write
+        // access on a temp that is itself read-only.
+        assert_eq!(fs::read_to_string(&destination_file).unwrap(), "content");
+        assert!(
+            fs::metadata(&destination_file)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert_eq!(
+            FileTime::from_last_modification_time(&fs::metadata(&destination_file).unwrap()),
+            mtime
+        );
+        assert_eq!(entry_names(&destination), [OsString::from("file.txt")]);
     }
 
     #[cfg(any(unix, windows))]
