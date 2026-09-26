@@ -1,208 +1,159 @@
-# checksum-helper
+# backup-helper-rs
 
-A Rust library and CLI for making checksum operations practical in
-real-world backup workflows.
+A Rust workspace for checksumming and reliably backing up directories
+in a way that is particularly suited for cold-storage: a backup tool,
+the checksum library it is built on, and a standalone CLI for that library.
 
-## Features
+## Crates
 
-- **Incremental checksumming** — Scan a directory, compare files against
-  the most recent known checksums, and produce a `.cshd` file containing
-  only new or changed files. Unchanged files are included by default; pass
-  `--no-include-unchanged` to exclude them. Pass `--skip-unchanged` to skip
-  files whose mtime and hash both match.
-- **Most-current merging** — Automatically discover all checksum files
-  (`.cshd`, `.md5`, `.sha*`, etc.) under a root directory and merge them
-  into a single up-to-date view. When multiple files cover the same
-  path, the entry with the newest file mtime wins.
-- **Missing file detection** — Find files and directories that have no
-  checksum coverage at all, so you know exactly what's unprotected.
-- **Fill missing** — Generate checksums for every file that doesn't
-  already have one, writing them into a new timestamped `.cshd` file.
-- **Verification** — Verify every entry in a checksum collection against
-  the live filesystem, with detailed diagnostics: `Ok`, `Mismatch`,
-  `MismatchSize`, `MismatchCorrupted` (hash differs but mtime matches —
-  file likely bit-rotted), and `MismatchOutdatedHash` (hash differs
-  because file was legitimately modified).
-- **Glob-based path filtering** — Allow/block lists to include or
-  exclude files by glob pattern, consistently applied across discovery,
-  hashing, and verification.
-- **Multiple hash algorithms** — MD5, SHA-1, SHA-2 (224/256/384/512),
-  SHA-3 (224/256/384/512), BLAKE2.
-- **Periodic flush** — During long incremental runs, write partial
-  results to disk at configurable intervals to avoid losing progress.
+| Crate | Kind | Purpose | README |
+|---|---|---|---|
+| `backup_helper` | binary | Configuration-driven backup runner: hash, copy and verify each configured source, keeping its progress in a state file. | [backup_helper/README.md](backup_helper/README.md) |
+| `checksum_helper` | library | Checksum file discovery, most-current merging, incremental hashing and verification. | [checksum_helper/README.md](checksum_helper/README.md) |
+| `checksum_helper_cli` | binary | Command line front end for the library. | [checksum_helper_cli/README.md](checksum_helper_cli/README.md) |
 
-## CLI Usage
+`backup_helper` depends on `checksum_helper`; the CLI is an alternative front end
+for the same library.
 
+## How backup_helper works
+
+A run has two steps, and they are always used in this order.
+
+1. **`reconcile`** merges a KDL configuration file into a state file, creating it
+   on the first run. It describes the disks, the sources to protect and the
+   targets to copy them to, and it copies nothing.
+2. **`start`** runs the work the state file still lists as outstanding, prints a
+   summary and writes the state back.
+
+```kdl
+// backup.kdl
+disks {
+    disk "main" {
+        path "/mnt/main"
+        mounted #true
+    }
+    disk "backup" {
+        path "/mnt/backup"
+        mounted #true
+    }
+}
+
+source "/mnt/main/photos" {
+    target "/mnt/backup/photos" {
+        transfer_mode copy
+        verify #true
+    }
+}
 ```
-checksum-helper <COMMAND>
-
-COMMANDS:
-  incremental  Walk ROOT, hash new/changed files, write a .cshd
-  build        Merge all hash files under ROOT into one .cshd
-  missing      List files/dirs without any checksum coverage
-  fill         Hash all files lacking checksums, write a .cshd
-  verify file  Verify entries in a single .cshd file
-  verify root  Discover all hash files, merge, then verify
-  move         Relocate a .cshd's internal paths (TODO)
-```
-
-### `incremental` — hash only what's new or changed
 
 ```bash
-# Basic: discover hash files, hash new/changed files, write output
-checksum-helper incremental /mnt/backups/photos
-
-# Use SHA-256 instead of the default SHA-512
-checksum-helper incremental /mnt/backups/photos --hash-type sha256
-
-# Skip files whose mtime matches (assume unchanged, skip hashing entirely)
-checksum-helper incremental /mnt/backups/photos --skip-unchanged
-
-# Exclude unchanged files from the output (only new/changed)
-checksum-helper incremental /mnt/backups/photos --no-include-unchanged
-
-# Flush partial results every 300 seconds to avoid losing progress
-checksum-helper incremental /mnt/backups/photos \
-    --periodic-write-interval-seconds 300
-
-# Only consider hash files at most 1 level deep
-checksum-helper incremental /mnt/backups/photos \
-    --discover-hash-files-depth 1
-
-# Only hash files matching *.jpg or *.raw, skip everything else
-checksum-helper incremental /mnt/backups/photos \
-    --all-allow '*.jpg' --all-allow '*.raw'
-
-# Block certain directories from being hashed
-checksum-helper incremental /mnt/backups/photos \
-    --all-block 'cache/**' --all-block 'tmp/**'
+backup_helper reconcile backup.kdl --state state.json
+backup_helper start --state state.json
 ```
 
-### `build` — merge all existing checksum files into one
+For that source, `start` runs three tasks and reports them in its summary:
+
+```
+  [OK] 0: hash /mnt/main/photos
+  [OK] 1: copy /mnt/main/photos -> /mnt/backup/photos
+  [OK] 2: verify /mnt/backup/photos
+```
+
+**The state file is the memory.** It records the checksum file of each source and
+whether each target has been transferred and verified, so a second `start` runs
+nothing, and a run that was interrupted or crashed continues where it stopped.
+That is also why `reconcile` refuses to change a few things once progress exists:
+you cannot change the hash algorithm of a source that is already hashed, or drop
+a target that has already been copied.
+
+**Each source becomes a task chain.** Hash the source, copy it to each target,
+then verify the target against the copy of the source's checksum file. Tasks
+depend on each other, and a task that fails also fails everything waiting on it,
+while unrelated tasks keep running.
+
+**Disks are the unit of parallelism.** A disk is a mount location declared in the
+configuration, and the tool will not guess.
+There is one worker per disk and a task may only start when
+every disk it touches is idle and mounted, so two copies never fight over the
+same disk, and a copy holds both the source and the target disk for its
+duration. When several tasks are ready, copies win over hashes and verifications.
+
+**Copying is conservative and crash-safe.**
+
+- A destination file whose size and modification time match the source is left
+  alone, so re-running a backup copies nothing (can be changes using
+  `--force-overwrite`).
+- Transient network I/O errors are retried with a short backoff, temp files left
+  by a dead run are swept, and nothing is ever deleted at the target.
+
+**Verification is the point.** After copying, the target is hashed again and
+compared against the source's collection.
+Findings are recorded in the state file and the log rather than failing the run,
+so one damaged file does not abandon every other copy.
+
+Details, including the full configuration reference, the state file schema, the
+scheduling rules and the copy guarantees:
+[backup_helper/README.md](backup_helper/README.md).
+
+## checksum_helper at a glance
+
+The library discovers existing checksum files (`.cshd`, `.md5`, `.sha*`, ...),
+merges them into one up-to-date view where the newest file wins, hashes only what
+is new or changed, reports what has no checksum at all, and verifies a collection
+with per-file diagnostics.
 
 ```bash
-# Merge every .cshd, .md5, .sha* etc. under /mnt/backups/docs into one file
-checksum-helper build /mnt/backups/docs
+# Hash what is new or changed below a root, writing a new .cshd
+checksum_helper_cli incremental /mnt/backups/photos
 
-# Only look at hash files in the root (don't recurse into subdirs)
-checksum-helper build /mnt/backups/docs --discover-hash-files-depth 0
+# Merge every discovered checksum file into one
+checksum_helper_cli build /mnt/backups/photos
 
-# Exclude .md5 files from the merge, only use .cshd and .sha512
-checksum-helper build /mnt/backups/docs \
-    --hash-block '*.md5'
+# What is not covered by any checksum?
+checksum_helper_cli missing /mnt/backups/photos
+
+# Hash only the files that have no checksum yet
+checksum_helper_cli fill /mnt/backups/photos
+
+# Verify, and fail if anything is missing, changed or corrupted
+checksum_helper_cli verify root /mnt/backups/photos
 ```
 
-### `missing` — see what isn't covered by any checksum
-
-```bash
-# List all files and directories without a checksum
-checksum-helper missing /mnt/backups/docs
-
-# Only care about missing checksums for images
-checksum-helper missing /mnt/backups/docs \
-    --all-allow '*.png' --all-allow '*.jpg'
-
-# Ignore certain directories when checking
-checksum-helper missing /mnt/backups/docs \
-    --all-block 'node_modules/**' --all-block '.git/**'
-```
-
-### `fill` — hash everything that's missing a checksum
-
-```bash
-# Hash all unprotected files, write them to a new timestamped .cshd
-checksum-helper fill /mnt/backups/docs
-
-# Use MD5 for speed on a large dataset
-checksum-helper fill /mnt/backups/docs --hash-type md5
-
-# Only fill checksums for source files
-checksum-helper fill /mnt/backups/project \
-    --all-allow '*.rs' --all-allow '*.py' --all-allow '*.js'
-```
-
-### `verify file` — check a single checksum file against disk
-
-```bash
-# Verify all entries in a specific .cshd
-checksum-helper verify file /mnt/backups/docs/checksums_2024-09-28.cshd
-
-# Only verify .txt files
-checksum-helper verify file /mnt/backups/docs/checksums_2024-09-28.cshd \
-    --verify-allow '*.txt'
-```
-
-### `verify root` — merge all hash files, then verify everything
-
-```bash
-# Discover every hash file under /mnt/backups, merge into one view, verify all
-checksum-helper verify root /mnt/backups
-
-# Only verify .docx and .pdf files
-checksum-helper verify root /mnt/backups \
-    --verify-allow '*.docx' --verify-allow '*.pdf'
-```
-
-## Common options
-
-| Flag | Description |
-|---|---|
-| `--hash-type <ALGO>` | Hash algorithm (sha512, sha256, sha1, md5, etc.) |
-| `--discover-hash-files-depth <N>` | Limit recursive discovery of hash files |
-| `--keep-deleted` | Retain entries for files that no longer exist on disk |
-| `--hash-allow/--hash-block <GLOB>` | Filter which hash files are discovered |
-| `--all-allow/--all-block <GLOB>` | Filter which data files are hashed/verified |
-| `--verify-allow/--verify-block <GLOB>` | Filter which entries to verify (verify only) |
-
-## File Formats
-
-### `.cshd` (custom format)
+- Commands, options and exit codes:
+  [checksum_helper_cli/README.md](checksum_helper_cli/README.md)
+- The `.cshd` and single-hash file formats, the library API and the glob
+  semantics: [checksum_helper/README.md](checksum_helper/README.md)
 
 ```
 # version 1
-1735689600,1024,sha512,abc123def...  relative/path/to/file
+1758938624.512345,1024,sha512,cf83e1357eefb8bd... relative/path/to/file
 ```
 
-Each line: `<mtime_epoch>,<size_bytes>,<hash_algo>,<hex_hash>  <relative_path>`
+Each line is `<mtime>,<size>,<hash type>,<hex hash> <path relative to the file>`,
+written in lexical order so two runs over an unchanged tree produce
+byte-identical files.
 
-### Single-hash files (`.md5`, `.sha256`, etc.)
+## Repository layout
 
-Standard `<hash>  <path>` or `<hash> *<path>` format, auto-detected by extension.
-
-## Library Usage
-
-The core is the `checksum_helper` crate. The central type is
-`ChecksumHelper`, which ties together path management (`FileTree`), hash
-storage (`HashCollection`), directory walking (`Gather`), and glob
-filtering (`PathMatcher`).
-
-```rust
-use checksum_helper::ChecksumHelper;
-
-let ch = ChecksumHelper::new("/path/to/root")?;
-
-// Incremental: hash only new/changed files
-ch.incremental(&mut progress_reporter)?;
-
-// Merge all hash files into one current collection
-ch.with_most_current(&mut reporter, |ch, collection| {
-    ch.write_collection(collection)?;
-    Ok(())
-})?;
-
-// Find files without checksums
-let missing = ch.check_missing(&mut reporter)?;
+```
+backup_helper/          the backup binary, with its ADRs in doc/adr
+checksum_helper/        the checksum library, with its ADRs in doc/adr
+checksum_helper_cli/    the CLI around the library
 ```
 
-## Installation
-
-```bash
-cargo install --path checksum_helper_cli
-```
+Each crate has its own README; the ADRs next to them record why the tricky parts
+work the way they do, and are worth reading before changing the copy, the state
+file or the checksum format.
 
 ## Development
 
 ```bash
-cargo test          # run all tests
-cargo build         # build both library and CLI
+just test                  # the whole workspace, with output
+cargo test --workspace     # the same, without the wrapper
+cargo build                # all three crates
 ```
+
+Unit tests live next to the code they cover. `backup_helper/tests/cli.rs` and
+`checksum_helper_cli/tests/e2e.rs` drive the built binaries end to end against
+temp directories. The workspace is not published to crates.io; build or install a
+binary with `cargo install --path <crate>`.
