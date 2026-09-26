@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
@@ -157,7 +158,25 @@ pub fn copy_tree(
 
     let iter =
         WalkTree::new(source).map_err(|error| copy_io_error("walk source", source, error))?;
-    copy_tree_entries(source, destination, iter, policy, &mut on_progress)
+    let mut published_directories = BTreeSet::new();
+    copy_tree_entries(
+        source,
+        destination,
+        iter,
+        policy,
+        &mut on_progress,
+        &mut published_directories,
+    )?;
+
+    // A rename is only durable once its directory is flushed. Batched per
+    // directory rather than per file: a whole-tree copy would otherwise pay one
+    // extra round trip per file.
+    for directory in &published_directories {
+        sync_parent_directory(directory)
+            .map_err(|error| copy_io_error("flush destination directory", directory, error))?;
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,6 +560,7 @@ fn copy_tree_entries(
     mut iter: WalkTree,
     policy: CopyPolicy,
     on_progress: &mut impl FnMut(CopyProgress),
+    published_directories: &mut BTreeSet<PathBuf>,
 ) -> Result<(), BackupHelperError> {
     for entry in iter.by_ref() {
         let source_path = entry.entry.path();
@@ -592,6 +612,12 @@ fn copy_tree_entries(
             )?
         };
 
+        if action == CopyAction::Copied
+            && let Some(directory) = destination_path.parent()
+        {
+            published_directories.insert(directory.to_path_buf());
+        }
+
         on_progress(CopyProgress {
             relative_path: relative.to_path_buf(),
             action,
@@ -632,6 +658,32 @@ fn sync_file(path: &Path) -> io::Result<()> {
 
     flush_result.and(restore_result)
 }
+
+#[cfg(unix)]
+fn sync_parent_directory(directory: &Path) -> io::Result<()> {
+    match fs::File::open(directory).and_then(|handle| handle.sync_all()) {
+        // The rename is still atomic on a filesystem that cannot flush a directory
+        // handle; only its durability is weaker.
+        Err(error) if is_unsupported_directory_sync(&error) => Ok(()),
+        result => result,
+    }
+}
+
+// ENOTSUP is EOPNOTSUPP on Linux and macOS, so it is listed once.
+#[cfg(unix)]
+fn is_unsupported_directory_sync(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code) if code == libc::ENOTSUP
+        || code == libc::EINVAL
+        || code == libc::EBADF
+        || code == libc::EISDIR)
+        || error.kind() == io::ErrorKind::Unsupported
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_directory: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn copy_io_error(operation: &str, path: &Path, error: io::Error) -> BackupHelperError {
     BackupHelperError::CopyError(format!("Failed to {operation} {:?}: {error}", path))
 }
@@ -1359,6 +1411,35 @@ mod tests {
         assert_eq!(entry_names(&destination), [OsString::from(long_name)]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sync_parent_directory_works_on_a_local_filesystem() {
+        let root = testdir!();
+
+        assert!(sync_parent_directory(&root).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_unsupported_directory_sync_errors_are_tolerated() {
+        for code in [libc::ENOTSUP, libc::EINVAL, libc::EBADF, libc::EISDIR] {
+            assert!(
+                is_unsupported_directory_sync(&io::Error::from_raw_os_error(code)),
+                "expected raw Unix error {code} to be tolerated"
+            );
+        }
+        assert!(is_unsupported_directory_sync(&io::Error::from(
+            io::ErrorKind::Unsupported
+        )));
+
+        assert!(!is_unsupported_directory_sync(
+            &io::Error::from_raw_os_error(libc::EIO)
+        ));
+        assert!(!is_unsupported_directory_sync(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+    }
+
     #[test]
     fn short_copy_is_rejected() {
         let source = Path::new("/source/file.txt");
@@ -1611,6 +1692,7 @@ mod tests {
             iter,
             CopyPolicy::SkipUnchanged,
             &mut |_| {},
+            &mut BTreeSet::new(),
         );
 
         assert!(matches!(
