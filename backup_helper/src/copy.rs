@@ -572,12 +572,17 @@ fn copy_file(
         ensure_complete_copy(source, copied, source_len)?;
     }
 
-    // Applied before the rename so that the file is published complete: `rename`
-    // does not touch the mtime of the inode it moves.
-    retry_io(|| restore_metadata(temp.path(), source_metadata))
-        .map_err(|error| copy_io_error("restore destination metadata", temp.path(), error))?;
+    // Flushed before the stamp, never after: a flush over CIFS re-opens the file
+    // for writing and the server bumps LastWrite when that handle closes, which
+    // discards the stamp without failing. The client keeps reporting the value we
+    // set until `actimeo` expires, so the loss only surfaces in a later run.
     retry_io(|| sync_file(temp.path()))
         .map_err(|error| copy_io_error("flush destination file", temp.path(), error))?;
+    // Applied before the rename so that the file is published complete: `rename`
+    // does not touch the mtime of the inode it moves. Nothing that opens the file
+    // for writing may follow this, or the stamp is what gets lost.
+    retry_io(|| restore_metadata(temp.path(), source_metadata))
+        .map_err(|error| copy_io_error("restore destination metadata", temp.path(), error))?;
 
     // `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` replaces the destination but
     // refuses to do so while the destination is read-only.

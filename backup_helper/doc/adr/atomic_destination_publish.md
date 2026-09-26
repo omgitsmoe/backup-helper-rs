@@ -1,5 +1,8 @@
 # Publish copied files atomically
 
+Steps 3 to 5 are amended by [stamp_after_flush.md](stamp_after_flush.md): the file
+is flushed before it is stamped, not after.
+
 ## Context
 
 `copy_file` wrote straight to the final destination path with `fs::copy`, discarded
