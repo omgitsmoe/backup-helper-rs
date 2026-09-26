@@ -65,6 +65,9 @@ pub struct TaskEntry {
     // tasks that this task depends on
     dependencies: Vec<TaskId>,
     remaining_deps: usize,
+    // Higher wins: `pick_next` keeps the ready task with the highest priority, so
+    // a copy (1) outranks a source hash or a verification (both 0) when several
+    // tasks are ready on the same disk.
     priority: u8,
 }
 
