@@ -308,6 +308,23 @@ fn destination_component_exists(path: &Path) -> Result<bool, BackupHelperError> 
     }
 }
 
+/// Rejects a copy that wrote fewer bytes than the source holds. `fs::copy`
+/// returns the number of bytes written, which used to be discarded, so a short
+/// copy was indistinguishable from a complete one.
+fn ensure_complete_copy(
+    source: &Path,
+    copied: u64,
+    expected_len: u64,
+) -> Result<(), BackupHelperError> {
+    if copied == expected_len {
+        return Ok(());
+    }
+
+    Err(BackupHelperError::CopyError(format!(
+        "Failed to copy {source:?}: copied {copied} of {expected_len} bytes"
+    )))
+}
+
 fn copy_file(
     source: &Path,
     destination: &Path,
@@ -355,12 +372,19 @@ fn copy_file(
         None => Ok(()),
     };
 
-    if let Err(error) = copy_result {
-        return Err(copy_io_error(operation, source, error));
-    }
+    let copied = match copy_result {
+        Ok(copied) => copied,
+        Err(error) => return Err(copy_io_error(operation, source, error)),
+    };
     #[cfg(windows)]
     restore_read_only_result
         .map_err(|error| copy_io_error("restore destination permissions", destination, error))?;
+
+    // Meaningless for sources that are not regular files, and a symlink to a file
+    // reports the length of its target, which is what `fs::copy` writes.
+    if source_is_file {
+        ensure_complete_copy(source, copied, source_len)?;
+    }
 
     retry_io(|| restore_metadata(destination, source_metadata))
         .map_err(|error| copy_io_error("restore destination metadata", destination, error))?;
@@ -1022,6 +1046,18 @@ mod tests {
         assert!(progress.iter().any(|entry| {
             entry.relative_path == PathBuf::from("file.txt") && entry.action == CopyAction::Copied
         }));
+    }
+
+    #[test]
+    fn short_copy_is_rejected() {
+        let source = Path::new("/source/file.txt");
+
+        assert!(ensure_complete_copy(source, 12, 12).is_ok());
+        assert!(matches!(
+            ensure_complete_copy(source, 10, 12),
+            Err(BackupHelperError::CopyError(message))
+                if message.contains("copied 10 of 12 bytes")
+        ));
     }
 
     #[test]
