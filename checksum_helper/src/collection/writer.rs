@@ -67,7 +67,6 @@ impl Default for HashCollectionWriter {
 
 #[cfg(test)]
 mod test {
-    use super::super::serialize;
     use super::super::test::setup_minimal_hc;
     use super::*;
     use crate::collection::HashCollectionError;
@@ -106,10 +105,7 @@ mod test {
         writer.write(&mut hc, &ft).unwrap();
 
         let read_back = fs::read_to_string(path).unwrap();
-        assert_eq!(
-            serialize::sort_serialized(&read_back).unwrap(),
-            expected_serialization,
-        );
+        assert_eq!(read_back, expected_serialization);
     }
 
     #[test]
@@ -126,10 +122,7 @@ mod test {
         writer.flush(&mut hc, &ft).unwrap();
 
         let read_back = fs::read_to_string(path).unwrap();
-        assert_eq!(
-            serialize::sort_serialized(&read_back).unwrap(),
-            expected_serialization,
-        );
+        assert_eq!(read_back, expected_serialization);
     }
 
     #[test]
@@ -145,10 +138,7 @@ mod test {
         writer.flush(&mut hc, &ft).unwrap();
 
         let read_back = fs::read_to_string(path).unwrap();
-        assert_eq!(
-            serialize::sort_serialized(&read_back).unwrap(),
-            expected_serialization,
-        );
+        assert_eq!(read_back, expected_serialization);
     }
 
     #[test]

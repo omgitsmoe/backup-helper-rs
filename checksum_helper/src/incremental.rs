@@ -245,7 +245,7 @@ impl<'a> Incremental<'a> {
             writer.flush(&mut result, self.file_tree)?;
         }
 
-        for missing in self.most_current.iter_with_context(self.file_tree) {
+        for missing in self.most_current.iter_with_context(self.file_tree)? {
             let (path_absolute, _) = missing;
             let path_relative = path_absolute
                 .strip_prefix(self.root)
@@ -523,7 +523,7 @@ subdir/other/chksms.md5
 subdir/other/file.txt
 vid.mp4
 ",
-            cshd_str_paths_only_sorted(&cshd_str),
+            cshd_str_paths_only(&cshd_str),
         );
 
         assert_eq!(new.len(), 10);
@@ -621,7 +621,7 @@ vid.mp4
             let new = inc.checksum_files(|_| {}).unwrap();
             let cshd_str = new.to_str(inc.file_tree).unwrap();
 
-            assert_eq!(expected, cshd_str_paths_only_sorted(&cshd_str),);
+            assert_eq!(expected, cshd_str_paths_only(&cshd_str),);
         }
     }
 
@@ -688,7 +688,7 @@ subdir/other/chksms.md5
 subdir/other/file.txt
 vid.mp4
 ",
-                cshd_str_paths_only_sorted(&cshd_str),
+                cshd_str_paths_only(&cshd_str),
             );
         }
     }
@@ -810,10 +810,7 @@ vid.mp4
             assert!(inc.most_current.is_empty());
             assert_eq!(expected.skipped_callbacks, skipped_callbacks);
 
-            assert_eq!(
-                expected.expected_files,
-                cshd_str_paths_only_sorted(&cshd_str),
-            );
+            assert_eq!(expected.expected_files, cshd_str_paths_only(&cshd_str),);
         }
     }
 
@@ -899,7 +896,7 @@ subdir/other/chksms.md5
 subdir/other/file.txt
 vid.mp4
 ",
-            cshd_str_paths_only_sorted(&contents),
+            cshd_str_paths_only(&contents),
         );
     }
 
@@ -934,7 +931,7 @@ subdir/other/chksms.md5
 subdir/other/file.txt
 vid.mp4
 ",
-            cshd_str_paths_only_sorted(&contents),
+            cshd_str_paths_only(&contents),
         );
     }
 
@@ -1009,6 +1006,9 @@ vid.mp4
         let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
         let mut ft = FileTree::new(&test_path).unwrap();
         let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        // NOTE: `most_current` is built by `update_most_current`, so it always
+        //       knows where it is located
+        hc.relocate(&test_path);
         let cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
         hc.update(cgi_bin.0, cgi_bin.1);
 

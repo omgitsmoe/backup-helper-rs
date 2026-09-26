@@ -1,5 +1,5 @@
-use crate::alias::{Map, MapIter};
-use crate::file_tree::{EntryHandle, ErrorKind, FileTree};
+use crate::alias::Map;
+use crate::file_tree::{EntryHandle, ErrorKind, FileTree, FileTreeIter};
 use crate::hash_type::HashType;
 use crate::hashed_file::{File, FileRaw, VerifyResult};
 use crate::most_current::MostCurrentProgress;
@@ -7,6 +7,7 @@ use crate::most_current::MostCurrentProgress;
 // TODO logging
 // use log::{debug, error, info, warn};
 
+use pathdiff::diff_paths;
 use std::cmp::{Eq, PartialEq};
 use std::convert::TryFrom;
 use std::error::Error;
@@ -67,6 +68,45 @@ impl HashCollection {
             .expect("was checked above")
             .join(self.name.as_ref().expect("was checked above"));
         Ok(full_path)
+    }
+
+    /// [`Self::root`] relative to the root of `file_tree`, which is the prefix
+    /// that is stripped from the paths when serializing.
+    fn root_prefix(&self, file_tree: &FileTree) -> Result<PathBuf> {
+        let root = self.root_dir.as_ref().ok_or_else(|| {
+            HashCollectionError::MissingPath((self.root_dir.clone(), self.name.clone()))
+        })?;
+
+        diff_paths(root, file_tree.absolute_path(&file_tree.root()))
+            .ok_or_else(|| HashCollectionError::InvalidCollectionRoot(Some(root.to_owned())))
+    }
+
+    /// All entries of `self` in lexical order (see [`SortedEntries`]).
+    pub(crate) fn iter_sorted<'a>(&'a self, file_tree: &'a FileTree) -> Result<SortedEntries<'a>> {
+        // NOTE: an empty collection has no entries that could tell us whether
+        //       its root is part of the file tree, so don't look for it
+        if self.map.is_empty() {
+            return Ok(SortedEntries {
+                tree_iter: None,
+                map: &self.map,
+                root: None,
+                yielded: 0,
+            });
+        }
+
+        let prefix = self.root_prefix(file_tree)?;
+        // NOTE: any entry added below the root also created the root itself,
+        //       so this can only fail for an inconsistent file tree
+        let start = file_tree
+            .find(&prefix)
+            .ok_or_else(|| HashCollectionError::InvalidCollectionRoot(self.root_dir.clone()))?;
+
+        Ok(SortedEntries {
+            tree_iter: Some(file_tree.iter_from(start)),
+            map: &self.map,
+            root: self.root_dir.as_deref(),
+            yielded: 0,
+        })
     }
 
     pub fn set_mtime(&mut self, mtime: Option<filetime::FileTime>) {
@@ -328,8 +368,11 @@ impl HashCollection {
         let size_total_bytes: u64 = self.map.values().map(|file| file.size().unwrap_or(0)).sum();
         let mut size_processed_bytes = 0u64;
 
-        for (idx, (path_handle, file_raw)) in self.map.iter().enumerate() {
-            let path = file_tree.relative_path(path_handle);
+        // NOTE: entries excluded by `include` are counted as processed, like
+        //       when the map was iterated directly
+        let mut entries = self.iter_sorted(file_tree)?;
+        for (idx, (path_handle, file_raw)) in entries.by_ref().enumerate() {
+            let path = file_tree.relative_path(&path_handle);
             if !include(&path) {
                 // TODO counts need to be adjusted! + test
                 //      -> mb filter before actual iteration?
@@ -369,6 +412,7 @@ impl HashCollection {
                 result,
             }));
         }
+        entries.check_all_yielded()?;
 
         Ok(())
     }
@@ -376,11 +420,11 @@ impl HashCollection {
     pub(crate) fn iter_with_context<'a>(
         &'a self,
         file_tree: &'a FileTree,
-    ) -> HashCollectionIter<'a> {
-        HashCollectionIter {
-            map_iter: self.map.iter(),
+    ) -> Result<HashCollectionIter<'a>> {
+        Ok(HashCollectionIter {
+            entries: self.iter_sorted(file_tree)?,
             file_tree,
-        }
+        })
     }
 }
 
@@ -443,7 +487,7 @@ fn is_path_above_hash_file(path: &str) -> bool {
 /// Provides an iterator over all items in a [`HashCollection`].
 /// The absolute path and [`File`] instance will be provided.
 pub struct HashCollectionIter<'a> {
-    map_iter: MapIter<'a, EntryHandle, FileRaw>,
+    entries: SortedEntries<'a>,
     file_tree: &'a FileTree,
 }
 
@@ -451,12 +495,63 @@ impl<'a> Iterator for HashCollectionIter<'a> {
     type Item = (PathBuf, File<'a>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((handle, file_raw)) = self.map_iter.next() {
-            let path = self.file_tree.absolute_path(handle);
-            let file = File::from_raw(file_raw, self.file_tree);
-            return Some((path, file));
+        let (path_handle, file_raw) = self.entries.next()?;
+        let path = self.file_tree.absolute_path(&path_handle);
+        let file = File::from_raw(file_raw, self.file_tree);
+        Some((path, file))
+    }
+}
+
+/// Iterates over the entries of a [`HashCollection`] in lexical order, which is
+/// the order in which [`crate::gather::Gather`] yields its entries.
+///
+/// [`HashCollection::map`] is a hash map, so it cannot provide an order. The
+/// order is taken from the [`FileTree`] instead, which stores the children of
+/// every directory sorted by name, and is therefore independent of the order in
+/// which the tree was filled (gathering, parsing hash files, merging
+/// collections).
+///
+/// Note that iterating the subtree of a collection also visits the files of
+/// sibling collections, which are simply not yielded. Use
+/// [`SortedEntries::check_all_yielded`] to assert that no entry of the
+/// collection was located outside of the iterated subtree.
+pub(crate) struct SortedEntries<'a> {
+    /// `None` for empty collections
+    tree_iter: Option<FileTreeIter<'a>>,
+    map: &'a Map<EntryHandle, FileRaw>,
+    /// `None` for empty collections
+    root: Option<&'a Path>,
+    yielded: usize,
+}
+
+impl SortedEntries<'_> {
+    /// Errors if not all entries of the collection were yielded, which happens
+    /// if it contains entries outside of the file tree subtree of its root:
+    /// those are skipped silently while iterating.
+    pub fn check_all_yielded(&self) -> Result<()> {
+        if self.yielded == self.map.len() {
+            return Ok(());
         }
-        None
+
+        Err(HashCollectionError::EntriesOutsideCollectionRoot((
+            self.root.map(|root| root.to_owned()),
+            self.map.len() - self.yielded,
+        )))
+    }
+}
+
+impl<'a> Iterator for SortedEntries<'a> {
+    type Item = (EntryHandle, &'a FileRaw);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let tree_iter = self.tree_iter.as_mut()?;
+        loop {
+            let path_handle = tree_iter.next()?;
+            if let Some(hashed_file) = self.map.get(&path_handle) {
+                self.yielded += 1;
+                return Some((path_handle, hashed_file));
+            }
+        }
     }
 }
 
@@ -469,6 +564,9 @@ pub enum HashCollectionError {
     InvalidExtension(OsString),
     InvalidUtf8(Vec<u8>),
     InvalidCollectionRoot(Option<PathBuf>),
+    /// The collection contains entries that are not located in the subtree of
+    /// its root directory: (root, number of such entries)
+    EntriesOutsideCollectionRoot((Option<PathBuf>, usize)),
     AbsolutePath(String),
     MissingPath((Option<PathBuf>, Option<OsString>)),
     MissingPathInMerge((Option<PathBuf>, Option<PathBuf>)),
@@ -505,6 +603,9 @@ impl fmt::Display for HashCollectionError {
             }
             HashCollectionError::InvalidCollectionRoot(ref root) => {
                 write!(f, "the root path of an collection must be a subpath of the FileTree/ChecksumHelper root, got: {:?}", root)
+            }
+            HashCollectionError::EntriesOutsideCollectionRoot((ref root, count)) => {
+                write!(f, "the collection rooted at {:?} contains {} entries outside of its root directory", root, count)
             }
             HashCollectionError::AbsolutePath(ref p) => write!(f, "absolute path found: {}", p),
             HashCollectionError::FileTreeError(ref p) => write!(f, "file tree error: {:?}", p),
@@ -660,13 +761,13 @@ pub mod test {
             ),
         );
 
-        let expected_serialization_sorted = "\
+        let expected_serialization = "\
 # version 1
 1212,,md5,aabbccdd bar/foo.txt
 1337.00133,1337,sha512,deadbeef foo/bar/baz.txt
 ,4206969,sha3_512,eeff0011 xer.mp4\n";
 
-        (hc, ft, expected_serialization_sorted)
+        (hc, ft, expected_serialization)
     }
 
     #[test]
@@ -860,24 +961,24 @@ abcdefff foo/xer.mp4
             ),
         );
 
-        let expected_serialization_sorted = "\
+        let expected_serialization = "\
 # version 1
 1337.00133,1337,sha512,deadbeef foo/bar/baz/file.txt
 1212,,md5,aabbccdd foo/bar/foo.txt
 ,4206969,sha3_512,eeff0011 foo/xer.mp4\n";
 
-        let result = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
-        assert_eq!(result, expected_serialization_sorted,);
+        let result = hc.to_str(&ft).unwrap();
+        assert_eq!(result, expected_serialization,);
 
         hc.relocate(root.join("foo"));
 
-        let expected_serialization_sorted_relocated = "\
+        let expected_serialization_relocated = "\
 # version 1
 1337.00133,1337,sha512,deadbeef bar/baz/file.txt
 1212,,md5,aabbccdd bar/foo.txt
 ,4206969,sha3_512,eeff0011 xer.mp4\n";
-        let result = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
-        assert_eq!(result, expected_serialization_sorted_relocated,);
+        let result = hc.to_str(&ft).unwrap();
+        assert_eq!(result, expected_serialization_relocated,);
     }
 
     #[test]
@@ -971,7 +1072,7 @@ abcdefff foo/xer.mp4
 
         hc.merge(other).unwrap();
 
-        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        let serialized = hc.to_str(&ft).unwrap();
         assert_eq!(
             serialized,
             "\
@@ -990,7 +1091,7 @@ abcdefff foo/xer.mp4
 
         hc.merge(other).unwrap();
 
-        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        let serialized = hc.to_str(&ft).unwrap();
         assert_eq!(
             serialized,
             "\
@@ -1009,7 +1110,7 @@ abcdefff foo/xer.mp4
 
         hc.merge(other).unwrap();
 
-        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        let serialized = hc.to_str(&ft).unwrap();
         assert_eq!(
             serialized,
             "\
@@ -1028,7 +1129,7 @@ abcdefff foo/xer.mp4
 
         hc.merge(other).unwrap();
 
-        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        let serialized = hc.to_str(&ft).unwrap();
         assert_eq!(
             serialized,
             "\
@@ -1071,7 +1172,7 @@ abcdefff foo/xer.mp4
 
         hc.merge(other).unwrap();
 
-        let serialized = sort_serialized(&hc.to_str(&ft).unwrap()).unwrap();
+        let serialized = hc.to_str(&ft).unwrap();
         assert_eq!(
             serialized,
             "\
@@ -1218,6 +1319,58 @@ abcdefff foo/xer.mp4
     }
 
     #[test]
+    fn serialize_errors_on_entries_outside_of_the_collection_root() {
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+
+        // NOTE: a collection rooted below the file tree root, which only
+        //       `merge` can produce
+        let mut hc = HashCollection::new(Some(&abs("foo/bar/hc.cshd")), None).unwrap();
+        let path_handle = ft.add_file("bar/file.txt").unwrap();
+        hc.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle,
+                None,
+                None,
+                HashType::Md5,
+                vec![0xde, 0xad, 0xbe, 0xef],
+            ),
+        );
+
+        let mut other = HashCollection::new(Some(&abs("foo/other.cshd")), None).unwrap();
+        let path_handle = ft.add_file("outside.txt").unwrap();
+        other.update(
+            path_handle.clone(),
+            FileRaw::new(
+                path_handle,
+                None,
+                None,
+                HashType::Md5,
+                vec![0xaa, 0xbb, 0xcc, 0xdd],
+            ),
+        );
+
+        hc.merge(other).unwrap();
+        assert_eq!(hc.len(), 2);
+
+        // the entry above the collection root must not be silently dropped
+        assert_eq!(
+            hc.to_str(&ft),
+            Err(HashCollectionError::EntriesOutsideCollectionRoot((
+                Some(abs("foo/bar")),
+                1
+            )))
+        );
+        assert_eq!(
+            hc.verify(&ft, |_| true, |_| {}),
+            Err(HashCollectionError::EntriesOutsideCollectionRoot((
+                Some(abs("foo/bar")),
+                1
+            )))
+        );
+    }
+
+    #[test]
     fn not_contained_when_not_in_file_tree() {
         let ft = FileTree::new(abs("foo/bar")).unwrap();
         let hc = HashCollection::new(None::<&&str>, None).unwrap();
@@ -1267,6 +1420,7 @@ abcdefff foo/xer.mp4
         let eh1 = ft.add_file(Path::new("baz.txt")).unwrap();
         let eh2 = ft.add_file(Path::new("baz/file.txt")).unwrap();
         let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        hc.relocate(&root);
         let f1 = FileRaw::new(
             eh1.clone(),
             None,
@@ -1284,15 +1438,15 @@ abcdefff foo/xer.mp4
         );
         hc.update(eh2.clone(), f2);
 
-        let mut iter = hc.iter_with_context(&ft);
+        let mut iter = hc.iter_with_context(&ft).unwrap();
 
         let (path, file) = iter.next().unwrap();
-        let expected_path = root.join("baz.txt");
+        let expected_path = root.join("baz/file.txt");
         assert_eq!(path, expected_path);
         assert_eq!(file.raw(|f| f.absolute_path(&ft)), expected_path);
 
         let (path, file) = iter.next().unwrap();
-        let expected_path = root.join("baz/file.txt");
+        let expected_path = root.join("baz.txt");
         assert_eq!(path, expected_path);
         assert_eq!(file.raw(|f| f.absolute_path(&ft)), expected_path);
 

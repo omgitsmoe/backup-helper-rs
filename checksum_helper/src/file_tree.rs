@@ -1,4 +1,5 @@
-use std::ffi::OsStr;
+use std::collections::{btree_map, BTreeMap};
+use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::path::{Component, Path, PathBuf};
 
@@ -53,7 +54,7 @@ impl FileTree {
                     name: root.to_path_buf(),
                     is_directory: true,
                     parent: None,
-                    children: vec![],
+                    children: BTreeMap::new(),
                 }],
                 last_directory: None,
             })
@@ -127,19 +128,14 @@ impl FileTree {
             );
 
             let entry = &self.nodes[current];
-            let mut found = false;
-            for (child_name, child_handle) in &entry.children {
-                if child_name == component_name {
-                    current = child_handle.0;
-                    found = true;
+            let child_handle = match entry.children.get(component_name) {
+                Some(&child_handle) => child_handle,
+                None => {
+                    full_match = false;
                     break;
                 }
-            }
-
-            if !found {
-                full_match = false;
-                break;
-            }
+            };
+            current = child_handle.0;
         }
 
         // if self.nodes[current].is_directory {
@@ -209,7 +205,7 @@ impl FileTree {
                 name: component_name.into(),
                 is_directory: true,
                 parent: Some(current_parent.clone()),
-                children: vec![],
+                children: BTreeMap::new(),
             });
             let index = self.nodes.len() - 1;
 
@@ -235,10 +231,8 @@ impl FileTree {
     ) -> EntryHandle {
         let child_name = child_name.as_ref();
 
-        for (entry_name, child_handle) in &self.nodes[parent.0].children {
-            if entry_name == child_name {
-                return child_handle.clone();
-            }
+        if let Some(&child_handle) = self.nodes[parent.0].children.get(child_name) {
+            return child_handle;
         }
 
         // TODO child_name validation, must not contain path separators etc.
@@ -246,7 +240,7 @@ impl FileTree {
             name: child_name.into(),
             is_directory,
             parent: Some(parent.clone()),
-            children: vec![],
+            children: BTreeMap::new(),
         });
         let index = self.nodes.len() - 1;
 
@@ -264,10 +258,17 @@ impl FileTree {
         self.nodes.len()
     }
 
+    /// Iterates over all files of the tree in lexical order, which is the
+    /// order in which [`crate::gather::Gather`] yields its entries.
     pub fn iter(&self) -> FileTreeIter<'_> {
+        self.iter_from(self.root())
+    }
+
+    /// Same as [`FileTree::iter`], but restricted to the subtree of `from`.
+    pub fn iter_from(&self, from: EntryHandle) -> FileTreeIter<'_> {
         FileTreeIter {
             file_tree: self,
-            stack: vec![(EntryHandle(0), 0)],
+            stack: vec![self.nodes[from.0].children.iter()],
         }
     }
 
@@ -341,30 +342,32 @@ impl Display for FileTree {
 
 pub struct FileTreeIter<'a> {
     file_tree: &'a FileTree,
-    // dir, next child index
-    stack: Vec<(EntryHandle, usize)>,
+    // NOTE: one child iterator per directory level, so the whole tree is
+    //       traversed without collecting or sorting anything
+    stack: Vec<btree_map::Iter<'a, OsString, EntryHandle>>,
 }
 
 impl Iterator for FileTreeIter<'_> {
     type Item = EntryHandle;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(curr) = self.stack.pop() {
-            let entry = &self.file_tree.nodes[curr.0 .0];
-            if curr.1 >= entry.children.len() {
+        loop {
+            // NOTE: `let ... else` drops the borrow of the child iterator before
+            //       the stack can be popped
+            let Some((_, &child)) = self.stack.last_mut().and_then(|children| children.next())
+            else {
+                // this directory is exhausted, continue with its parent
+                let _ = self.stack.pop()?;
                 continue;
-            }
+            };
 
-            let child = entry.children[curr.1].1.clone();
             let child_entry = &self.file_tree.nodes[child.0];
-
-            self.stack.push((curr.0, curr.1 + 1));
             if !child_entry.children.is_empty() {
                 debug_assert!(
                     child_entry.is_directory,
                     "Has children, but is_directory is false"
                 );
-                self.stack.push((child.clone(), 0));
+                self.stack.push(child_entry.children.iter());
             }
 
             if child_entry.is_directory {
@@ -373,8 +376,6 @@ impl Iterator for FileTreeIter<'_> {
                 return Some(child);
             }
         }
-
-        None
     }
 }
 
@@ -395,15 +396,15 @@ pub struct Entry {
     name: PathBuf,
     is_directory: bool,
     parent: Option<EntryHandle>,
-    // TODO: remove children, only keep child_map
-    //       -> only problem should be iteration order, mb use BTreeMap instead then?
-    children: Vec<(std::ffi::OsString, EntryHandle)>,
+    // NOTE: sorted by name, so iterating the tree yields a stable lexical
+    //       order, no matter in which order the entries were added
+    //       (gathering, parsing hash files, merging collections, ...)
+    children: BTreeMap<OsString, EntryHandle>,
 }
 
 impl Entry {
-    pub fn add_child(&mut self, name: impl AsRef<Path>, child_handle: EntryHandle) {
-        let key = name.as_ref().as_os_str().to_os_string();
-        self.children.push((key, child_handle.clone()));
+    pub fn add_child(&mut self, name: impl AsRef<OsStr>, child_handle: EntryHandle) {
+        self.children.insert(name.as_ref().to_owned(), child_handle);
     }
 }
 
@@ -603,12 +604,8 @@ mod test {
         assert!(baz_entry.is_directory);
 
         assert_eq!(baz_entry.children.len(), 2);
-        assert!(baz_entry
-            .children
-            .contains(&(std::ffi::OsString::from("file.txt"), txt)));
-        assert!(baz_entry
-            .children
-            .contains(&(std::ffi::OsString::from("foo"), foo)));
+        assert_eq!(baz_entry.children.get(OsStr::new("file.txt")), Some(&txt));
+        assert_eq!(baz_entry.children.get(OsStr::new("foo")), Some(&foo));
 
         assert_eq!(txt_entry.parent, Some(baz.clone()));
         assert_eq!(foo_entry.parent, Some(baz.clone()));
@@ -628,6 +625,62 @@ mod test {
         let ft = FileTree::new(Path::new("/foo")).unwrap();
         assert_eq!(ft.relative_path(&ft.root()), Path::new(""),);
         assert_eq!(ft.absolute_path(&ft.root()), Path::new("/foo"),);
+    }
+
+    #[test]
+    fn iter_yields_lexical_order_regardless_of_insertion_order() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+
+        // NOTE: deliberately not in lexical order, e.g. like a tree that was
+        //       filled by parsing hash files of different collections
+        for path in [
+            "vid.mp4",
+            "subdir/other/file.txt",
+            "file.txt",
+            "subdir/nested/nested/cgi.bin",
+            "subdir/foo.txt",
+            "subdir/nested/vid.mov",
+        ] {
+            ft.add_file(path).unwrap();
+        }
+
+        let paths = |iter: FileTreeIter<'_>| {
+            iter.map(|handle| ft.relative_path(&handle))
+                // NOTE: relative_path joins the components, so it uses the
+                //       separator of the platform
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .collect::<Vec<String>>()
+        };
+
+        // NOTE: a directory comes before the files next to it, so this is not
+        //       the same as sorting the paths
+        assert_eq!(
+            paths(ft.iter()),
+            [
+                "file.txt",
+                "subdir/foo.txt",
+                "subdir/nested/nested/cgi.bin",
+                "subdir/nested/vid.mov",
+                "subdir/other/file.txt",
+                "vid.mp4",
+            ]
+        );
+
+        // restricted to a subtree, the order is the same
+        let subdir = ft.find("subdir/nested").unwrap();
+        assert_eq!(
+            paths(ft.iter_from(subdir)),
+            ["subdir/nested/nested/cgi.bin", "subdir/nested/vid.mov"]
+        );
+    }
+
+    #[test]
+    fn iter_from_empty_subtree_yields_nothing() {
+        let mut ft = FileTree::new(Path::new("/foo")).unwrap();
+        ft.add_file("bar/baz.txt").unwrap();
+
+        let empty_dir = ft.add_directory("empty").unwrap();
+        assert_eq!(ft.iter_from(empty_dir).count(), 0);
     }
 
     #[test]
@@ -689,25 +742,25 @@ mod test {
                     name: PathBuf::from("root"),
                     is_directory: true,
                     parent: None,
-                    children: vec![(std::ffi::OsString::from("foo"), EntryHandle(1))],
+                    children: BTreeMap::from([(OsString::from("foo"), EntryHandle(1))]),
                 },
                 Entry {
                     name: PathBuf::from("foo"),
                     is_directory: true,
                     parent: Some(EntryHandle(0)),
-                    children: vec![(std::ffi::OsString::from("bar"), EntryHandle(2))],
+                    children: BTreeMap::from([(OsString::from("bar"), EntryHandle(2))]),
                 },
                 Entry {
                     name: PathBuf::from("bar"),
                     is_directory: true,
                     parent: Some(EntryHandle(1)),
-                    children: vec![(std::ffi::OsString::from("baz"), EntryHandle(3))],
+                    children: BTreeMap::from([(OsString::from("baz"), EntryHandle(3))]),
                 },
                 Entry {
                     name: PathBuf::from("baz"),
                     is_directory: true,
                     parent: Some(EntryHandle(2)),
-                    children: vec![],
+                    children: BTreeMap::new(),
                 },
             ],
             last_directory: None,

@@ -161,7 +161,7 @@ impl ChecksumHelper {
         dirs_with_hashed_file.insert(root.clone());
 
         let most_current = self.most_current.as_ref().expect("checked above");
-        for (path, _) in most_current.iter_with_context(&self.file_tree) {
+        for (path, _) in most_current.iter_with_context(&self.file_tree)? {
             let relative = path
                 .strip_prefix(&root)
                 .expect("paths in the file tree must be relative to the ChecksumHelper root");
@@ -262,8 +262,11 @@ impl ChecksumHelper {
         self.most_current = None;
     }
 
-    pub fn iter_collection<'a>(&'a self, collection: &'a HashCollection) -> HashCollectionIter<'a> {
-        collection.iter_with_context(&self.file_tree)
+    pub fn iter_collection<'a>(
+        &'a self,
+        collection: &'a HashCollection,
+    ) -> Result<HashCollectionIter<'a>> {
+        Ok(collection.iter_with_context(&self.file_tree)?)
     }
 
     pub fn read_collection(&mut self, path: &path::Path) -> Result<HashCollection> {
@@ -905,7 +908,7 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
         let mut ch = ChecksumHelper::new(&testdir).unwrap();
         let hc = ch.fill_missing(|_| {}).unwrap();
         assert_eq!(
-            cshd_str_paths_only_sorted(&hc.to_str(&ch.file_tree).unwrap()),
+            cshd_str_paths_only(&hc.to_str(&ch.file_tree).unwrap()),
             "\
 bar/baz/baz_2025-06-28.foo
 bar/baz/save.sav
@@ -954,7 +957,7 @@ e37276a93ac1e99188340e3f61e3673b  file.rs",
         let mut ch = ChecksumHelper::with_options(&testdir, options).unwrap();
         let hc = ch.fill_missing(|_| {}).unwrap();
         assert_eq!(
-            cshd_str_paths_only_sorted(&hc.to_str(&ch.file_tree).unwrap()),
+            cshd_str_paths_only(&hc.to_str(&ch.file_tree).unwrap()),
             "\
 bar/baz/baz_2025-06-28.foo
 foo/foo.txt
@@ -1156,10 +1159,10 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             VerifyRootProgress::BuildMostCurrent(MostCurrentProgress::MergeHashFile(
                 testdir.join("foo/foo.md5"),
             )),
-            // does_not_exist
+            // bar/bar/baz/baz_2025-06-28.foo
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("does_not_exist"),
+                relative_path: std::path::Path::new("bar/bar/baz/baz_2025-06-28.foo"),
                 file_number_processed: 0,
                 file_number_total: 16,
                 size_processed_bytes: 0,
@@ -1168,11 +1171,123 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("does_not_exist"),
+                    relative_path: std::path::Path::new("bar/bar/baz/baz_2025-06-28.foo"),
                     file_number_processed: 1,
                     file_number_total: 16,
-                    // just based on size stored in cshd
-                    // here: none, so 0 bytes processed
+                    size_processed_bytes: 0,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+            })),
+            // bar/baz/save.sav
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("bar/baz/save.sav"),
+                file_number_processed: 1,
+                file_number_total: 16,
+                size_processed_bytes: 0,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 16,
+                bytes_total: 16,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("bar/baz/save.sav"),
+                    file_number_processed: 2,
+                    file_number_total: 16,
+                    size_processed_bytes: 0,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::Ok,
+            })),
+            // bar/baz_2025-06-28.foo
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
+                file_number_processed: 2,
+                file_number_total: 16,
+                size_processed_bytes: 0,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 9,
+                bytes_total: 9,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
+                    file_number_processed: 3,
+                    file_number_total: 16,
+                    size_processed_bytes: 0,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::MismatchOutdatedHash,
+            })),
+            // bar/does_not_exist
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("bar/does_not_exist"),
+                file_number_processed: 3,
+                file_number_total: 16,
+                size_processed_bytes: 0,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("bar/does_not_exist"),
+                    file_number_processed: 4,
+                    file_number_total: 16,
+                    size_processed_bytes: 0,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+            })),
+            // bar/other.txt
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("bar/other.txt"),
+                file_number_processed: 4,
+                file_number_total: 16,
+                size_processed_bytes: 0,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 9,
+                bytes_total: 9,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("bar/other.txt"),
+                    file_number_processed: 5,
+                    file_number_total: 16,
+                    size_processed_bytes: 0,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::MismatchOutdatedHash,
+            })),
+            // does_not_exist
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("does_not_exist"),
+                file_number_processed: 5,
+                file_number_total: 16,
+                // just based on size stored in cshd
+                // here: none, so 0 bytes processed
+                size_processed_bytes: 0,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("does_not_exist"),
+                    file_number_processed: 6,
+                    file_number_total: 16,
                     size_processed_bytes: 0,
                     size_total_bytes: 7,
                 },
@@ -1182,7 +1297,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
                 relative_path: std::path::Path::new("file.rs"),
-                file_number_processed: 1,
+                file_number_processed: 6,
                 file_number_total: 16,
                 size_processed_bytes: 0,
                 size_total_bytes: 7,
@@ -1195,259 +1310,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
                     relative_path: std::path::Path::new("file.rs"),
-                    file_number_processed: 2,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::Ok,
-            })),
-            // bar/baz/save.sav
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("bar/baz/save.sav"),
-                file_number_processed: 2,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 16,
-                bytes_total: 16,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("bar/baz/save.sav"),
-                    file_number_processed: 3,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::Ok,
-            })),
-            // bar/baz_2025-06-28.foo
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
-                file_number_processed: 3,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 9,
-                bytes_total: 9,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
-                    file_number_processed: 4,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::MismatchOutdatedHash,
-            })),
-            // foo/bar/bar.test
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("foo/bar/bar.test"),
-                file_number_processed: 4,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 16,
-                bytes_total: 16,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("foo/bar/bar.test"),
-                    file_number_processed: 5,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::Ok,
-            })),
-            // bar/other.txt
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("bar/other.txt"),
-                file_number_processed: 5,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 9,
-                bytes_total: 9,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("bar/other.txt"),
-                    file_number_processed: 6,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::MismatchOutdatedHash,
-            })),
-            // bar/does_not_exist
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("bar/does_not_exist"),
-                file_number_processed: 6,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("bar/does_not_exist"),
                     file_number_processed: 7,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
-            })),
-            // bar/bar/baz/baz_2025-06-28.foo
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("bar/bar/baz/baz_2025-06-28.foo"),
-                file_number_processed: 7,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("bar/bar/baz/baz_2025-06-28.foo"),
-                    file_number_processed: 8,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
-            })),
-            // root.mp4
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("root.mp4"),
-                file_number_processed: 8,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 9,
-                bytes_total: 9,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("root.mp4"),
-                    file_number_processed: 9,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::Mismatch,
-            })),
-            // foo/foo.bin
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("foo/foo.bin"),
-                file_number_processed: 9,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 11,
-                bytes_total: 11,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("foo/foo.bin"),
-                    file_number_processed: 10,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::Ok,
-            })),
-            // foo/bar/foo/xer/does_not_exist
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("foo/bar/foo/xer/does_not_exist"),
-                file_number_processed: 10,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("foo/bar/foo/xer/does_not_exist"),
-                    file_number_processed: 11,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
-            })),
-            // foo/bar/baz/file.bin
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("foo/bar/baz/file.bin"),
-                file_number_processed: 11,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 9,
-                bytes_total: 9,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("foo/bar/baz/file.bin"),
-                    file_number_processed: 12,
-                    file_number_total: 16,
-                    size_processed_bytes: 7,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::Mismatch,
-            })),
-            // foo/foo.txt
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("foo/foo.txt"),
-                file_number_processed: 12,
-                file_number_total: 16,
-                size_processed_bytes: 7,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
-                bytes_read: 11,
-                bytes_total: 11,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("foo/foo.txt"),
-                    file_number_processed: 13,
                     file_number_total: 16,
                     size_processed_bytes: 7,
                     size_total_bytes: 7,
@@ -1458,7 +1321,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
                 relative_path: std::path::Path::new("foo/bar/bar.mp4"),
-                file_number_processed: 13,
+                file_number_processed: 7,
                 file_number_total: 16,
                 size_processed_bytes: 7,
                 size_total_bytes: 7,
@@ -1471,38 +1334,66 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
                     relative_path: std::path::Path::new("foo/bar/bar.mp4"),
-                    file_number_processed: 14,
+                    file_number_processed: 8,
                     file_number_total: 16,
                     size_processed_bytes: 7,
                     size_total_bytes: 7,
                 },
                 result: VerifyResult::Mismatch,
             })),
-            // foo/bar/baz/foo/does_not_exist
+            // foo/bar/bar.test
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("foo/bar/baz/foo/does_not_exist"),
-                file_number_processed: 14,
+                relative_path: std::path::Path::new("foo/bar/bar.test"),
+                file_number_processed: 8,
                 file_number_total: 16,
                 size_processed_bytes: 7,
                 size_total_bytes: 7,
             })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 16,
+                bytes_total: 16,
+            })),
             VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("foo/bar/baz/foo/does_not_exist"),
-                    file_number_processed: 15,
+                    relative_path: std::path::Path::new("foo/bar/bar.test"),
+                    file_number_processed: 9,
                     file_number_total: 16,
                     size_processed_bytes: 7,
                     size_total_bytes: 7,
                 },
-                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+                result: VerifyResult::Ok,
+            })),
+            // foo/bar/baz/file.bin
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("foo/bar/baz/file.bin"),
+                file_number_processed: 9,
+                file_number_total: 16,
+                size_processed_bytes: 7,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 9,
+                bytes_total: 9,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("foo/bar/baz/file.bin"),
+                    file_number_processed: 10,
+                    file_number_total: 16,
+                    size_processed_bytes: 7,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::Mismatch,
             })),
             // foo/bar/baz/file.txt
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
                 relative_path: std::path::Path::new("foo/bar/baz/file.txt"),
-                file_number_processed: 15,
+                file_number_processed: 10,
                 file_number_total: 16,
                 size_processed_bytes: 7,
                 size_total_bytes: 7,
@@ -1515,12 +1406,124 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
                     relative_path: std::path::Path::new("foo/bar/baz/file.txt"),
-                    file_number_processed: 16,
+                    file_number_processed: 11,
                     file_number_total: 16,
                     size_processed_bytes: 7,
                     size_total_bytes: 7,
                 },
                 result: VerifyResult::Ok,
+            })),
+            // foo/bar/baz/foo/does_not_exist
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("foo/bar/baz/foo/does_not_exist"),
+                file_number_processed: 11,
+                file_number_total: 16,
+                size_processed_bytes: 7,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("foo/bar/baz/foo/does_not_exist"),
+                    file_number_processed: 12,
+                    file_number_total: 16,
+                    size_processed_bytes: 7,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+            })),
+            // foo/bar/foo/xer/does_not_exist
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("foo/bar/foo/xer/does_not_exist"),
+                file_number_processed: 12,
+                file_number_total: 16,
+                size_processed_bytes: 7,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("foo/bar/foo/xer/does_not_exist"),
+                    file_number_processed: 13,
+                    file_number_total: 16,
+                    size_processed_bytes: 7,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+            })),
+            // foo/foo.bin
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("foo/foo.bin"),
+                file_number_processed: 13,
+                file_number_total: 16,
+                size_processed_bytes: 7,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 11,
+                bytes_total: 11,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("foo/foo.bin"),
+                    file_number_processed: 14,
+                    file_number_total: 16,
+                    size_processed_bytes: 7,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::Ok,
+            })),
+            // foo/foo.txt
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("foo/foo.txt"),
+                file_number_processed: 14,
+                file_number_total: 16,
+                size_processed_bytes: 7,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 11,
+                bytes_total: 11,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("foo/foo.txt"),
+                    file_number_processed: 15,
+                    file_number_total: 16,
+                    size_processed_bytes: 7,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::Ok,
+            })),
+            // root.mp4
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("root.mp4"),
+                file_number_processed: 15,
+                file_number_total: 16,
+                size_processed_bytes: 7,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::During(HashProgress {
+                bytes_read: 9,
+                bytes_total: 9,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("root.mp4"),
+                    file_number_processed: 16,
+                    file_number_total: 16,
+                    size_processed_bytes: 7,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::Mismatch,
             })),
         ];
         let mut progress_index = 0usize;
@@ -1551,8 +1554,8 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
 
         let mut missing_count = 0usize;
         let missing_paths = [
-            path::Path::new("does_not_exist"),
             path::Path::new("bar/baz/does_not_exist"),
+            path::Path::new("does_not_exist"),
         ];
 
         let mut ch = ChecksumHelper::with_options(
@@ -1636,11 +1639,31 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             HashProgress, VerifyProgress, VerifyProgressCommon, VerifyProgressPost,
         };
         let progress_expected = [
+            // bar/baz/does_not_exist
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("bar/baz/does_not_exist"),
+                file_number_processed: 0,
+                file_number_total: 6,
+                size_processed_bytes: 0,
+                size_total_bytes: 7,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("bar/baz/does_not_exist"),
+                    file_number_processed: 1,
+                    file_number_total: 6,
+                    size_processed_bytes: 0,
+                    size_total_bytes: 7,
+                },
+                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+            })),
             // bar/baz/save.sav
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
                 relative_path: std::path::Path::new("bar/baz/save.sav"),
-                file_number_processed: 2,
+                file_number_processed: 1,
                 file_number_total: 6,
                 size_processed_bytes: 0,
                 size_total_bytes: 7,
@@ -1653,7 +1676,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
                     relative_path: std::path::Path::new("bar/baz/save.sav"),
-                    file_number_processed: 3,
+                    file_number_processed: 2,
                     file_number_total: 6,
                     size_processed_bytes: 0,
                     size_total_bytes: 7,
@@ -1664,7 +1687,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
                 relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
-                file_number_processed: 3,
+                file_number_processed: 2,
                 file_number_total: 6,
                 size_processed_bytes: 0,
                 size_total_bytes: 7,
@@ -1677,32 +1700,12 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
                     relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
-                    file_number_processed: 4,
+                    file_number_processed: 3,
                     file_number_total: 6,
                     size_processed_bytes: 0,
                     size_total_bytes: 7,
                 },
                 result: VerifyResult::MismatchOutdatedHash,
-            })),
-            // bar/baz/does_not_exist
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("bar/baz/does_not_exist"),
-                file_number_processed: 4,
-                file_number_total: 6,
-                size_processed_bytes: 0,
-                size_total_bytes: 7,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("bar/baz/does_not_exist"),
-                    file_number_processed: 5,
-                    file_number_total: 6,
-                    size_processed_bytes: 0,
-                    size_total_bytes: 7,
-                },
-                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
             })),
         ];
         let mut progress_index = 0usize;
@@ -1750,11 +1753,31 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             HashProgress, VerifyProgress, VerifyProgressCommon, VerifyProgressPost,
         };
         let progress_expected = [
+            // bar/baz/does_not_exist
+            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
+                tree_root: testdir.as_path(),
+                relative_path: std::path::Path::new("bar/baz/does_not_exist"),
+                file_number_processed: 0,
+                file_number_total: 3,
+                size_processed_bytes: 0,
+                size_total_bytes: 0,
+            })),
+            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
+                progress: VerifyProgressCommon {
+                    tree_root: testdir.as_path(),
+                    relative_path: std::path::Path::new("bar/baz/does_not_exist"),
+                    file_number_processed: 1,
+                    file_number_total: 3,
+                    size_processed_bytes: 0,
+                    size_total_bytes: 0,
+                },
+                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+            })),
             // bar/baz/save.sav
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
                 relative_path: std::path::Path::new("bar/baz/save.sav"),
-                file_number_processed: 0,
+                file_number_processed: 1,
                 file_number_total: 3,
                 size_processed_bytes: 0,
                 size_total_bytes: 0,
@@ -1767,7 +1790,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
                     relative_path: std::path::Path::new("bar/baz/save.sav"),
-                    file_number_processed: 1,
+                    file_number_processed: 2,
                     file_number_total: 3,
                     size_processed_bytes: 0,
                     size_total_bytes: 0,
@@ -1778,7 +1801,7 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
             VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
                 tree_root: testdir.as_path(),
                 relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
-                file_number_processed: 1,
+                file_number_processed: 2,
                 file_number_total: 3,
                 size_processed_bytes: 0,
                 size_total_bytes: 0,
@@ -1791,32 +1814,12 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
                 progress: VerifyProgressCommon {
                     tree_root: testdir.as_path(),
                     relative_path: std::path::Path::new("bar/baz_2025-06-28.foo"),
-                    file_number_processed: 2,
-                    file_number_total: 3,
-                    size_processed_bytes: 0,
-                    size_total_bytes: 0,
-                },
-                result: VerifyResult::MismatchOutdatedHash,
-            })),
-            // bar/baz/does_not_exist
-            VerifyRootProgress::Verify(VerifyProgress::Pre(VerifyProgressCommon {
-                tree_root: testdir.as_path(),
-                relative_path: std::path::Path::new("bar/baz/does_not_exist"),
-                file_number_processed: 2,
-                file_number_total: 3,
-                size_processed_bytes: 0,
-                size_total_bytes: 0,
-            })),
-            VerifyRootProgress::Verify(VerifyProgress::Post(VerifyProgressPost {
-                progress: VerifyProgressCommon {
-                    tree_root: testdir.as_path(),
-                    relative_path: std::path::Path::new("bar/baz/does_not_exist"),
                     file_number_processed: 3,
                     file_number_total: 3,
                     size_processed_bytes: 0,
                     size_total_bytes: 0,
                 },
-                result: VerifyResult::FileMissing(std::io::ErrorKind::NotFound),
+                result: VerifyResult::MismatchOutdatedHash,
             })),
         ];
         let mut progress_index = 0usize;
@@ -1879,9 +1882,9 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         let actual = hc.to_str(&ch.file_tree).unwrap();
         let expected = "\
 # version 1
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist
 1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 baz/save.sav
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz_2025-06-28.foo
-1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist
 ";
 
         assert_eq!(actual, expected);
@@ -1911,9 +1914,9 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         let actual = hc.to_str(&ch.file_tree).unwrap();
         let expected = "\
 # version 1
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz/does_not_exist
 1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 bar/baz/save.sav
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz_2025-06-28.foo
-1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca bar/baz/does_not_exist
 ";
 
         assert_eq!(actual, expected);
@@ -1930,9 +1933,9 @@ ac06ffd974d80119666da2b17d1595c9  bar/baz/file.txt";
         let actual = hc.to_str(&ch.file_tree).unwrap();
         let expected = "\
 # version 1
+1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist
 1774640824.4379904,,md5,deadbeefae88690e8923e0261b556de9 baz/save.sav
 1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz_2025-06-28.foo
-1774640824.4381008,,md5,deadbeefb5fb7741320b7a87bf720eca baz/does_not_exist
 ";
 
         assert_eq!(actual, expected);

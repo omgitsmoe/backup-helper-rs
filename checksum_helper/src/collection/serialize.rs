@@ -4,7 +4,6 @@ use crate::file_tree::{EntryHandle, FileTree};
 use crate::hashed_file::FileRaw;
 
 use hex;
-use pathdiff::diff_paths;
 
 use std::io::Write;
 use std::path;
@@ -19,19 +18,7 @@ pub fn serialize<W: Write>(
     file_tree: &FileTree,
     with_header: bool,
 ) -> Result<()> {
-    let prefix = match &collection.root_dir {
-        None => {
-            return Err(HashCollectionError::MissingPath((
-                collection.root_dir.clone(),
-                collection.name.clone(),
-            )))
-        }
-        Some(hc_root) => {
-            let ft_root = file_tree.absolute_path(&file_tree.root());
-            diff_paths(hc_root, ft_root)
-                .ok_or_else(|| HashCollectionError::InvalidCollectionRoot(Some(hc_root.clone())))?
-        }
-    };
+    let prefix = collection.root_prefix(file_tree)?;
     assert!(
         !&prefix.components().any(|c| c == path::Component::ParentDir),
         "prefix contains parent dir components: collection root is not a subpath of the file tree root!");
@@ -39,10 +26,16 @@ pub fn serialize<W: Write>(
     if with_header {
         writer.write_all(VERSION_HEADER.as_bytes())?;
     }
-    // TODO: !IMPORTANT! sort by path first
-    for (path_handle, hashed_file) in &collection.map {
-        serialize_entry(writer, &prefix, path_handle, hashed_file, file_tree)?;
+
+    // NOTE: iterate the file tree instead of `collection.map`, which is a hash
+    //       map and has no order. The entries end up in the lexical order in
+    //       which `gather` yields them.
+    let mut entries = collection.iter_sorted(file_tree)?;
+    for (path_handle, hashed_file) in entries.by_ref() {
+        serialize_entry(writer, &prefix, &path_handle, hashed_file, file_tree)?;
     }
+    entries.check_all_yielded()?;
+
     Ok(())
 }
 
@@ -172,7 +165,7 @@ mod test {
 
         serialize(&hc, &mut buf, &ft, true).unwrap();
 
-        let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
+        let result = std::str::from_utf8(&buf).unwrap();
         assert_eq!(result, expected_serialization,);
     }
 
@@ -218,17 +211,19 @@ mod test {
             ),
         );
 
-        let expected_serialization_sorted = "\
+        // NOTE: a directory is visited before the files next to it, so this is
+        //       not the same as sorting the paths
+        let expected_serialization = "\
 # version 1
-1337.00133,1337,sha512,deadbeef baz.txt
 1212,,md5,aabbccdd baz/foo.txt
+1337.00133,1337,sha512,deadbeef baz.txt
 ,4206969,sha3_512,eeff0011 xer.mp4\n";
 
         let mut buf = vec![];
         serialize(&hc, &mut buf, &ft, true).unwrap();
 
-        let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
-        assert_eq!(result, expected_serialization_sorted,);
+        let result = std::str::from_utf8(&buf).unwrap();
+        assert_eq!(result, expected_serialization,);
     }
 
     #[test]
@@ -249,7 +244,7 @@ mod test {
 
         let mut buf = vec![];
         serialize(&hc, &mut buf, &ft, true).unwrap();
-        let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
+        let result = std::str::from_utf8(&buf).unwrap();
 
         assert_eq!(
             result,
@@ -260,11 +255,53 @@ mod test {
 
         let mut buf = vec![];
         serialize(&hc, &mut buf, &ft, false).unwrap();
-        let result = sort_serialized(std::str::from_utf8(&buf).unwrap()).unwrap();
+        let result = std::str::from_utf8(&buf).unwrap();
         assert_eq!(
             result,
             "\
 1337.00133,1337,sha512,deadbeef baz.txt\n"
+        );
+    }
+
+    #[test]
+    fn test_serialize_sorts_independently_of_insertion_order() {
+        // NOTE: the collection's map is a hash map and the file tree is filled
+        //       in whatever order the entries are discovered (e.g. parsing
+        //       several hash files, merged by mtime), so the serialized order
+        //       has to come from the tree
+        let mut ft = FileTree::new(abs("foo")).unwrap();
+        let mut hc = HashCollection::new(Some(&abs("foo/foo.cshd")), None).unwrap();
+
+        for path in [
+            "vid.mp4",
+            "subdir/other/file.txt",
+            "file.txt",
+            "subdir/foo.txt",
+        ] {
+            let path_handle = ft.add_file(path).unwrap();
+            hc.update(
+                path_handle.clone(),
+                FileRaw::new(
+                    path_handle,
+                    None,
+                    None,
+                    HashType::Md5,
+                    vec![0xde, 0xad, 0xbe, 0xef],
+                ),
+            );
+        }
+
+        let mut buf = vec![];
+        serialize(&hc, &mut buf, &ft, true).unwrap();
+
+        assert_eq!(
+            std::str::from_utf8(&buf).unwrap(),
+            "\
+# version 1
+,,md5,deadbeef file.txt
+,,md5,deadbeef subdir/foo.txt
+,,md5,deadbeef subdir/other/file.txt
+,,md5,deadbeef vid.mp4\n"
         );
     }
 

@@ -46,14 +46,14 @@ pub fn file_handles_to_file_list(ft: &FileTree, handles: &Vec<EntryHandle>) -> S
     result.join("\n")
 }
 
-pub fn cshd_str_paths_only_sorted(s: &str) -> String {
-    let mut paths: Vec<&str> = s
+/// Paths of the entries of a serialized hash file, in the order they are
+/// serialized in.
+pub fn cshd_str_paths_only(s: &str) -> String {
+    let paths: Vec<&str> = s
         .lines()
         .skip(1)
         .filter_map(|line| line.split_once(' ').map(|(_, path)| path))
         .collect();
-
-    paths.sort();
 
     paths.join("\n") + "\n"
 }
