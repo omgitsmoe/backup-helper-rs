@@ -140,19 +140,33 @@ impl HashCollection {
         self.map.is_empty()
     }
 
+    /// Removes all entries whose file is missing on disk, reporting each of
+    /// them via `progress` in the order of [`Self::iter_sorted`].
+    ///
+    /// Note that this visits the whole subtree of the collection root, not
+    /// just the entries of this collection.
     pub(crate) fn filter_missing<P>(&mut self, file_tree: &FileTree, mut progress: P) -> Result<()>
     where
         P: FnMut(MostCurrentProgress),
     {
-        self.map.retain(|k, _v| {
-            let file_path = file_tree.absolute_path(k);
-            let exists = std::fs::exists(&file_path).unwrap_or(false);
-            if !exists {
-                progress(MostCurrentProgress::FilteredMissingFile(file_path.clone()));
+        // NOTE: the missing entries have to be collected before they can be
+        //       removed, since iterating them borrows the map
+        let mut missing = vec![];
+        {
+            let mut entries = self.iter_sorted(file_tree)?;
+            for (path_handle, _) in entries.by_ref() {
+                let file_path = file_tree.absolute_path(&path_handle);
+                if !std::fs::exists(&file_path).unwrap_or(false) {
+                    progress(MostCurrentProgress::FilteredMissingFile(file_path));
+                    missing.push(path_handle);
+                }
             }
+            entries.check_all_yielded()?;
+        }
 
-            exists
-        });
+        for path_handle in missing {
+            self.map.remove(&path_handle);
+        }
 
         Ok(())
     }
@@ -1460,8 +1474,12 @@ abcdefff foo/xer.mp4
         Vec<&'static str>,
     ) {
         let testdir = testdir!();
-        let (hc, ft, _expected_serialization) = setup_minimal_hc(&testdir);
-        let relative_paths = vec!["foo/bar/baz.txt", "bar/foo.txt", "xer.mp4"];
+        let (mut hc, ft, _expected_serialization) = setup_minimal_hc(&testdir);
+        // NOTE: collections that are filtered always come from a known location
+        hc.relocate(&testdir);
+        // NOTE: not in lexical order, so the reported order cannot just be the
+        //       order of the paths below
+        let relative_paths = vec!["foo/bar/baz.txt", "xer.mp4", "bar/foo.txt"];
         create_ftree(
             &testdir,
             "\
@@ -1498,15 +1516,18 @@ xer.mp4",
             assert!(!hc.contains_path(p, &ft));
         }
 
-        assert_eq!(remove.len(), actual_callbacks.len());
-        for p in &actual_callbacks {
-            let relative = p
-                .strip_prefix(&testdir)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            assert!(remove.contains(&relative.as_str()));
-        }
+        // NOTE: reported in the order of the file tree, so a directory is
+        //       visited before the files next to it
+        let actual_relative = actual_callbacks
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&testdir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<String>>();
+        assert_eq!(actual_relative, ["bar/foo.txt", "xer.mp4"]);
 
         for p in keep {
             assert!(hc.contains_path(p, &ft));

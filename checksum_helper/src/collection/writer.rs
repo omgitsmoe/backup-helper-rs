@@ -24,6 +24,13 @@ impl HashCollectionWriter {
     /// Entries of the `collection` will be cleared.
     ///
     /// Will append to an existing file.
+    ///
+    /// NOTE: only the entries that are still pending are serialized, but finding
+    ///       them means walking the whole subtree of the collection again on
+    //       every flush. Skipping the already written prefix would make a flush
+    //       proportional to the new entries, but is only valid while entries
+    //       keep being added in tree order (as `Incremental` does), so leave it
+    //       until a periodic flush actually shows up as slow.
     pub fn flush(&mut self, collection: &mut HashCollection, file_tree: &FileTree) -> Result<()> {
         let full_path = collection.full_path()?;
         if self.wrote_header {
