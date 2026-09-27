@@ -42,12 +42,16 @@ pub(crate) struct ScanStats {
     /// The number of files to hash, once discovery is over; the size of the
     /// collection, for a verification.
     pub(crate) files_total: Option<u64>,
-    /// Bytes read in the files that are finished.
+    /// Bytes read in the files that are finished, counted as they were read: a
+    /// collection that records no size for a file would count as no bytes for it,
+    /// and one whose size is out of date would not count what was read from it.
     pub(crate) bytes_completed: u64,
     /// Bytes read in the file being worked on. Added to the finished files when
     /// the next one starts, so that the last file of a run is not lost.
     pub(crate) bytes_in_file: u64,
     /// Bytes to read, for a verification only: a hash has no total to divide by.
+    /// A collection's total counts only the files whose size it records, so it
+    /// is only shown while the read has not passed it.
     pub(crate) bytes_total: Option<u64>,
     /// Paths the discovery walk skipped, as reported by `DiscoverFilesDone`.
     pub(crate) ignored: u64,
@@ -98,6 +102,9 @@ impl ScanStats {
                 true
             }
             VerifyProgress::Post(post) => {
+                // The bytes the finished file was read at, before the running
+                // total is reset for the next one.
+                self.bytes_completed += self.bytes_in_file;
                 self.record_common(&post.progress);
                 true
             }
@@ -108,9 +115,8 @@ impl ScanStats {
         self.phase = ScanPhase::Verify;
         self.files_done = common.file_number_processed;
         self.files_total = Some(common.file_number_total);
-        self.bytes_completed = common.size_processed_bytes;
-        self.bytes_in_file = 0;
         self.bytes_total = Some(common.size_total_bytes);
+        self.bytes_in_file = 0;
     }
 
     /// Bytes read so far, over all files.
@@ -145,14 +151,21 @@ impl ScanStats {
                     None => format!("{}/?", self.files_done),
                 };
 
-                let bytes = match self.bytes_total {
+                // A collection counts towards its byte total only the files whose
+                // size it records, so the total is smaller than the bytes read
+                // whenever one of them is missing, and a file that grew since the
+                // collection was written adds up to more than its recorded size
+                // again. Either way the read passing the total is what shows that
+                // it is not a total, and from then on the row reports the bytes
+                // read without one.
+                let bytes = match self.bytes_total.filter(|total| self.bytes_done() <= *total) {
                     Some(total) => format!(
                         "{}/{} ({:.1}%)",
                         format_bytes(self.bytes_done()),
                         format_bytes(total),
                         percent(self.bytes_done(), total)
                     ),
-                    None => format!("{}/?", format_bytes(self.bytes_done())),
+                    None => format!("{} read", format_bytes(self.bytes_done())),
                 };
 
                 format!("files {files} | bytes {bytes}")
@@ -257,7 +270,6 @@ mod tests {
     fn pre(
         file_number_processed: u64,
         file_number_total: u64,
-        size_processed_bytes: u64,
         size_total_bytes: u64,
     ) -> VerifyProgress<'static> {
         VerifyProgress::Pre(common(
@@ -265,7 +277,7 @@ mod tests {
             Path::new("raw/x.NEF"),
             file_number_processed,
             file_number_total,
-            size_processed_bytes,
+            0,
             size_total_bytes,
         ))
     }
@@ -280,7 +292,6 @@ mod tests {
     fn post(
         file_number_processed: u64,
         file_number_total: u64,
-        size_processed_bytes: u64,
         size_total_bytes: u64,
     ) -> VerifyProgress<'static> {
         VerifyProgress::Post(VerifyProgressPost {
@@ -289,7 +300,7 @@ mod tests {
                 Path::new("raw/x.NEF"),
                 file_number_processed,
                 file_number_total,
-                size_processed_bytes,
+                0,
                 size_total_bytes,
             ),
             result: VerifyResult::Ok,
@@ -338,10 +349,10 @@ mod tests {
         let mut stats = ScanStats::default();
 
         for progress in [
-            pre(0, 2, 0, 8 * MIB),
-            during(2 * MIB),
-            post(1, 2, 4 * MIB, 8 * MIB),
-            pre(1, 2, 4 * MIB, 8 * MIB),
+            pre(0, 2, 8 * MIB),
+            during(4 * MIB),
+            post(1, 2, 8 * MIB),
+            pre(1, 2, 8 * MIB),
             during(MIB),
         ] {
             assert!(stats.record_verify(&progress));
@@ -355,13 +366,54 @@ mod tests {
     }
 
     #[test]
-    fn a_collection_without_recorded_sizes_shows_no_progress_in_bytes() {
+    fn the_bytes_of_a_finished_file_are_counted_as_they_were_read() {
         let mut stats = ScanStats::default();
-        stats.record_verify(&pre(1, 2, 0, 0));
+
+        // A collection that records the size of the first file and none for the
+        // second: a total that counts the second as nothing, and a run that reads
+        // more of it than the first file held.
+        for progress in [
+            pre(0, 2, 4 * MIB),
+            during(4 * MIB),
+            post(1, 2, 4 * MIB),
+            pre(1, 2, 4 * MIB),
+            during(2 * MIB),
+        ] {
+            stats.record_verify(&progress);
+        }
+
+        // The total the collection reports is smaller than what has been read, so
+        // the row reports the bytes read and leaves out a total it has been shown
+        // not to be one.
+        assert_eq!(
+            stats.progress_line(),
+            "files 1/2 (50.0%) | bytes 6.0 MiB read"
+        );
+    }
+
+    #[test]
+    fn a_read_that_stays_under_the_total_keeps_it() {
+        let mut stats = ScanStats::default();
+
+        for progress in [pre(0, 2, 8 * MIB), during(2 * MIB)] {
+            stats.record_verify(&progress);
+        }
 
         assert_eq!(
             stats.progress_line(),
-            "files 1/2 (50.0%) | bytes 0 B/0 B (0.0%)"
+            "files 0/2 (0.0%) | bytes 2.0 MiB/8.0 MiB (25.0%)"
+        );
+    }
+
+    #[test]
+    fn a_collection_without_recorded_sizes_reports_bytes_read() {
+        let mut stats = ScanStats::default();
+        stats.record_verify(&pre(1, 2, 0));
+        stats.record_verify(&during(3 * MIB));
+
+        assert_eq!(
+            stats.progress_line(),
+            "files 1/2 (50.0%) | bytes 3.0 MiB read"
         );
     }
 

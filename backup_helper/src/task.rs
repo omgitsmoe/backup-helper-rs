@@ -206,6 +206,19 @@ impl TaskExecutor for SourceHash {
                 );
             }
 
+            // The file in flight, so that the message row is not still naming
+            // the last one that finished while a big file is read into the
+            // counters.
+            if let IncrementalProgress::PreRead(path) = &progress {
+                progress::report(
+                    progress_tx,
+                    ProgressEvent::Updated {
+                        task_id: ctx.task_id,
+                        message: format!("[READ ] {path:?}"),
+                    },
+                );
+            }
+
             if let Some(message) = incremental_progress_message(&progress) {
                 progress::report(
                     progress_tx,
@@ -377,7 +390,22 @@ impl TaskExecutor for TargetVerify {
                 }
 
                 match p {
-                    collection::VerifyProgress::Pre(_) | collection::VerifyProgress::During(_) => {}
+                    collection::VerifyProgress::Pre(common) => {
+                        // The file in flight, so that the message row is not
+                        // still naming the last one that finished while a big
+                        // file is read into the counters.
+                        progress::report(
+                            progress_tx,
+                            ProgressEvent::Updated {
+                                task_id: ctx.task_id,
+                                message: format!(
+                                    "[READ ] {:?}",
+                                    common.tree_root.join(common.relative_path)
+                                ),
+                            },
+                        );
+                    }
+                    collection::VerifyProgress::During(_) => {}
                     collection::VerifyProgress::Post(verify_progress_post) => {
                         verified.checked += 1;
                         let path = verify_progress_post
@@ -758,6 +786,13 @@ mod tests {
             event,
             ProgressEvent::Updated { task_id: 10, message }
                 if message.contains("[NEW  ]") && message.contains("file.txt")
+        )));
+        // The file in flight is named while it is read, so that the message row
+        // is not left on the last file that finished.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::Updated { task_id: 10, message }
+                if message.starts_with("[READ ]") && message.contains("file.txt")
         )));
         assert!(
             events.iter().any(|event| matches!(
@@ -1257,6 +1292,13 @@ mod tests {
             )),
             "a verification reports the size of the collection and the bytes it has read: {events:?}"
         );
+        // The file in flight is named while it is read, so that the message row
+        // is not left on the last file that finished.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::Updated { task_id: 12, message }
+                if message.starts_with("[READ ]") && message.contains("file.txt")
+        )));
         assert!(matches!(
             events.last(),
             Some(ProgressEvent::Finished {

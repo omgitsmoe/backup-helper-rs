@@ -678,7 +678,8 @@ fn character_width(character: char) -> usize {
 mod tests {
     use checksum_helper::{
         checksum_helper::IncrementalProgress, collection::HashProgress, collection::VerifyProgress,
-        collection::VerifyProgressCommon,
+        collection::VerifyProgressCommon, collection::VerifyProgressPost,
+        hashed_file::VerifyResult,
     };
     use pretty_assertions::assert_eq;
 
@@ -746,16 +747,33 @@ mod tests {
     /// next one, which leaves 12.3 of 98.7 GiB read.
     fn verifying_stats() -> ScanStats {
         let mut stats = ScanStats::default();
-        let common = VerifyProgressCommon {
+        let total = 98 * 1024 * 1024 * 1024 + 700 * 1024 * 1024;
+        let finished = VerifyProgressCommon {
+            tree_root: Path::new("/mnt/backup"),
+            relative_path: Path::new("raw/IMG_0041.CR3"),
+            file_number_processed: 1233,
+            file_number_total: 50000,
+            size_processed_bytes: 12 * 1024 * 1024 * 1024,
+            size_total_bytes: total,
+        };
+
+        stats.record_verify(&VerifyProgress::Pre(finished));
+        stats.record_verify(&VerifyProgress::During(HashProgress {
+            bytes_read: 12 * 1024 * 1024 * 1024,
+            bytes_total: 12 * 1024 * 1024 * 1024,
+        }));
+        stats.record_verify(&VerifyProgress::Post(VerifyProgressPost {
+            progress: finished,
+            result: VerifyResult::Ok,
+        }));
+        stats.record_verify(&VerifyProgress::Pre(VerifyProgressCommon {
             tree_root: Path::new("/mnt/backup"),
             relative_path: Path::new("raw/IMG_0042.CR3"),
             file_number_processed: 1234,
             file_number_total: 50000,
             size_processed_bytes: 12 * 1024 * 1024 * 1024,
-            size_total_bytes: 98 * 1024 * 1024 * 1024 + 700 * 1024 * 1024,
-        };
-
-        stats.record_verify(&VerifyProgress::Pre(common));
+            size_total_bytes: total,
+        }));
         stats.record_verify(&VerifyProgress::During(HashProgress {
             bytes_read: 300 * 1024 * 1024,
             bytes_total: 4 * 1024 * 1024 * 1024,
