@@ -137,6 +137,24 @@ pub(crate) struct CommonData {
     pub(crate) involved_disks: Box<[DiskHandle]>,
 }
 
+impl CommonData {
+    /// A task holds every one of its disks busy for its whole run, so a disk
+    /// named twice (source and target on the same disk) is kept once: the
+    /// scheduler claims and releases each entry of this list exactly once.
+    pub(crate) fn new(disks: impl IntoIterator<Item = DiskHandle>) -> Self {
+        let mut involved_disks: Vec<DiskHandle> = Vec::new();
+        for disk in disks {
+            if !involved_disks.contains(&disk) {
+                involved_disks.push(disk);
+            }
+        }
+
+        Self {
+            involved_disks: involved_disks.into_boxed_slice(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceHash {
     pub(crate) common: CommonData,
@@ -489,14 +507,7 @@ mod tests {
     use testdir::testdir;
 
     fn common(disks: &[usize]) -> CommonData {
-        CommonData {
-            involved_disks: disks
-                .iter()
-                .copied()
-                .map(DiskHandle)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        }
+        CommonData::new(disks.iter().copied().map(DiskHandle))
     }
 
     fn hash_source(source_path: &Path) -> path::PathBuf {
@@ -636,6 +647,25 @@ mod tests {
         assert_eq!(tasks[1].involved_disks(), &[DiskHandle(2), DiskHandle(3)]);
         assert_eq!(tasks[2].involved_disks(), &[DiskHandle(4), DiskHandle(5)]);
         assert_eq!(tasks[3].involved_disks(), &[DiskHandle(6)]);
+    }
+
+    #[test]
+    fn common_data_keeps_each_disk_once_in_first_use_order() {
+        assert_eq!(
+            CommonData::new([DiskHandle(0), DiskHandle(1)]).involved_disks,
+            Box::<[DiskHandle]>::from([DiskHandle(0), DiskHandle(1)])
+        );
+        // A source and a target on one disk name the same handle twice; a task
+        // must not occupy it twice.
+        assert_eq!(
+            CommonData::new([DiskHandle(0), DiskHandle(0)]).involved_disks,
+            Box::<[DiskHandle]>::from([DiskHandle(0)])
+        );
+        assert_eq!(
+            CommonData::new([DiskHandle(2), DiskHandle(0), DiskHandle(2), DiskHandle(1)])
+                .involved_disks,
+            Box::<[DiskHandle]>::from([DiskHandle(2), DiskHandle(0), DiskHandle(1)])
+        );
     }
 
     #[test]

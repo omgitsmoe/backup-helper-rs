@@ -201,9 +201,7 @@ impl SchedulerCore {
                 source_task_id = Some(self.tasks.len());
                 self.tasks.push(TaskEntry {
                     task: Task::SourceHash(SourceHash {
-                        common: CommonData {
-                            involved_disks: Box::<[DiskHandle; 1]>::new([source_disk]),
-                        },
+                        common: CommonData::new([source_disk]),
                         source_idx: source_index,
                         options: source.checksum_options().clone(),
                     }),
@@ -229,12 +227,7 @@ impl SchedulerCore {
 
                     self.tasks.push(TaskEntry {
                         task: Task::SourceToTargetCopy(SourceToTargetCopy {
-                            common: CommonData {
-                                involved_disks: Box::<[DiskHandle; 2]>::new([
-                                    source_disk,
-                                    target_disk,
-                                ]),
-                            },
+                            common: CommonData::new([source_disk, target_disk]),
                             source_idx: source_index,
                             target_idx: target_index,
                             copy_policy: self.copy_policy,
@@ -263,9 +256,7 @@ impl SchedulerCore {
                     };
                     self.tasks.push(TaskEntry {
                         task: Task::TargetVerify(TargetVerify {
-                            common: CommonData {
-                                involved_disks: Box::<[DiskHandle; 1]>::new([target_disk]),
-                            },
+                            common: CommonData::new([target_disk]),
                             source_idx: source_index,
                             target_idx: target_index,
                         }),
@@ -789,6 +780,30 @@ mod tests {
         )
     }
 
+    /// A source and a target that share one disk, like copying a download into
+    /// a backup directory on the same filesystem.
+    fn same_disk_config(root: &Path) -> String {
+        let disk = path_literal(&root.join("disk"));
+        let source = path_literal(&root.join("disk/source"));
+        let target = path_literal(&root.join("disk/target"));
+
+        format!(
+            r#"
+            disks {{
+                disk "only" {{
+                    path {disk}
+                    mounted #true
+                }}
+            }}
+            source {source} {{
+                target {target} {{
+                    transfer_mode copy
+                }}
+            }}
+        "#
+        )
+    }
+
     fn two_target_config(root: &Path, verify: bool) -> String {
         let source_disk = path_literal(&root.join("source-disk"));
         let target_disk = path_literal(&root.join("target-disk"));
@@ -1282,6 +1297,40 @@ mod tests {
 
         assert_eq!(core.disks_busy, vec![false, false, false, false]);
         assert_eq!(core.pick_next().unwrap(), Some(1));
+    }
+
+    #[test]
+    fn a_copy_between_paths_on_the_same_disk_occupies_that_disk_once() {
+        let root = testdir!();
+        // `pick_next` only offers a task whose disks report themselves mounted.
+        std::fs::create_dir_all(root.join("disk")).unwrap();
+        let mut core = SchedulerCore::new(state(&same_disk_config(&root))).unwrap();
+
+        // Source and target resolve to the same disk, so the copy must name it
+        // once: `start_task` claims every entry of the list, and claiming the
+        // same disk twice trips "all disks of a ready task must be idle!".
+        assert_eq!(core.tasks[1].involved_disks(), &[DiskHandle(0)]);
+        assert_eq!(core.tasks[2].involved_disks(), &[DiskHandle(0)]);
+
+        assert_eq!(core.pick_next().unwrap(), Some(0));
+        core.start_task(0);
+        assert_eq!(core.disks_busy, vec![true]);
+        core.finish_task(0, Ok(source_hash_outcome(&root)));
+        assert_eq!(core.disks_busy, vec![false]);
+
+        assert_eq!(core.pick_next().unwrap(), Some(1));
+        core.start_task(1);
+        assert_eq!(core.disks_busy, vec![true]);
+        core.finish_task(1, Ok(copy_outcome()));
+        assert_eq!(core.disks_busy, vec![false]);
+        assert!(core.state.sources()[0].targets()[0].is_transferred());
+
+        // The copy released the disk, so the verify task can claim it again.
+        core.start_task(2);
+        core.finish_task(2, Ok(verify_outcome(&root)));
+        assert_eq!(core.disks_busy, vec![false]);
+        assert!(core.state.sources()[0].targets()[0].is_verified());
+        assert!(core.finished());
     }
 
     #[test]

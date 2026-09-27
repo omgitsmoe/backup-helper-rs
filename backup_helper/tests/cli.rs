@@ -59,6 +59,29 @@ fn config_for_paths(
     )
 }
 
+fn single_disk_config(root: &Path) -> String {
+    let disk = root.join("disk");
+    let source = disk.join("source");
+    let target = disk.join("target");
+
+    format!(
+        r#"
+        disks {{
+            disk "only" {{
+                path {:?}
+                mounted #true
+            }}
+        }}
+        source {:?} {{
+            target {:?} {{
+                transfer_mode copy
+            }}
+        }}
+        "#,
+        disk, source, target,
+    )
+}
+
 fn write_config(root: &Path) -> (PathBuf, PathBuf) {
     let config_path = root.join("config.kdl");
     let state_path = root.join("state.json");
@@ -244,6 +267,46 @@ fn start_prints_task_verify_summaries_and_log_locations() {
     assert!(
         stderr.contains("Totals: 1 files (7 B read) | 0 ignored"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn start_copies_a_source_to_a_target_on_the_same_disk() {
+    let root = testdir!();
+    let config_path = root.join("config.kdl");
+    let state_path = root.join("state.json");
+    let source_path = root.join("disk/source");
+    let target_path = root.join("disk/target");
+    std::fs::create_dir_all(&source_path).unwrap();
+    std::fs::write(source_path.join("file.txt"), "content").unwrap();
+    std::fs::write(&config_path, single_disk_config(&root)).unwrap();
+
+    let reconcile = run_cli(&[
+        "reconcile".into(),
+        arg(&config_path),
+        "--state".into(),
+        arg(&state_path),
+    ]);
+    assert!(reconcile.status.success(), "{reconcile:?}");
+
+    // Source and target live on the one declared disk, so the copy must not
+    // claim that disk twice or the run dies in the scheduler.
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state["sources"][0]["disk"], 0);
+    assert_eq!(state["sources"][0]["targets"][0]["disk"], 0);
+
+    let output = run_cli_from(&root, &["start".into(), "--state".into(), arg(&state_path)]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(target_path.join("file.txt")).unwrap(),
+        "content"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Ran: 3 | Successful: 3 | Errored: 0"),
+        "{stdout}"
     );
 }
 
