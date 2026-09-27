@@ -152,6 +152,7 @@ pub fn verify_root(
     verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::absolute(root)?;
+    println!("Verifying root: {:?}", root);
     let options = most_current_args.apply(ChecksumHelperOptions::default())?;
     let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
     let matcher = matcher.to_path_matcher()?;
@@ -188,6 +189,10 @@ pub fn verify_file(
     if !std::fs::metadata(path)?.is_file() {
         return Err(format!("Expected a path to a hash file, got: {:?}", path).into());
     }
+
+    // `verify latest` delegates here, so this is where the hash file it picked
+    // is named, after the pick and before anything is verified.
+    println!("Verifying hash file: {:?}", std::path::absolute(path)?);
 
     let root = if path.is_relative() {
         std::env::current_dir()?.join(path.parent().expect("checked above"))

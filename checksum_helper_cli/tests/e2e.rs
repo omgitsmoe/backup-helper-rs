@@ -309,6 +309,11 @@ fn test_verify_file_ok() {
         common::run_cli(&["verify", "file", &cshd_path.to_string_lossy()]);
     assert!(success, "verify file failed: stderr={}", stderr);
     assert!(
+        stdout.contains(&format!("Verifying hash file: {:?}", cshd_path)),
+        "expected the hash file to be reported: {}",
+        stdout
+    );
+    assert!(
         stdout.contains("[OK        ]"),
         "expected OK in output: {}",
         stdout
@@ -433,6 +438,11 @@ good.txt",
     let (stdout, stderr, success) = common::run_cli(&["verify", "root", &root.to_string_lossy()]);
     assert!(success, "verify root failed: stderr={}", stderr);
     assert!(
+        stdout.contains(&format!("Verifying root: {:?}", root)),
+        "expected the root to be reported: {}",
+        stdout
+    );
+    assert!(
         stdout.contains("SUCCESSFULLY"),
         "expected success summary: {}",
         stdout
@@ -497,6 +507,21 @@ fn test_verify_latest_picks_newest_hash_file() {
 
     let (stdout, stderr, success) = common::run_cli(&["verify", "latest", &root.to_string_lossy()]);
     assert!(success, "verify latest failed: stderr={}", stderr);
+    // The reported hash file names the selected one directly, so the two decoys
+    // must not be mentioned anywhere.
+    assert!(
+        stdout.contains(&format!("Verifying hash file: {:?}", root.join("m.cshd"))),
+        "expected the newest hash file to be reported: {}",
+        stdout
+    );
+    for decoy in ["a.cshd", "z.cshd"] {
+        assert!(
+            !stdout.contains(decoy),
+            "expected {} not to be selected: {}",
+            decoy,
+            stdout
+        );
+    }
     assert!(
         stdout.contains("[OK        ]"),
         "expected OK in output: {}",
@@ -548,6 +573,19 @@ fn test_verify_latest_ignores_non_hash_files_and_subdirectories() {
 
     let (stdout, stderr, success) = common::run_cli(&["verify", "latest", &root.to_string_lossy()]);
     assert!(success, "verify latest failed: stderr={}", stderr);
+    assert!(
+        stdout.contains(&format!("Verifying hash file: {:?}", only)),
+        "expected only.cshd to be reported: {}",
+        stdout
+    );
+    for decoy in ["newest.txt", "newest.cshd"] {
+        assert!(
+            !stdout.contains(decoy),
+            "expected {} not to be selected: {}",
+            decoy,
+            stdout
+        );
+    }
     assert!(
         stdout.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"),
         "expected only.cshd to be selected: {}",
