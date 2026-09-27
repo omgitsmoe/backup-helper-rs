@@ -223,10 +223,57 @@ fn start_prints_task_verify_summaries_and_log_locations() {
     assert!(stdout.contains("========== VERIFY SUMMARY =========="));
     assert!(stdout.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"));
     assert!(stdout.contains("ALL FILES VERIFIED SUCCESSFULLY"));
+    // A copy has no log file, so its totals are the only record of what it did.
+    // The byte count covers the collection the hash task left in the source, so
+    // only the shape around it is pinned here.
+    assert!(
+        stdout.contains("Totals: 2 entries | 2 copied ("),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| 0 skipped (0 B) | 0 directories | 0 ignored"),
+        "{stdout}"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("========== VERIFY SUMMARY =========="));
     assert!(stderr.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"));
+    assert!(stderr.contains("Totals: 2 entries | 2 copied ("));
+}
+
+#[test]
+fn piped_output_holds_the_totals_and_not_a_line_per_file() {
+    let root = testdir!();
+    let (config_path, state_path) = write_config(&root);
+    let source_path = root.join("source-disk/source");
+    let target_path = root.join("target-disk/target");
+    std::fs::create_dir_all(source_path.join("nested")).unwrap();
+    std::fs::create_dir_all(&target_path).unwrap();
+    for name in ["a.txt", "b.txt", "nested/c.txt", "nested/d.txt"] {
+        std::fs::write(source_path.join(name), "content").unwrap();
+    }
+    reconcile_with_mounted_disks(&config_path, &state_path);
+
+    let output = run_cli_from(&root, &["start".into(), "--state".into(), arg(&state_path)]);
+
+    assert!(output.status.success(), "{output:?}");
+    // Without a terminal there is no block to redraw, and the per-file detail is
+    // in the task log, so only the totals of the finished tasks are reported.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr
+            .lines()
+            .any(|line| line.starts_with(['0', '1', '2']) && line.contains(": ")),
+        "a piped run reports no per-task progress lines: {stderr}"
+    );
+    assert!(!stderr.contains("a.txt"), "{stderr}");
+    assert!(!stderr.contains("[NEW  ]"), "{stderr}");
+    assert!(
+        stderr.contains("Totals: 6 entries | 5 copied ("),
+        "{stderr}"
+    );
+    assert!(stderr.contains("| 1 directories | 0 ignored"), "{stderr}");
+    assert!(stderr.contains("Total: 4 | OK: 4 | ERR: 0 | WARN: 0"));
 }
 
 #[test]

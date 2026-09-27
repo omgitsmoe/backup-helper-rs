@@ -4,9 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 
-use crate::progress::{self, ProgressEvent};
+use crate::progress::{self, ProgressEvent, TaskSummary};
 use crate::task::{TaskContext, TaskOutcome};
-use crate::task_log::VerifySummary;
 use crate::{
     BackupHelperError,
     backup_helper::{BackupHelper, DiskHandle},
@@ -51,7 +50,7 @@ enum TaskExecutionResult {
     NotRun,
     Succeeded {
         log_file: Option<PathBuf>,
-        verify_summary: Option<VerifySummary>,
+        summary: Option<TaskSummary>,
     },
     Failed {
         message: String,
@@ -353,7 +352,7 @@ impl SchedulerCore {
                 self.done += 1;
                 self.tasks[task_id].state = TaskState::Done;
 
-                let (log_file, verify_summary) = self.update_state(task_id, outcome);
+                let (log_file, summary) = self.update_state(task_id, outcome);
 
                 // update other tasks that might have become ready
                 for &dependent in &self.dependents[task_id] {
@@ -368,10 +367,7 @@ impl SchedulerCore {
                     }
                 }
 
-                TaskExecutionResult::Succeeded {
-                    log_file,
-                    verify_summary,
-                }
+                TaskExecutionResult::Succeeded { log_file, summary }
             }
             Err(error) => {
                 self.tasks[task_id].state = TaskState::Failed;
@@ -389,7 +385,7 @@ impl SchedulerCore {
         &mut self,
         task_id: TaskId,
         outcome: TaskOutcome,
-    ) -> (Option<PathBuf>, Option<VerifySummary>) {
+    ) -> (Option<PathBuf>, Option<TaskSummary>) {
         let task = &mut self.tasks[task_id].task;
         match outcome {
             TaskOutcome::SourceHash {
@@ -405,7 +401,7 @@ impl SchedulerCore {
                 source.set_hash_log_file(hash_log_file.clone());
                 (Some(hash_log_file), None)
             }
-            TaskOutcome::SourceToTargetCopy => {
+            TaskOutcome::SourceToTargetCopy { stats } => {
                 let Task::SourceToTargetCopy(task) = task else {
                     unreachable!("outcome doesn't match task");
                 };
@@ -413,7 +409,7 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
                 target.transferred();
-                (None, None)
+                (None, Some(TaskSummary::Copy(stats)))
             }
             TaskOutcome::SourceToTargetSync => {
                 let Task::SourceToTargetSync(task) = task else {
@@ -434,7 +430,7 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 let target = source.target_mut(task.target_idx);
                 target.verified(verified);
-                (Some(log_file), Some(summary))
+                (Some(log_file), Some(TaskSummary::Verify(summary)))
             }
         }
     }
@@ -533,11 +529,7 @@ impl SchedulerCore {
         if successful > 0 {
             writeln!(output, "\nSuccessful ({successful}):").unwrap();
             for (task_id, entry) in self.tasks.iter().enumerate() {
-                let TaskExecutionResult::Succeeded {
-                    log_file,
-                    verify_summary: _,
-                } = &entry.execution
-                else {
+                let TaskExecutionResult::Succeeded { log_file, summary } = &entry.execution else {
                     continue;
                 };
 
@@ -545,6 +537,11 @@ impl SchedulerCore {
                 writeln!(output, "  [OK] {task_id}: {description}").unwrap();
                 if let Some(log_file) = log_file {
                     writeln!(output, "         Full log: {log_file:?}").unwrap();
+                }
+                // A copy is the one task without a log file, so its totals are
+                // the only record of what it did.
+                if let Some(TaskSummary::Copy(stats)) = summary {
+                    write!(output, "         {stats}").unwrap();
                 }
             }
         }
@@ -564,7 +561,7 @@ impl SchedulerCore {
 
         for (task_id, entry) in self.tasks.iter().enumerate() {
             let TaskExecutionResult::Succeeded {
-                verify_summary: Some(verify_summary),
+                summary: Some(TaskSummary::Verify(verify_summary)),
                 ..
             } = &entry.execution
             else {
@@ -711,7 +708,7 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse, target::VerifiedInfo};
+    use crate::{copy::CopyStats, parse, target::VerifiedInfo, task_log::VerifySummary};
     use serde_json::Value;
     use std::path::Path;
     use testdir::testdir;
@@ -874,6 +871,20 @@ mod tests {
         }
     }
 
+    fn copy_outcome() -> TaskOutcome {
+        TaskOutcome::SourceToTargetCopy {
+            stats: CopyStats {
+                entries: 3,
+                directories: 1,
+                ignored: 0,
+                copied_files: 2,
+                copied_bytes: 12,
+                skipped_files: 0,
+                skipped_bytes: 0,
+            },
+        }
+    }
+
     #[test]
     fn dependencies_are_released_in_order() {
         let root = testdir!();
@@ -892,7 +903,7 @@ mod tests {
         assert_eq!(core.tasks[2].state, TaskState::Pending);
 
         core.start_task(1);
-        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+        core.finish_task(1, Ok(copy_outcome()));
         assert!(core.state.sources()[0].targets()[0].is_transferred());
         assert_eq!(core.tasks[2].state, TaskState::Ready);
 
@@ -910,7 +921,7 @@ mod tests {
         core.start_task(0);
         core.finish_task(0, Ok(source_hash_outcome(&root)));
         core.start_task(1);
-        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+        core.finish_task(1, Ok(copy_outcome()));
         core.start_task(2);
         core.finish_task(2, Ok(verify_outcome(&root)));
 
@@ -954,7 +965,7 @@ mod tests {
         core.start_task(0);
         core.finish_task(0, Ok(source_hash_outcome(&root)));
         core.start_task(1);
-        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+        core.finish_task(1, Ok(copy_outcome()));
 
         let verified = VerifiedInfo {
             checked: 4,
@@ -1091,7 +1102,7 @@ mod tests {
         core.start_task(0);
         core.finish_task(0, Ok(source_hash_outcome(&root)));
         core.start_task(1);
-        core.finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+        core.finish_task(1, Ok(copy_outcome()));
 
         let mut helper = core.close();
         assert!(helper.sources()[0].hash_file().is_some());
@@ -1282,7 +1293,7 @@ mod tests {
         assert!(!core.state.sources()[0].targets()[1].is_transferred());
 
         core.start_task(2);
-        core.finish_task(2, Ok(TaskOutcome::SourceToTargetCopy));
+        core.finish_task(2, Ok(copy_outcome()));
 
         assert!(core.state.sources()[0].targets()[1].is_transferred());
         assert!(!core.state.sources()[0].targets()[0].is_transferred());
@@ -1579,7 +1590,7 @@ mod tests {
             .core
             .lock()
             .unwrap()
-            .finish_task(1, Ok(TaskOutcome::SourceToTargetCopy));
+            .finish_task(1, Ok(copy_outcome()));
 
         let state_path = root.join("state.json");
         scheduler.persist_state(&state_path).unwrap();

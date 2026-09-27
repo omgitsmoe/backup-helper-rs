@@ -9,7 +9,7 @@ use crate::{
     BackupHelperError,
     backup_helper::DiskHandle,
     copy,
-    progress::{self, ProgressEvent},
+    progress::{self, ProgressEvent, TaskSummary},
     source::ChecksumOptions,
     target::VerifiedInfo,
     task_log::{TaskLog, TaskLogType, VerifySummary},
@@ -93,8 +93,11 @@ impl Task {
             Task::TargetVerify(t) => t.execute(ctx, progress),
         };
 
-        let verify_summary = match &outcome {
-            Ok(TaskOutcome::TargetVerify { summary, .. }) => Some(summary.clone()),
+        let summary = match &outcome {
+            Ok(TaskOutcome::TargetVerify { summary, .. }) => {
+                Some(TaskSummary::Verify(summary.clone()))
+            }
+            Ok(TaskOutcome::SourceToTargetCopy { stats }) => Some(TaskSummary::Copy(*stats)),
             _ => None,
         };
 
@@ -103,7 +106,7 @@ impl Task {
                 progress,
                 ProgressEvent::Finished {
                     task_id: ctx.task_id,
-                    verify_summary,
+                    summary,
                 },
             ),
             Err(error) => progress::report(
@@ -250,23 +253,18 @@ impl TaskExecutor for SourceToTargetCopy {
             }
         }
 
-        copy::copy_tree(source_path, target_path, self.copy_policy, |progress| {
-            let action = match progress.action {
-                copy::CopyAction::Copied => "copied",
-                copy::CopyAction::SkippedUnchanged => "skipped unchanged",
-                copy::CopyAction::Directory => "directory ready",
-                copy::CopyAction::Ignored => "ignored",
-            };
+        let stats = copy::copy_tree(source_path, target_path, self.copy_policy, |progress| {
             progress::report(
                 progress_tx,
-                ProgressEvent::Updated {
+                ProgressEvent::Copying {
                     task_id: ctx.task_id,
-                    message: format!("{} {:?}", action, progress.relative_path),
+                    stats: progress.stats,
+                    current: progress.relative_path,
                 },
             );
         })?;
 
-        Ok(TaskOutcome::SourceToTargetCopy)
+        Ok(TaskOutcome::SourceToTargetCopy { stats })
     }
 }
 
@@ -437,7 +435,9 @@ pub(crate) enum TaskOutcome {
         hash_file: path::PathBuf,
         hash_log_file: path::PathBuf,
     },
-    SourceToTargetCopy,
+    SourceToTargetCopy {
+        stats: copy::CopyStats,
+    },
     #[allow(dead_code)]
     SourceToTargetSync,
     TargetVerify {
@@ -799,12 +799,16 @@ mod tests {
             },
             &progress,
         );
-        assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
+        assert!(matches!(
+            outcome,
+            Ok(TaskOutcome::SourceToTargetCopy { .. })
+        ));
 
         let events: Vec<_> = progress_events.try_iter().collect();
         assert!(events.iter().any(|event| matches!(
             event,
-            ProgressEvent::Updated { task_id: 0, message } if message.contains("file.txt")
+            ProgressEvent::Copying { task_id: 0, current, .. }
+                if current == &path::Path::new("file.txt")
         )));
 
         assert_eq!(
@@ -853,7 +857,10 @@ mod tests {
             &progress,
         );
 
-        assert!(matches!(outcome, Ok(TaskOutcome::SourceToTargetCopy)));
+        assert!(matches!(
+            outcome,
+            Ok(TaskOutcome::SourceToTargetCopy { .. })
+        ));
         assert_eq!(
             fs::read_to_string(target_path.join("file.txt")).unwrap(),
             "content"
@@ -905,13 +912,117 @@ mod tests {
         ));
         assert!(events.iter().any(|event| matches!(
             event,
-            ProgressEvent::Updated { task_id: 11, message }
-                if message.contains("copied") && message.contains("file.txt")
+            ProgressEvent::Copying { task_id: 11, current, .. }
+                if current == &path::Path::new("file.txt")
         )));
         assert!(matches!(
             events.last(),
-            Some(ProgressEvent::Finished { task_id: 11, .. })
+            Some(ProgressEvent::Finished {
+                task_id: 11,
+                summary: Some(TaskSummary::Copy(stats)),
+            }) if stats.copied_files == 1 && stats.copied_bytes == 7
         ));
+    }
+
+    #[test]
+    fn execute_copy_accumulates_stats_over_the_whole_tree() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(source_path.join("nested")).unwrap();
+        fs::write(source_path.join("a.txt"), "aaaa").unwrap();
+        fs::write(source_path.join("nested/b.txt"), "bb").unwrap();
+
+        let task = Task::SourceToTargetCopy(SourceToTargetCopy {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+            copy_policy: copy::CopyPolicy::SkipUnchanged,
+        });
+        let (progress, events) = mpsc::channel();
+
+        let outcome = task
+            .execute(
+                &TaskContext {
+                    task_id: 0,
+                    source_path: Some(source_path),
+                    target_path: Some(target_path.clone()),
+                    hash_file: None,
+                    checksum_options: None,
+                    log_directory: None,
+                },
+                &progress,
+            )
+            .unwrap();
+
+        let TaskOutcome::SourceToTargetCopy { stats } = outcome else {
+            panic!("SourceToTargetCopy task returned the wrong outcome");
+        };
+        assert_eq!(stats.copied_files, 2);
+        assert_eq!(stats.copied_bytes, 6);
+        assert_eq!(stats.skipped_files, 0);
+        assert_eq!(stats.directories, 1);
+        // The root directory is not walked, so it is not an entry either.
+        assert_eq!(stats.entries, 3);
+
+        // Every event carries the totals as they stand, so a consumer never has
+        // to accumulate them itself.
+        let last = events
+            .try_iter()
+            .filter_map(|event| match event {
+                ProgressEvent::Copying { stats, .. } => Some(stats),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert_eq!(last, stats);
+    }
+
+    #[test]
+    fn execute_copy_counts_an_unchanged_file_as_skipped() {
+        let testdir = testdir!();
+        let source_path = testdir.join("source");
+        let target_path = testdir.join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(source_path.join("file.txt"), "same").unwrap();
+        fs::write(target_path.join("file.txt"), "same").unwrap();
+        // The skip test is size and mtime, and the two writes land on different
+        // timestamps, so the file has to be stamped to be recognised.
+        let mtime = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(source_path.join("file.txt"), mtime).unwrap();
+        filetime::set_file_mtime(target_path.join("file.txt"), mtime).unwrap();
+
+        let task = Task::SourceToTargetCopy(SourceToTargetCopy {
+            common: common(&[0, 1]),
+            source_idx: 0,
+            target_idx: 0,
+            copy_policy: copy::CopyPolicy::SkipUnchanged,
+        });
+        let progress = progress_sender();
+
+        let TaskOutcome::SourceToTargetCopy { stats } = task
+            .execute(
+                &TaskContext {
+                    task_id: 0,
+                    source_path: Some(source_path),
+                    target_path: Some(target_path),
+                    hash_file: None,
+                    checksum_options: None,
+                    log_directory: None,
+                },
+                &progress,
+            )
+            .unwrap()
+        else {
+            panic!("SourceToTargetCopy task returned the wrong outcome");
+        };
+
+        assert_eq!(stats.copied_files, 0);
+        assert_eq!(stats.copied_bytes, 0);
+        assert_eq!(stats.skipped_files, 1);
+        assert_eq!(stats.skipped_bytes, 4);
     }
 
     #[test]
@@ -1067,7 +1178,7 @@ mod tests {
             events.last(),
             Some(ProgressEvent::Finished {
                 task_id: 12,
-                verify_summary: Some(summary),
+                summary: Some(TaskSummary::Verify(summary)),
             }) if summary.to_string().contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0")
         ));
     }

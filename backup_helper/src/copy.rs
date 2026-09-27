@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
-    fs, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
     thread,
     time::{Duration, SystemTime},
@@ -137,7 +137,7 @@ pub fn copy_tree(
     destination: impl AsRef<Path>,
     policy: CopyPolicy,
     mut on_progress: impl FnMut(CopyProgress),
-) -> Result<(), BackupHelperError> {
+) -> Result<CopyStats, BackupHelperError> {
     let source = source.as_ref();
     let destination = destination.as_ref();
 
@@ -165,6 +165,7 @@ pub fn copy_tree(
     let iter =
         WalkTree::new(source).map_err(|error| copy_io_error("walk source", source, error))?;
     let mut published_directories = BTreeSet::new();
+    let mut stats = CopyStats::default();
     copy_tree_entries(
         source,
         destination,
@@ -172,6 +173,7 @@ pub fn copy_tree(
         policy,
         &mut on_progress,
         &mut published_directories,
+        &mut stats,
     )?;
 
     // A rename is only durable once its directory is flushed. Batched per
@@ -182,7 +184,94 @@ pub fn copy_tree(
             .map_err(|error| copy_io_error("flush destination directory", directory, error))?;
     }
 
-    Ok(())
+    Ok(stats)
+}
+
+const BYTE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+/// A byte count in the largest unit that keeps it readable: exact below 1 KiB,
+/// one decimal above it, because a status line has no room for more.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNIT: f64 = 1024.0;
+
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= UNIT && unit < BYTE_UNITS.len() - 1 {
+        value /= UNIT;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} {}", BYTE_UNITS[unit])
+    } else {
+        format!("{value:.1} {}", BYTE_UNITS[unit])
+    }
+}
+
+/// Running totals of a copy, assembled from what the walk already knows.
+///
+/// Every number here is one the copy had anyway: the byte count `fs::copy`
+/// returns, and the source length the skip test has already compared against the
+/// destination. Counting therefore costs no extra metadata call, and there is no
+/// pre-pass over the source to obtain a total up front.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyStats {
+    pub entries: u64,
+    pub directories: u64,
+    pub ignored: u64,
+    pub copied_files: u64,
+    pub copied_bytes: u64,
+    pub skipped_files: u64,
+    pub skipped_bytes: u64,
+}
+
+impl CopyStats {
+    fn record(&mut self, action: CopyAction, bytes: u64) {
+        self.entries += 1;
+        match action {
+            CopyAction::Copied => {
+                self.copied_files += 1;
+                self.copied_bytes += bytes;
+            }
+            CopyAction::SkippedUnchanged => {
+                self.skipped_files += 1;
+                self.skipped_bytes += bytes;
+            }
+            CopyAction::Directory => self.directories += 1,
+            CopyAction::Ignored => self.ignored += 1,
+        }
+    }
+
+    /// The compact form for an in-place status line. Directories and ignored
+    /// entries are left out: they say nothing about how much of the tree is
+    /// left, and the width is better spent on the rate.
+    pub fn progress_line(&self) -> String {
+        format!(
+            "{} copied ({}) | {} skipped",
+            self.copied_files,
+            format_bytes(self.copied_bytes),
+            self.skipped_files
+        )
+    }
+
+    pub fn totals(&self) -> String {
+        format!(
+            "{} entries | {} copied ({}) | {} skipped ({}) | {} directories | {} ignored",
+            self.entries,
+            self.copied_files,
+            format_bytes(self.copied_bytes),
+            self.skipped_files,
+            format_bytes(self.skipped_bytes),
+            self.directories,
+            self.ignored,
+        )
+    }
+}
+
+impl fmt::Display for CopyStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Totals: {}", self.totals())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,10 +282,21 @@ pub enum CopyAction {
     Ignored,
 }
 
+/// One walked entry together with the totals as they stand after it, so a
+/// consumer never has to accumulate events it might not receive in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyProgress {
     pub relative_path: PathBuf,
     pub action: CopyAction,
+    pub stats: CopyStats,
+}
+
+/// What a single file cost. The byte count is the one `fs::copy` returned, or
+/// the source length the skip test already matched against the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileOutcome {
+    action: CopyAction,
+    bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -537,7 +637,7 @@ fn copy_file(
     source_is_file: bool,
     operation: &str,
     policy: CopyPolicy,
-) -> Result<CopyAction, BackupHelperError> {
+) -> Result<FileOutcome, BackupHelperError> {
     if source_is_file && policy == CopyPolicy::SkipUnchanged {
         let destination_metadata = match retry_io(|| fs::symlink_metadata(destination)) {
             Ok(metadata) => Some(metadata),
@@ -558,7 +658,10 @@ fn copy_file(
         if let Some(destination_metadata) = destination_metadata
             && metadata_matches(source_metadata, source_len, &destination_metadata)
         {
-            return Ok(CopyAction::SkippedUnchanged);
+            return Ok(FileOutcome {
+                action: CopyAction::SkippedUnchanged,
+                bytes: source_len,
+            });
         }
     }
 
@@ -615,7 +718,10 @@ fn copy_file(
     restore_read_only_result
         .map_err(|error| copy_io_error("restore destination permissions", destination, error))?;
 
-    Ok(CopyAction::Copied)
+    Ok(FileOutcome {
+        action: CopyAction::Copied,
+        bytes: copied,
+    })
 }
 
 fn copy_tree_entries(
@@ -625,6 +731,7 @@ fn copy_tree_entries(
     policy: CopyPolicy,
     on_progress: &mut impl FnMut(CopyProgress),
     published_directories: &mut BTreeSet<PathBuf>,
+    stats: &mut CopyStats,
 ) -> Result<(), BackupHelperError> {
     for entry in iter.by_ref() {
         let source_path = entry.entry.path();
@@ -636,14 +743,17 @@ fn copy_tree_entries(
         let destination_path = destination.join(relative);
         reject_destination_symlink_components(destination, &destination_path)?;
 
-        let action = if meta.is_dir() {
+        let FileOutcome { action, bytes } = if meta.is_dir() {
             retry_io(|| fs::create_dir_all(&destination_path)).map_err(|error| {
                 copy_io_error("create destination directory", &destination_path, error)
             })?;
             // The walker yields every directory exactly once, so each one is swept
             // exactly once and never while it holds a file of our own.
             sweep_stale_temps(&destination_path);
-            CopyAction::Directory
+            FileOutcome {
+                action: CopyAction::Directory,
+                bytes: 0,
+            }
         } else if meta.file_type().is_symlink() {
             let target_meta = retry_io(|| fs::metadata(&source_path)).map_err(|error| {
                 copy_io_error("read symlink target metadata", &source_path, error)
@@ -663,7 +773,10 @@ fn copy_tree_entries(
                     policy,
                 )?
             } else {
-                CopyAction::Ignored
+                FileOutcome {
+                    action: CopyAction::Ignored,
+                    bytes: 0,
+                }
             }
         } else {
             let metadata = preserved_metadata(&meta)
@@ -679,6 +792,8 @@ fn copy_tree_entries(
             )?
         };
 
+        stats.record(action, bytes);
+
         if action == CopyAction::Copied
             && let Some(directory) = destination_path.parent()
         {
@@ -688,6 +803,7 @@ fn copy_tree_entries(
         on_progress(CopyProgress {
             relative_path: relative.to_path_buf(),
             action,
+            stats: *stats,
         });
     }
 
@@ -1288,6 +1404,88 @@ mod tests {
     }
 
     #[test]
+    fn copy_tree_counts_what_it_copied_and_what_it_left_alone() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("copied.txt"), "12345").unwrap();
+        fs::write(source.join("nested/copied.txt"), "123").unwrap();
+        fs::write(source.join("unchanged.txt"), "1234567").unwrap();
+        fs::write(destination.join("unchanged.txt"), "1234567").unwrap();
+
+        let mtime = FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        filetime::set_file_mtime(source.join("unchanged.txt"), mtime).unwrap();
+        filetime::set_file_mtime(destination.join("unchanged.txt"), mtime).unwrap();
+
+        let stats = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        assert_eq!(stats.copied_files, 2);
+        assert_eq!(stats.copied_bytes, 8);
+        assert_eq!(stats.skipped_files, 1);
+        assert_eq!(stats.skipped_bytes, 7);
+        assert_eq!(stats.directories, 1);
+        assert_eq!(stats.ignored, 0);
+        assert_eq!(stats.entries, 4);
+    }
+
+    #[test]
+    fn copy_tree_reports_the_running_totals_with_every_entry() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("a.txt"), "12").unwrap();
+        fs::write(source.join("b.txt"), "345").unwrap();
+
+        let mut progress = Vec::new();
+        let stats = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |entry| {
+            progress.push(entry)
+        })
+        .unwrap();
+
+        // Each event carries the totals as they stand, so a consumer never has to
+        // accumulate them and cannot fall a step behind.
+        assert!(
+            progress
+                .windows(2)
+                .all(|pair| pair[0].stats.entries < pair[1].stats.entries)
+        );
+        assert_eq!(progress.last().unwrap().stats, stats);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_counts_a_skipped_symlink_to_a_directory_as_ignored() {
+        let root = testdir!();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("directory")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        std::os::unix::fs::symlink(source.join("directory"), source.join("link")).unwrap();
+
+        let stats = copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
+
+        assert_eq!(stats.ignored, 1);
+        assert_eq!(stats.copied_files, 0);
+        assert_eq!(stats.directories, 1);
+    }
+
+    #[test]
+    fn byte_counts_are_rendered_in_the_largest_readable_unit() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+        assert_eq!(format_bytes(2 * 1024u64.pow(4)), "2.0 TiB");
+        // Past the largest unit the count keeps growing rather than wrapping.
+        assert_eq!(format_bytes(1024 * 1024u64.pow(4)), "1024.0 TiB");
+    }
+
+    #[test]
     fn copy_tree_skips_file_when_size_and_mtime_match() {
         let root = testdir!();
         let source = root.join("source");
@@ -1795,6 +1993,7 @@ mod tests {
             CopyPolicy::SkipUnchanged,
             &mut |_| {},
             &mut BTreeSet::new(),
+            &mut CopyStats::default(),
         );
 
         assert!(matches!(

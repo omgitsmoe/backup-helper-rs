@@ -87,6 +87,7 @@ Successful (3):
   [OK] 0: hash /mnt/main/photos
          Full log: "mnt_main_photos_SourceHash_2026-09-26T22-03-44.log"
   [OK] 1: copy /mnt/main/photos -> /mnt/backup/photos
+         Totals: 1318 entries | 892 copied (1.2 TiB) | 412 skipped (38 GiB) | 14 directories | 0 ignored
   [OK] 2: verify /mnt/backup/photos
          Full log: "mnt_backup_photos_TargetVerify_2026-09-26T22-03-45.log"
 
@@ -400,6 +401,8 @@ anything: a file that exists at the target but not at the source stays.
   those) are retried three times with 100 ms, 200 ms and 400 ms backoff.
 - **Rejected up front**: a destination inside the source tree (or the other way
   round), a symlink anywhere in the destination path, and a short write.
+- **Progress**: a copy reports counters rather than a line per file, and reports
+  its totals when it finishes. See [Progress output](#progress-output).
 
 ## Verification
 
@@ -504,29 +507,56 @@ Progress goes to **stderr**; the task summary goes to **stdout**.
 
 On a terminal, the live tasks are drawn as a block per running task - the whole
 block area is cleared and redrawn as events arrive, and the blocks are wrapped to
-the terminal width:
+the terminal width. The block is redrawn at most every 100 ms, since a copy
+reports an event per walked entry:
 
 ```
 0: hash /mnt/main/photos
       [NEW  ] "raw/DSC0002.NEF"
 1: copy /mnt/main/photos
    -> /mnt/backup/photos
-      copied "raw/DSC0001.NEF"
+   892 copied (1.2 TiB) | 412 skipped | 94.2 MiB/s | elapsed 3:41
+   raw/DSC0001.NEF
 ```
+
+A hash and a verification report the file they are working on, one file per
+event. A copy reports **counters** instead, because one line per entry would put
+one line per file on the screen and rewrite all of them 100 times a second. The
+counters come from the byte count `fs::copy` returns and the length the
+skip-if-unchanged test has already compared, so they cost no extra work.
+
+There is no percentage and no remaining time on a copy: the source is not walked
+a second time to count it first. Such a pass would double the metadata calls the
+walk already makes, which costs the most exactly when the copy has the least to
+do - a re-copy where one file changed - and against a source on a network
+filesystem it costs a round trip per entry. The rate is left out of the counters
+row for the first second, where an average over a handful of files says nothing.
 
 When a task finishes, its block is printed once and stays, with `done` or
-`failed: <error>` as the last line, followed by the `VERIFY SUMMARY` for a
-verification task.
-
-Without a terminal there is no block to redraw, so every event prints one flat
-line instead:
+`failed: <error>` as the last line, followed by the totals of the task: the
+`VERIFY SUMMARY` for a verification, and for a copy
 
 ```
-1: copy /mnt/main/photos -> /mnt/backup/photos | copied "raw/DSC0001.NEF"
+Totals: 1318 entries | 892 copied (1.2 TiB) | 412 skipped (38 GiB) | 14 directories | 0 ignored
 ```
 
-Both forms are per file, so redirecting a large run to a file produces a large
-log; the per-file detail is in the task log files anyway.
+A copy writes no log file, so those totals are the whole record of what it did.
+They are also printed in the task summary on stdout, under the `[OK]` line of the
+copy.
+
+Without a terminal there is no block to redraw, so only those totals are written
+to stderr:
+
+```
+Totals: 1318 entries | 892 copied (1.2 TiB) | 412 skipped (38 GiB) | 14 directories | 0 ignored
+
+========== VERIFY SUMMARY ==========
+Total: 1318 | OK: 1318 | ERR: 0 | WARN: 0
+✅ ALL FILES VERIFIED SUCCESSFULLY
+```
+
+The per-file detail of a hash and a verification is in their log files, and a
+copy has none because its progress is the block above.
 
 ## Interrupting a run
 
