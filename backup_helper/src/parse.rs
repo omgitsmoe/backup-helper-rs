@@ -1060,7 +1060,10 @@ mod tests {
             }
         "#;
         let result = parse(input);
-        assert_config_err(result, "Expected `path` or `mounted` as child node of `disk`");
+        assert_config_err(
+            result,
+            "Expected `path` or `mounted` as child node of `disk`",
+        );
     }
 
     #[test]
