@@ -8,8 +8,8 @@ use std::{
 };
 
 use crossterm::{
-    cursor, execute,
-    terminal::{self, ClearType},
+    Command, cursor,
+    terminal::{self, BeginSynchronizedUpdate, ClearType, EndSynchronizedUpdate},
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -111,6 +111,7 @@ pub fn progress_reporter(receiver: mpsc::Receiver<ProgressEvent>) -> io::Result<
     let mut completed_lines = BTreeSet::new();
     let mut rendered_rows = 0;
     let mut last_redraw = None;
+    let mut cursor = Cursor::default();
 
     while let Ok(event) = receiver.recv() {
         // A started task has to appear at once, whatever the throttle says.
@@ -123,7 +124,14 @@ pub fn progress_reporter(receiver: mpsc::Receiver<ProgressEvent>) -> io::Result<
             if completed.is_some() || phase_start || redraw_due(&mut last_redraw) {
                 last_redraw = Some(Instant::now());
                 let width = terminal_width()?;
-                render_interactive(&active_lines, completed, &mut rendered_rows, width)?;
+                render_interactive(
+                    &active_lines,
+                    completed,
+                    &mut rendered_rows,
+                    width,
+                    &mut cursor,
+                    &mut io::stderr(),
+                )?;
             }
         } else if let Some(summary) = totals_of(&event) {
             eprint!("{summary}");
@@ -131,8 +139,10 @@ pub fn progress_reporter(receiver: mpsc::Receiver<ProgressEvent>) -> io::Result<
     }
 
     if interactive && rendered_rows > 0 {
-        let mut stderr = io::stderr();
-        stderr.write_all(b"\n")?;
+        let mut tail = String::new();
+        tail.push('\n');
+        cursor.show(&mut tail);
+        io::stderr().write_all(tail.as_bytes())?;
     }
 
     Ok(())
@@ -410,72 +420,188 @@ fn finish_active_line(
     })
 }
 
-fn render_interactive(
+/// Assembles one redraw in memory and hands it over in a single write.
+///
+/// Erasing the block and drawing it again is what the terminal paints, so every
+/// step in between is a frame the user sees: the block gone, the cursor walking
+/// over the empty rows, the block back. Assembling the whole redraw into one
+/// buffer means the terminal is handed it in one call, and between the
+/// synchronized-update markers it paints the result of that call and nothing
+/// else. Each row is also cleared and refilled before the cursor leaves it, so a
+/// terminal that ignores the markers never shows a blank block either.
+struct Frame {
+    bytes: String,
+    /// The rows the next redraw has to take back, which excludes the rows a
+    /// finished task left behind: those stay on the screen.
+    rows: usize,
+}
+
+impl fmt::Write for Frame {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.bytes.push_str(value);
+        Ok(())
+    }
+}
+
+impl Frame {
+    /// The redraw of the active block, replacing the `rendered` rows the
+    /// previous frame left on the screen.
+    fn new(
+        lines: &BTreeMap<usize, TaskLine>,
+        completed: Option<&CompletedTask>,
+        rendered: usize,
+        width: usize,
+        cursor: &mut Cursor,
+    ) -> io::Result<Frame> {
+        let mut frame = Frame {
+            bytes: String::new(),
+            rows: 0,
+        };
+
+        frame.write(BeginSynchronizedUpdate)?;
+        // In the frame that draws the first block, so that the cursor is not
+        // painted between moving it and moving it back.
+        cursor.hide(&mut frame.bytes);
+
+        if rendered > 0 {
+            frame.up(rendered)?;
+        }
+
+        // A finished task is written once, above the rows that are redrawn, and
+        // is never taken back by a later frame.
+        if let Some(completed) = completed {
+            for row in completed.line.layout(completed.task_id, width) {
+                frame.row(&row)?;
+            }
+            if let Some(summary) = &completed.summary {
+                for line in summary_lines(&summary.to_string()) {
+                    frame.row(line)?;
+                }
+            }
+        }
+
+        for (task_id, line) in lines {
+            for row in line.layout(*task_id, width) {
+                frame.row(&row)?;
+                frame.rows += 1;
+            }
+        }
+
+        // A block that shrank leaves rows of the previous frame below the new
+        // one, which are cleared and stepped back over.
+        if let Some(leftover) = rendered.checked_sub(frame.rows).filter(|rows| *rows > 0) {
+            for _ in 0..leftover {
+                frame.row("")?;
+            }
+            frame.up(leftover)?;
+        }
+
+        frame.write(EndSynchronizedUpdate)?;
+        Ok(frame)
+    }
+
+    /// One row, from the first column and with whatever the previous frame left
+    /// on it gone.
+    fn row(&mut self, text: &str) -> io::Result<()> {
+        self.write(cursor::MoveToColumn(0))?;
+        self.write(terminal::Clear(ClearType::CurrentLine))?;
+        self.bytes.push_str(text);
+        self.bytes.push('\n');
+        Ok(())
+    }
+
+    fn up(&mut self, rows: usize) -> io::Result<()> {
+        let rows = u16::try_from(rows).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "progress display is taller than the terminal cursor range",
+            )
+        })?;
+
+        self.write(cursor::MoveUp(rows))
+    }
+
+    fn write(&mut self, command: impl Command) -> io::Result<()> {
+        // A command written into a buffer in memory cannot fail; the errors a
+        // frame reports are the ones it raises itself.
+        command.write_ansi(self).map_err(|error| {
+            io::Error::other(format!("failed to assemble a progress frame: {error}"))
+        })
+    }
+}
+
+/// The lines of a summary, without the newline its last line ends in: a frame
+/// puts a newline after every row it writes.
+fn summary_lines(summary: &str) -> Vec<&str> {
+    match summary.strip_suffix('\n') {
+        Some(stripped) => stripped.split('\n').collect(),
+        None => summary.split('\n').collect(),
+    }
+}
+
+/// A command as the bytes a terminal reads, for one written on its own rather
+/// than as part of a frame.
+fn command_bytes(command: impl Command) -> String {
+    let mut bytes = String::new();
+    let _ = command.write_ansi(&mut bytes);
+    bytes
+}
+
+/// Whether the terminal cursor is hidden, so that it is shown again on the way
+/// out of the reporter however it is left.
+#[derive(Default)]
+struct Cursor {
+    hidden: bool,
+}
+
+impl Cursor {
+    /// Appends the escape that hides the cursor, once: the cursor is never
+    /// painted inside a block that is being rewritten.
+    fn hide(&mut self, buffer: &mut String) {
+        if self.hidden {
+            return;
+        }
+
+        buffer.push_str(&command_bytes(cursor::Hide));
+        self.hidden = true;
+    }
+
+    /// Appends the escape that shows the cursor again, once.
+    fn show(&mut self, buffer: &mut String) {
+        if !self.hidden {
+            return;
+        }
+
+        buffer.push_str(&command_bytes(cursor::Show));
+        self.hidden = false;
+    }
+}
+
+impl Drop for Cursor {
+    fn drop(&mut self) {
+        if self.hidden {
+            let mut buffer = String::new();
+            self.show(&mut buffer);
+            let _ = io::stderr().write_all(buffer.as_bytes());
+        }
+    }
+}
+
+/// Draws one frame in a single write, and leaves `rendered_rows` holding what the
+/// next frame has to take back.
+fn render_interactive<W: Write>(
     lines: &BTreeMap<usize, TaskLine>,
     completed: Option<CompletedTask>,
     rendered_rows: &mut usize,
     width: usize,
+    cursor: &mut Cursor,
+    writer: &mut W,
 ) -> io::Result<()> {
-    let mut stderr = io::stderr();
-    clear_rendered(&mut stderr, *rendered_rows)?;
+    let frame = Frame::new(lines, completed.as_ref(), *rendered_rows, width, cursor)?;
+    writer.write_all(frame.bytes.as_bytes())?;
+    writer.flush()?;
 
-    if let Some(completed) = completed.as_ref() {
-        write_rows(
-            &mut stderr,
-            &completed.line.layout(completed.task_id, width),
-        )?;
-        if let Some(summary) = &completed.summary {
-            write!(stderr, "{summary}")?;
-        }
-    }
-
-    let mut new_rows = 0;
-    for (task_id, line) in lines {
-        let rows = line.layout(*task_id, width);
-        new_rows += rows.len();
-        write_rows(&mut stderr, &rows)?;
-    }
-
-    stderr.flush()?;
-    *rendered_rows = new_rows;
-    Ok(())
-}
-
-fn clear_rendered(stderr: &mut io::Stderr, rows: usize) -> io::Result<()> {
-    if rows == 0 {
-        return Ok(());
-    }
-
-    let rows_to_move = u16::try_from(rows).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "progress display is taller than the terminal cursor range",
-        )
-    })?;
-    execute!(stderr, cursor::MoveUp(rows_to_move))?;
-
-    for row in 0..rows {
-        execute!(
-            stderr,
-            cursor::MoveToColumn(0),
-            terminal::Clear(ClearType::CurrentLine)
-        )?;
-        if row + 1 < rows {
-            execute!(stderr, cursor::MoveDown(1))?;
-        }
-    }
-
-    if rows > 1 {
-        execute!(stderr, cursor::MoveUp((rows_to_move - 1) as u16))?;
-    }
-
-    Ok(())
-}
-
-fn write_rows<W: Write>(writer: &mut W, rows: &[String]) -> io::Result<()> {
-    for row in rows {
-        writeln!(writer, "{row}")?;
-    }
+    *rendered_rows = frame.rows;
     Ok(())
 }
 
@@ -953,6 +1079,202 @@ mod tests {
         assert_eq!(
             summary.to_string(),
             "Totals: 1 files (12.3 GiB read) | 1234 ignored\n"
+        );
+    }
+
+    /// A row from the first column, with whatever the previous frame left on it
+    /// gone.
+    fn erased_row(text: &str) -> String {
+        format!(
+            "{}{}{text}\n",
+            command_bytes(cursor::MoveToColumn(0)),
+            command_bytes(terminal::Clear(ClearType::CurrentLine)),
+        )
+    }
+
+    /// The bytes of a frame that takes back `rendered` rows and writes `rows` in
+    /// their place, after `prefix`.
+    fn frame_bytes(prefix: &str, rendered: usize, rows: &[&str]) -> String {
+        let mut bytes = command_bytes(BeginSynchronizedUpdate);
+        bytes.push_str(prefix);
+        if rendered > 0 {
+            bytes.push_str(&command_bytes(cursor::MoveUp(rendered as u16)));
+        }
+        for row in rows {
+            bytes.push_str(&erased_row(row));
+        }
+        bytes.push_str(&command_bytes(EndSynchronizedUpdate));
+        bytes
+    }
+
+    /// One active task with a counters row and the entry it is walking, which is
+    /// the tallest block a task draws.
+    fn walking_lines() -> BTreeMap<usize, TaskLine> {
+        let mut lines = BTreeMap::new();
+        lines.insert(
+            0,
+            walking_copy(
+                stats(1, 4096, 0),
+                "file.txt",
+                Instant::now() - Duration::from_secs(90),
+            ),
+        );
+        lines
+    }
+
+    /// The same task without counters, which is a shorter block.
+    fn message_lines() -> BTreeMap<usize, TaskLine> {
+        let mut lines = BTreeMap::new();
+        lines.insert(0, copy_line("copied file.txt"));
+        lines
+    }
+
+    const WALKING_ROWS: [&str; 4] = [
+        "0: copy /mnt/src",
+        "   -> /mnt/target",
+        "      1 copied (4.0 KiB) | 0 skipped | 45 B/s | elapsed 1:30",
+        "      file.txt",
+    ];
+
+    const MESSAGE_ROWS: [&str; 3] = [
+        "0: copy /mnt/src",
+        "   -> /mnt/target",
+        "      copied file.txt",
+    ];
+
+    #[test]
+    fn the_first_frame_draws_the_block_and_takes_back_nothing() {
+        let mut cursor = Cursor::default();
+        let lines = walking_lines();
+
+        let frame = Frame::new(&lines, None, 0, 80, &mut cursor).unwrap();
+
+        assert_eq!(frame.rows, WALKING_ROWS.len());
+        assert_eq!(
+            frame.bytes,
+            frame_bytes(&command_bytes(cursor::Hide), 0, &WALKING_ROWS)
+        );
+        assert!(cursor.hidden);
+    }
+
+    #[test]
+    fn a_redraw_takes_back_the_rows_of_the_previous_frame() {
+        let mut cursor = Cursor::default();
+        let lines = walking_lines();
+        let first = Frame::new(&lines, None, 0, 80, &mut cursor).unwrap();
+
+        let second = Frame::new(&lines, None, first.rows, 80, &mut cursor).unwrap();
+
+        assert_eq!(second.rows, first.rows);
+        assert_eq!(second.bytes, frame_bytes("", 4, &WALKING_ROWS));
+        // The cursor is hidden once for the whole run, not once per frame.
+        assert!(!second.bytes.contains(&command_bytes(cursor::Hide)));
+    }
+
+    #[test]
+    fn a_block_that_shrank_clears_the_rows_it_no_longer_uses() {
+        let mut cursor = Cursor::default();
+        let first = Frame::new(&walking_lines(), None, 0, 80, &mut cursor).unwrap();
+
+        let second = Frame::new(&message_lines(), None, first.rows, 80, &mut cursor).unwrap();
+
+        assert_eq!(second.rows, MESSAGE_ROWS.len());
+
+        let mut expected = frame_bytes("", 4, &MESSAGE_ROWS);
+        expected.truncate(expected.len() - command_bytes(EndSynchronizedUpdate).len());
+        expected.push_str(&erased_row(""));
+        expected.push_str(&command_bytes(cursor::MoveUp(1)));
+        expected.push_str(&command_bytes(EndSynchronizedUpdate));
+
+        assert_eq!(second.bytes, expected);
+    }
+
+    #[test]
+    fn a_finished_block_is_written_above_the_rows_that_are_redrawn() {
+        let mut cursor = Cursor::default();
+        let completed = CompletedTask {
+            task_id: 1,
+            line: copy_line("done"),
+            summary: Some(TaskSummary::Copy(stats(2, 2048, 1))),
+        };
+        let finished_rows = [
+            "1: copy /mnt/src",
+            "   -> /mnt/target",
+            "      done",
+            "Totals: 3 entries | 2 copied (2.0 KiB) | 1 skipped (0 B) | 0 directories | 0 ignored",
+        ];
+        let mut expected_rows = finished_rows.to_vec();
+        expected_rows.extend_from_slice(&MESSAGE_ROWS);
+
+        let frame = Frame::new(&message_lines(), Some(&completed), 0, 80, &mut cursor).unwrap();
+
+        // Only the rows of the task that is still running are taken back: the
+        // finished block and its totals stay on the screen.
+        assert_eq!(frame.rows, MESSAGE_ROWS.len());
+        assert_eq!(
+            frame.bytes,
+            frame_bytes(&command_bytes(cursor::Hide), 0, &expected_rows)
+        );
+
+        let next = Frame::new(&message_lines(), None, frame.rows, 80, &mut cursor).unwrap();
+        assert_eq!(next.bytes, frame_bytes("", 3, &MESSAGE_ROWS));
+    }
+
+    /// A writer that counts the calls made to it, to pin that a frame is handed
+    /// over in one piece: a frame written in pieces is a frame the terminal
+    /// paints in pieces.
+    #[derive(Default)]
+    struct WriteCounter {
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for WriteCounter {
+        fn write(&mut self, value: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(value);
+            Ok(value.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_frame_is_handed_to_the_terminal_in_one_write() {
+        let mut cursor = Cursor::default();
+        let mut lines = walking_lines();
+        let mut rendered_rows = 0;
+        let mut writer = WriteCounter::default();
+
+        render_interactive(
+            &lines,
+            None,
+            &mut rendered_rows,
+            80,
+            &mut cursor,
+            &mut writer,
+        )
+        .unwrap();
+        lines.insert(0, copy_line("copied file.txt"));
+        render_interactive(
+            &lines,
+            None,
+            &mut rendered_rows,
+            80,
+            &mut cursor,
+            &mut writer,
+        )
+        .unwrap();
+
+        assert_eq!(writer.writes, 2, "one write per frame, not one per row");
+        assert_eq!(rendered_rows, MESSAGE_ROWS.len());
+        assert_eq!(
+            String::from_utf8_lossy(&writer.bytes)
+                .matches(&command_bytes(BeginSynchronizedUpdate))
+                .count(),
+            2
         );
     }
 

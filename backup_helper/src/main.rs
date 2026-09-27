@@ -1,10 +1,12 @@
 use std::error::Error;
+use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{path, sync::Arc};
 
 use checksum_helper::pathmatcher::PathMatcherError;
 use checksum_helper::{ChecksumHelperError, collection::HashCollectionError};
 use clap::{Args, Parser, Subcommand};
+use crossterm::{cursor, execute};
 
 use crate::{
     backup_helper::BackupHelper,
@@ -205,6 +207,9 @@ fn start(args: StartArgs) -> std::result::Result<(), BackupHelperError> {
 
         if count >= EXIT_AFTER_COUNT_CANCEL_REQUESTS {
             eprintln!("Forced exit; persisting state...");
+            // The progress reporter hides the cursor, and this branch leaves
+            // without unwinding its stack, so show it again here.
+            let _ = execute!(io::stderr(), cursor::Show);
             // guard so only one handler thread writes, even on a burst of Ctrl-C
             if !persist_done.swap(true, Ordering::AcqRel)
                 && let Some(scheduler) = signal_scheduler.upgrade()
