@@ -15,6 +15,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     copy::{CopyStats, format_bytes},
+    scan_stats::{ScanPhase, ScanStats},
     task_log::VerifySummary,
 };
 
@@ -35,6 +36,7 @@ const RATE_AFTER: Duration = Duration::from_secs(1);
 pub(crate) enum TaskSummary {
     Verify(VerifySummary),
     Copy(CopyStats),
+    Hash(ScanStats),
 }
 
 impl fmt::Display for TaskSummary {
@@ -42,6 +44,7 @@ impl fmt::Display for TaskSummary {
         match self {
             TaskSummary::Verify(summary) => write!(f, "{summary}"),
             TaskSummary::Copy(stats) => write!(f, "{stats}"),
+            TaskSummary::Hash(stats) => write!(f, "{stats}"),
         }
     }
 }
@@ -80,6 +83,13 @@ pub enum ProgressEvent {
         task_id: usize,
         stats: CopyStats,
         current: PathBuf,
+    },
+    /// The totals of a hash or a verification as they stand. Typed for the same
+    /// reason, and emitted once per 64 KiB read, which on a whole-disk hash is
+    /// six figures.
+    Counting {
+        task_id: usize,
+        stats: ScanStats,
     },
     Finished {
         task_id: usize,
@@ -151,33 +161,75 @@ fn redraw_due(last_redraw: &mut Option<Instant>) -> bool {
 struct TaskLine {
     display: TaskDisplay,
     message: String,
-    /// Present while a copy walks its source. The counters and the entry being
-    /// worked on take the place of the message, which for a copy would repeat
-    /// the same path.
-    copy: Option<CopyLine>,
+    /// Present while a task reports counters instead of a message per event. A
+    /// copy shows the entry being worked on in place of the message, which for a
+    /// copy would repeat the same path; a hash and a verification keep the
+    /// message, which carries the per-file status.
+    counters: Option<CountersLine>,
 }
 
+/// The live counters of a running task, with the time the current phase started
+/// so the rate is measured over that phase.
 #[derive(Debug)]
-struct CopyLine {
-    stats: CopyStats,
-    /// The entry being worked on, which for a copy replaces the message: it
-    /// would otherwise repeat the same path on a row of its own.
-    current: PathBuf,
-    /// When the first entry was reported, so the rate is measured over the copy
-    /// rather than over the whole session.
+struct CountersLine {
+    counters: TaskCounters,
     started: Instant,
 }
 
-impl CopyLine {
-    /// Counters, throughput and elapsed time. There is no total to divide by:
+/// What a task is counting, which decides the counter line and the row below it.
+#[derive(Debug, PartialEq, Eq)]
+enum TaskCounters {
+    Copy {
+        stats: CopyStats,
+        /// The entry being worked on, which for a copy replaces the message: it
+        /// would otherwise repeat the same path on a row of its own.
+        current: PathBuf,
+    },
+    Scan(ScanStats),
+}
+
+impl TaskCounters {
+    fn bytes_done(&self) -> u64 {
+        match self {
+            TaskCounters::Copy { stats, .. } => stats.copied_bytes,
+            TaskCounters::Scan(stats) => stats.bytes_done(),
+        }
+    }
+
+    fn progress_line(&self) -> String {
+        match self {
+            TaskCounters::Copy { stats, .. } => stats.progress_line(),
+            TaskCounters::Scan(stats) => stats.progress_line(),
+        }
+    }
+
+    /// The phase the counters are in, whose change restarts the rate. A copy
+    /// counts one thing for its whole run and has no phase to change.
+    fn phase(&self) -> Option<ScanPhase> {
+        match self {
+            TaskCounters::Copy { .. } => None,
+            TaskCounters::Scan(stats) => Some(stats.phase),
+        }
+    }
+}
+
+impl CountersLine {
+    fn new(counters: TaskCounters) -> Self {
+        CountersLine {
+            counters,
+            started: Instant::now(),
+        }
+    }
+
+    /// Counters, throughput and elapsed time. A copy has no total to divide by:
     /// the source is not walked twice to obtain one, so no percentage and no
     /// remaining time is shown.
     fn counters_line(&self) -> String {
         let elapsed = self.started.elapsed();
-        let mut line = self.stats.progress_line();
+        let mut line = self.counters.progress_line();
 
-        if elapsed >= RATE_AFTER {
-            let rate = self.stats.copied_bytes as f64 / elapsed.as_secs_f64();
+        if elapsed >= RATE_AFTER && self.counters.bytes_done() > 0 {
+            let rate = self.counters.bytes_done() as f64 / elapsed.as_secs_f64();
             line.push_str(&format!(" | {}/s", format_bytes(rate as u64)));
         }
         line.push_str(&format!(" | elapsed {}", format_elapsed(elapsed)));
@@ -200,7 +252,7 @@ impl TaskLine {
     /// outcome takes their place and the totals are reported once, below.
     fn close(&mut self, message: String) {
         self.message = message;
-        self.copy = None;
+        self.counters = None;
     }
 
     fn layout(&self, task_id: usize, width: usize) -> Vec<String> {
@@ -228,18 +280,23 @@ impl TaskLine {
             rows.extend(wrap_display_line(&target_row, width, "      "));
         }
 
-        match &self.copy {
-            Some(copy) => {
-                let counters_row = format!("      {}", copy.counters_line());
-                rows.extend(wrap_display_line(&counters_row, width, "      "));
-                let current_row = format!("      {}", copy.current.display());
-                rows.extend(wrap_display_line(&current_row, width, "      "));
-            }
-            None => {
-                let message_row = format!("      {}", self.message);
-                rows.extend(wrap_display_line(&message_row, width, "      "));
-            }
+        if let Some(counters) = &self.counters {
+            let counters_row = format!("      {}", counters.counters_line());
+            rows.extend(wrap_display_line(&counters_row, width, "      "));
         }
+
+        // A copy replaces the message with the entry it is walking, so that the
+        // counters row is not followed by the same path on a row of its own.
+        let detail = match &self.counters {
+            Some(counters) => match &counters.counters {
+                TaskCounters::Copy { current, .. } => current.display().to_string(),
+                TaskCounters::Scan(_) => self.message.clone(),
+            },
+            None => self.message.clone(),
+        };
+        let detail_row = format!("      {detail}");
+        rows.extend(wrap_display_line(&detail_row, width, "      "));
+
         rows
     }
 }
@@ -264,7 +321,7 @@ fn update_active_lines(
                     TaskLine {
                         display,
                         message: "starting".into(),
-                        copy: None,
+                        counters: None,
                     },
                 );
             }
@@ -286,13 +343,32 @@ fn update_active_lines(
             if !completed.contains(&task_id)
                 && let Some(line) = lines.get_mut(&task_id)
             {
-                let copy = line.copy.get_or_insert_with(|| CopyLine {
-                    stats: CopyStats::default(),
-                    current: PathBuf::new(),
-                    started: Instant::now(),
-                });
-                copy.stats = stats;
-                copy.current = current;
+                line.counters
+                    .get_or_insert_with(|| {
+                        CountersLine::new(TaskCounters::Copy {
+                            stats: CopyStats::default(),
+                            current: PathBuf::new(),
+                        })
+                    })
+                    .counters = TaskCounters::Copy { stats, current };
+            }
+            None
+        }
+        ProgressEvent::Counting { task_id, stats } => {
+            if !completed.contains(&task_id)
+                && let Some(line) = lines.get_mut(&task_id)
+            {
+                let counters = line
+                    .counters
+                    .get_or_insert_with(|| CountersLine::new(TaskCounters::Scan(stats)));
+
+                // A hash walks its source before it reads any of it, and a rate
+                // averaged over both says nothing about either.
+                if counters.counters.phase() != Some(stats.phase) {
+                    counters.started = Instant::now();
+                }
+
+                counters.counters = TaskCounters::Scan(stats);
             }
             None
         }
@@ -474,6 +550,12 @@ fn character_width(character: char) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use checksum_helper::{
+        checksum_helper::IncrementalProgress, collection::HashProgress, collection::VerifyProgress,
+        collection::VerifyProgressCommon,
+    };
+    use pretty_assertions::assert_eq;
+
     use super::*;
     use std::path::Path;
 
@@ -481,7 +563,7 @@ mod tests {
         TaskLine {
             display: TaskDisplay::new("copy", Some("/mnt/src".into()), Some("/mnt/target".into())),
             message: message.into(),
-            copy: None,
+            counters: None,
         }
     }
 
@@ -500,12 +582,77 @@ mod tests {
         TaskLine {
             display: TaskDisplay::new("copy", Some("/mnt/src".into()), Some("/mnt/target".into())),
             message: String::new(),
-            copy: Some(CopyLine {
-                stats,
-                current: PathBuf::from(current),
+            counters: Some(CountersLine {
+                counters: TaskCounters::Copy {
+                    stats,
+                    current: PathBuf::from(current),
+                },
                 started,
             }),
         }
+    }
+
+    /// A hash or a verification line part way through: the counters of the scan
+    /// plus the per-file status the counters do not carry.
+    fn walking_scan(
+        operation: &str,
+        source: Option<&str>,
+        target: Option<&str>,
+        stats: ScanStats,
+        message: &str,
+        started: Instant,
+    ) -> TaskLine {
+        TaskLine {
+            display: TaskDisplay::new(
+                operation,
+                source.map(str::to_owned),
+                target.map(str::to_owned),
+            ),
+            message: message.into(),
+            counters: Some(CountersLine {
+                counters: TaskCounters::Scan(stats),
+                started,
+            }),
+        }
+    }
+
+    /// A verification that has 1234 of 50000 files done and is 300 MiB into the
+    /// next one, which leaves 12.3 of 98.7 GiB read.
+    fn verifying_stats() -> ScanStats {
+        let mut stats = ScanStats::default();
+        let common = VerifyProgressCommon {
+            tree_root: Path::new("/mnt/backup"),
+            relative_path: Path::new("raw/IMG_0042.CR3"),
+            file_number_processed: 1234,
+            file_number_total: 50000,
+            size_processed_bytes: 12 * 1024 * 1024 * 1024,
+            size_total_bytes: 98 * 1024 * 1024 * 1024 + 700 * 1024 * 1024,
+        };
+
+        stats.record_verify(&VerifyProgress::Pre(common));
+        stats.record_verify(&VerifyProgress::During(HashProgress {
+            bytes_read: 300 * 1024 * 1024,
+            bytes_total: 4 * 1024 * 1024 * 1024,
+        }));
+
+        stats
+    }
+
+    /// A hash that has read 12.3 GiB of a 50000 file tree, 300 MiB into the file
+    /// it is working on.
+    fn hashing_stats() -> ScanStats {
+        let mut stats = ScanStats::default();
+
+        stats.record_incremental(&IncrementalProgress::DiscoverFilesDone(50000, 1234));
+        stats.record_incremental(&IncrementalProgress::PreRead(PathBuf::from(
+            "raw/IMG_0042.CR3",
+        )));
+        stats.record_incremental(&IncrementalProgress::Read(
+            12 * 1024 * 1024 * 1024 + 300 * 1024 * 1024,
+            4 * 1024 * 1024 * 1024,
+        ));
+
+        stats
     }
 
     #[test]
@@ -591,7 +738,7 @@ mod tests {
         let line = TaskLine {
             display: TaskDisplay::new("copy", Some("源".into()), Some("目标".into())),
             message: "文件".into(),
-            copy: None,
+            counters: None,
         };
 
         let rows = line.layout(0, 8);
@@ -620,9 +767,17 @@ mod tests {
             },
         );
 
-        let copy = lines[&1].copy.as_ref().expect("a copy reports counters");
-        assert_eq!(copy.stats, stats(1, 100, 0));
-        assert_eq!(copy.current, Path::new("file.txt"));
+        let counters = lines[&1]
+            .counters
+            .as_ref()
+            .expect("a copy reports counters");
+        assert_eq!(
+            counters.counters,
+            TaskCounters::Copy {
+                stats: stats(1, 100, 0),
+                current: PathBuf::from("file.txt"),
+            }
+        );
     }
 
     #[test]
@@ -646,8 +801,159 @@ mod tests {
             },
         );
 
-        assert!(lines[&1].copy.is_none());
+        assert!(lines[&1].counters.is_none());
         assert_eq!(lines[&1].layout(1, 80)[1], "      [NEW  ] \"file.txt\"");
+    }
+
+    #[test]
+    fn a_hashing_task_shows_its_counters_above_the_file_it_is_working_on() {
+        let line = walking_scan(
+            "hash",
+            Some("/mnt/src"),
+            None,
+            hashing_stats(),
+            "[NEW  ] \"photos/raw/IMG_0042.CR3\"",
+            Instant::now() - Duration::from_secs(90),
+        );
+
+        let rows = line.layout(0, 80);
+
+        assert_eq!(rows[0], "0: hash /mnt/src");
+        assert_eq!(
+            rows[1],
+            "      files 1/50000 | 12.3 GiB | 139.9 MiB/s | elapsed 1:30"
+        );
+        assert_eq!(rows[2], "      [NEW  ] \"photos/raw/IMG_0042.CR3\"");
+    }
+
+    #[test]
+    fn a_verification_shows_a_percentage_for_files_and_for_bytes() {
+        let line = walking_scan(
+            "verify",
+            None,
+            Some("/mnt/target"),
+            verifying_stats(),
+            "[OK        ] \"photos/raw/IMG_0042.CR3\"",
+            Instant::now() - Duration::from_secs(90),
+        );
+
+        let rows = line.layout(2, 200);
+
+        assert_eq!(rows[0], "2: verify /mnt/target");
+        assert_eq!(
+            rows[1],
+            "      files 1234/50000 (2.5%) | bytes 12.3 GiB/98.7 GiB (12.5%) | 139.9 MiB/s | elapsed 1:30"
+        );
+        assert_eq!(rows[2], "      [OK        ] \"photos/raw/IMG_0042.CR3\"");
+    }
+
+    #[test]
+    fn a_discovery_walk_reports_the_files_it_found_and_no_rate() {
+        let mut stats = ScanStats::default();
+        stats.record_incremental(&IncrementalProgress::DiscoverFilesFound(1234));
+
+        let line = walking_scan(
+            "hash",
+            Some("/mnt/src"),
+            None,
+            stats,
+            "starting",
+            Instant::now() - Duration::from_secs(90),
+        );
+
+        let rows = line.layout(0, 80);
+
+        assert_eq!(rows[1], "      discovered 1234 | elapsed 1:30");
+    }
+
+    #[test]
+    fn the_rate_is_left_out_until_a_scan_has_read_something() {
+        let mut stats = ScanStats::default();
+        stats.record_incremental(&IncrementalProgress::DiscoverFilesDone(2, 0));
+        stats.record_incremental(&IncrementalProgress::PreRead(PathBuf::from("file.txt")));
+
+        let line = walking_scan(
+            "hash",
+            Some("/mnt/src"),
+            None,
+            stats,
+            "[SKIP ] \"file.txt\"",
+            Instant::now() - Duration::from_secs(90),
+        );
+
+        let rows = line.layout(0, 80);
+
+        assert_eq!(rows[1], "      files 1/2 | 0 B | elapsed 1:30");
+    }
+
+    #[test]
+    fn a_phase_change_restarts_the_rate_so_a_walk_does_not_lower_it() {
+        let mut lines = BTreeMap::new();
+        let mut completed = BTreeSet::new();
+        update_active_lines(
+            &mut lines,
+            &mut completed,
+            ProgressEvent::Started {
+                task_id: 0,
+                display: TaskDisplay::new("hash", Some("/mnt/src".into()), None),
+            },
+        );
+
+        let mut discovered = ScanStats::default();
+        discovered.record_incremental(&IncrementalProgress::DiscoverFilesFound(50000));
+        update_active_lines(
+            &mut lines,
+            &mut completed,
+            ProgressEvent::Counting {
+                task_id: 0,
+                stats: discovered,
+            },
+        );
+        let after_discovery = lines[&0].counters.as_ref().unwrap().started;
+
+        std::thread::sleep(Duration::from_millis(10));
+        update_active_lines(
+            &mut lines,
+            &mut completed,
+            ProgressEvent::Counting {
+                task_id: 0,
+                stats: hashing_stats(),
+            },
+        );
+        let counters = lines[&0].counters.as_ref().unwrap();
+
+        assert!(
+            counters.started > after_discovery,
+            "the rate keeps its own start"
+        );
+        assert_ne!(counters.counters.phase(), Some(ScanPhase::Discover));
+    }
+
+    #[test]
+    fn a_finished_scan_leaves_the_counters_to_its_totals() {
+        let mut line = walking_scan(
+            "hash",
+            Some("/mnt/src"),
+            None,
+            hashing_stats(),
+            "[NEW  ] \"file.txt\"",
+            Instant::now() - Duration::from_secs(90),
+        );
+        line.close("done".into());
+
+        let rows = line.layout(0, 80);
+
+        assert_eq!(rows, ["0: hash /mnt/src", "      done"]);
+    }
+
+    #[test]
+    fn the_hash_summary_reports_its_totals() {
+        let summary = TaskSummary::Hash(hashing_stats());
+
+        assert_eq!(
+            summary.to_string(),
+            "Totals: 1 files (12.3 GiB read) | 1234 ignored\n"
+        );
     }
 
     #[test]

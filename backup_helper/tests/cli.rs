@@ -239,6 +239,12 @@ fn start_prints_task_verify_summaries_and_log_locations() {
     assert!(stderr.contains("========== VERIFY SUMMARY =========="));
     assert!(stderr.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"));
     assert!(stderr.contains("Totals: 2 entries | 2 copied ("));
+    // A hash reports what it read as well, so that a run without a terminal
+    // says something about the task that took the longest.
+    assert!(
+        stderr.contains("Totals: 1 files (7 B read) | 0 ignored"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -268,6 +274,12 @@ fn piped_output_holds_the_totals_and_not_a_line_per_file() {
     );
     assert!(!stderr.contains("a.txt"), "{stderr}");
     assert!(!stderr.contains("[NEW  ]"), "{stderr}");
+    // The hash counts the four files it found and the bytes it read, and none of
+    // them is reported one by one.
+    assert!(
+        stderr.contains("Totals: 4 files (28 B read) | 0 ignored"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("Totals: 6 entries | 5 copied ("),
         "{stderr}"

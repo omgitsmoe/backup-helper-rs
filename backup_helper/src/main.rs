@@ -18,6 +18,7 @@ mod disks;
 mod parse;
 mod progress;
 mod reconcile;
+mod scan_stats;
 mod scheduler;
 mod source;
 mod target;

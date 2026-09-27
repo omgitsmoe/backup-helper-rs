@@ -10,6 +10,7 @@ use crate::{
     backup_helper::DiskHandle,
     copy,
     progress::{self, ProgressEvent, TaskSummary},
+    scan_stats::ScanStats,
     source::ChecksumOptions,
     target::VerifiedInfo,
     task_log::{TaskLog, TaskLogType, VerifySummary},
@@ -98,6 +99,7 @@ impl Task {
                 Some(TaskSummary::Verify(summary.clone()))
             }
             Ok(TaskOutcome::SourceToTargetCopy { stats }) => Some(TaskSummary::Copy(*stats)),
+            Ok(TaskOutcome::SourceHash { stats, .. }) => Some(TaskSummary::Hash(*stats)),
             _ => None,
         };
 
@@ -174,7 +176,18 @@ impl TaskExecutor for SourceHash {
             ctx.log_directory.as_deref(),
         )?;
         let mut log_error = None;
+        let mut stats = ScanStats::default();
         let collection = ch.incremental(|progress| {
+            if stats.record_incremental(&progress) {
+                progress::report(
+                    progress_tx,
+                    ProgressEvent::Counting {
+                        task_id: ctx.task_id,
+                        stats,
+                    },
+                );
+            }
+
             if let Some(message) = incremental_progress_message(&progress) {
                 progress::report(
                     progress_tx,
@@ -204,6 +217,7 @@ impl TaskExecutor for SourceHash {
         Ok(TaskOutcome::SourceHash {
             hash_file: collection.full_path()?,
             hash_log_file: log.path().to_path_buf(),
+            stats,
         })
     }
 }
@@ -322,6 +336,7 @@ impl TaskExecutor for TargetVerify {
             ctx.log_directory.as_deref(),
         )?;
         let mut log_error = None;
+        let mut stats = ScanStats::default();
         let mut verified = VerifiedInfo {
             checked: 0,
             errors: 0,
@@ -332,42 +347,57 @@ impl TaskExecutor for TargetVerify {
         ch.verify(
             &collection,
             |_| true,
-            |p| match p {
-                collection::VerifyProgress::Pre(_verify_progress_common) => {}
-                collection::VerifyProgress::During(_hash_progress) => {}
-                collection::VerifyProgress::Post(verify_progress_post) => {
-                    verified.checked += 1;
-                    let path = verify_progress_post
-                        .progress
-                        .tree_root
-                        .join(verify_progress_post.progress.relative_path);
-
+            |p| {
+                if stats.record_verify(&p) {
                     progress::report(
                         progress_tx,
-                        ProgressEvent::Updated {
+                        ProgressEvent::Counting {
                             task_id: ctx.task_id,
-                            message: verify_progress_message(&path, verify_progress_post.result),
+                            stats,
                         },
                     );
+                }
 
-                    if log_error.is_none()
-                        && let Err(error) = log.report_verify(&path, verify_progress_post.result)
-                    {
-                        log_error = Some(error);
-                    }
+                match p {
+                    collection::VerifyProgress::Pre(_) | collection::VerifyProgress::During(_) => {}
+                    collection::VerifyProgress::Post(verify_progress_post) => {
+                        verified.checked += 1;
+                        let path = verify_progress_post
+                            .progress
+                            .tree_root
+                            .join(verify_progress_post.progress.relative_path);
 
-                    match verify_progress_post.result {
-                        VerifyResult::Ok => {}
-                        VerifyResult::FileMissing(_error_kind) => {
-                            verified.errors += 1;
-                            verified.missing += 1;
+                        progress::report(
+                            progress_tx,
+                            ProgressEvent::Updated {
+                                task_id: ctx.task_id,
+                                message: verify_progress_message(
+                                    &path,
+                                    verify_progress_post.result,
+                                ),
+                            },
+                        );
+
+                        if log_error.is_none()
+                            && let Err(error) =
+                                log.report_verify(&path, verify_progress_post.result)
+                        {
+                            log_error = Some(error);
                         }
-                        VerifyResult::Mismatch
-                        | VerifyResult::MismatchSize
-                        | VerifyResult::MismatchCorrupted
-                        | VerifyResult::MismatchOutdatedHash => {
-                            verified.errors += 1;
-                            verified.crc_errors += 1;
+
+                        match verify_progress_post.result {
+                            VerifyResult::Ok => {}
+                            VerifyResult::FileMissing(_error_kind) => {
+                                verified.errors += 1;
+                                verified.missing += 1;
+                            }
+                            VerifyResult::Mismatch
+                            | VerifyResult::MismatchSize
+                            | VerifyResult::MismatchCorrupted
+                            | VerifyResult::MismatchOutdatedHash => {
+                                verified.errors += 1;
+                                verified.crc_errors += 1;
+                            }
                         }
                     }
                 }
@@ -434,6 +464,8 @@ pub(crate) enum TaskOutcome {
     SourceHash {
         hash_file: path::PathBuf,
         hash_log_file: path::PathBuf,
+        /// What the hash read, for the totals it reports when it finishes.
+        stats: ScanStats,
     },
     SourceToTargetCopy {
         stats: copy::CopyStats,
@@ -497,6 +529,7 @@ mod tests {
         let TaskOutcome::SourceHash {
             hash_file,
             hash_log_file,
+            ..
         } = outcome
         else {
             panic!("SourceHash task returned the wrong outcome");
@@ -635,6 +668,7 @@ mod tests {
         let TaskOutcome::SourceHash {
             hash_file,
             hash_log_file,
+            ..
         } = outcome
         else {
             panic!("SourceHash task returned the wrong outcome");
@@ -695,9 +729,20 @@ mod tests {
             ProgressEvent::Updated { task_id: 10, message }
                 if message.contains("[NEW  ]") && message.contains("file.txt")
         )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ProgressEvent::Counting { task_id: 10, stats }
+                    if stats.files_total == Some(1) && stats.bytes_done() == 7
+            )),
+            "a hash reports the files it has to hash and the bytes it has read: {events:?}"
+        );
         assert!(matches!(
             events.last(),
-            Some(ProgressEvent::Finished { task_id: 10, .. })
+            Some(ProgressEvent::Finished {
+                task_id: 10,
+                summary: Some(TaskSummary::Hash(stats)),
+            }) if stats.files_done == 1 && stats.ignored == 0
         ));
     }
 
@@ -1174,6 +1219,14 @@ mod tests {
             ProgressEvent::Updated { task_id: 12, message }
                 if message.contains("[OK        ]") && message.contains("file.txt")
         )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ProgressEvent::Counting { task_id: 12, stats }
+                    if stats.files_total == Some(1) && stats.bytes_done() == 7
+            )),
+            "a verification reports the size of the collection and the bytes it has read: {events:?}"
+        );
         assert!(matches!(
             events.last(),
             Some(ProgressEvent::Finished {

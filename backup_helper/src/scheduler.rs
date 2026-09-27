@@ -391,6 +391,7 @@ impl SchedulerCore {
             TaskOutcome::SourceHash {
                 hash_file,
                 hash_log_file,
+                ..
             } => {
                 let Task::SourceHash(task) = task else {
                     unreachable!("outcome doesn't match task");
@@ -399,6 +400,8 @@ impl SchedulerCore {
                 let source = self.state.source_mut(task.source_idx);
                 source.set_hash_file(hash_file);
                 source.set_hash_log_file(hash_log_file.clone());
+                // The hash writes a log file, which the summary points at, so
+                // its totals go to the progress report and not to stdout.
                 (Some(hash_log_file), None)
             }
             TaskOutcome::SourceToTargetCopy { stats } => {
@@ -708,7 +711,10 @@ pub fn run(scheduler: &Scheduler) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{copy::CopyStats, parse, target::VerifiedInfo, task_log::VerifySummary};
+    use crate::{
+        copy::CopyStats, parse, scan_stats::ScanStats, target::VerifiedInfo,
+        task_log::VerifySummary,
+    };
     use serde_json::Value;
     use std::path::Path;
     use testdir::testdir;
@@ -855,6 +861,7 @@ mod tests {
         TaskOutcome::SourceHash {
             hash_file: root.join("source.sha512"),
             hash_log_file: root.join("source.log"),
+            stats: ScanStats::default(),
         }
     }
 
@@ -1269,6 +1276,7 @@ mod tests {
             Ok(TaskOutcome::SourceHash {
                 hash_file: root.join("source-c.sha512"),
                 hash_log_file: root.join("source-c.log"),
+                stats: ScanStats::default(),
             }),
         );
 
