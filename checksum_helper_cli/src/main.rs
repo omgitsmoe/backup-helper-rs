@@ -224,6 +224,16 @@ enum VerifyCommand {
         verify_matcher: VerifyMatcherArgs,
     },
 
+    /// Verify the checksum file with the most recent modification time
+    Latest {
+        /// Root directory, where the checksum file with the most recent
+        /// modification time should be verified.
+        path: PathBuf,
+
+        #[command(flatten)]
+        verify_matcher: VerifyMatcherArgs,
+    },
+
     /// Verify hashes in a directory
     Root {
         /// Root directory that serves as the entry point for checksum file discovery.
@@ -318,6 +328,10 @@ fn main() {
                 path,
                 verify_matcher,
             } => verify::verify_file(&path, verify_matcher, cli.verbose),
+            VerifyCommand::Latest {
+                path,
+                verify_matcher,
+            } => verify::verify_latest(&path, verify_matcher, cli.verbose),
             VerifyCommand::Root {
                 root,
                 most_current,

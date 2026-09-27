@@ -15,5 +15,7 @@ mod incremental;
 mod most_current;
 mod utils;
 
+pub use most_current::is_hash_file_by_ext;
+
 #[cfg(test)]
 pub mod test_utils;

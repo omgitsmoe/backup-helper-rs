@@ -55,7 +55,7 @@ options fall into four groups, and they are the same everywhere they appear:
 | Hashing | `--hash-type`, `--no-include-unchanged`, `-s`/`--skip-unchanged`, `--periodic-write-interval-seconds` | `incremental`, `fill` |
 | Discovery | `--discover-hash-files-depth`, `--keep-deleted`, `--hash-allow`, `--hash-block` | every command that merges discovered checksum files |
 | Data files | `--all-allow`, `--all-block` | `incremental`, `fill` |
-| Verification | `--verify-allow`, `--verify-block` | `verify file`, `verify root` |
+| Verification | `--verify-allow`, `--verify-block` | `verify file`, `verify latest`, `verify root` |
 
 `--hash-allow`/`--hash-block` filter the *checksum files* that are discovered;
 `--all-allow`/`--all-block` filter the *data files* that are hashed and
@@ -177,6 +177,26 @@ checksum_helper_cli verify file /mnt/backups/docs/checksums_2024-09-28.cshd \
     --verify-allow '**/*.txt'
 ```
 
+### `verify latest` - check the newest checksum file in a directory
+
+Scans the directory and verifies the entries of the checksum file with the most
+recent modification time. The scan is **not** recursive and only considers files
+with a known checksum file extension, so unlike `verify root` the entries of
+several checksum files are never merged. Use `verify root` to merge and verify a
+whole tree.
+
+```bash
+# Verify the newest .cshd in this directory
+checksum_helper_cli verify latest /mnt/backups/docs
+
+# Only verify .docx files
+checksum_helper_cli verify latest /mnt/backups/docs \
+    --verify-allow '**/*.docx'
+```
+
+The command fails if the directory holds no checksum file, or if the path is not
+a directory.
+
 ### `verify root` - discover, merge, then verify
 
 ```bash
@@ -188,7 +208,7 @@ checksum_helper_cli verify root /mnt/backups \
     --verify-allow '**/*.docx' --verify-allow '**/*.pdf'
 ```
 
-Both verify commands end with a summary:
+All verify commands end with a summary:
 
 ```
 ========== VERIFY SUMMARY ==========

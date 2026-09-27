@@ -222,3 +222,59 @@ pub fn verify_file(
 
     Ok(())
 }
+
+fn latest_hash_file(root_path: impl AsRef<Path>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    struct FileWithMTime {
+        path: PathBuf,
+        mtime: std::time::SystemTime,
+    }
+    let root_path = root_path.as_ref();
+    let mut hash_files = vec![];
+    for entry in std::fs::read_dir(root_path)? {
+        let entry = entry.map_err(|e| {
+            std::io::Error::new(e.kind(), format!("Error getting latest hash file: {}", e))
+        })?;
+
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        if !checksum_helper::is_hash_file_by_ext(&path) {
+            continue;
+        }
+
+        hash_files.push(FileWithMTime {
+            path,
+            mtime: entry.metadata()?.modified()?,
+        });
+    }
+
+    if hash_files.is_empty() {
+        return Err(format!(
+            "Expected at least one hash file, but found none in {:?}",
+            root_path
+        )
+        .into());
+    }
+
+    // sort by descending mtime
+    hash_files.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+
+    Ok(hash_files.first().expect("checked above").path.clone())
+}
+
+pub fn verify_latest(
+    root_path: impl AsRef<Path>,
+    matcher: VerifyMatcherArgs,
+    verbose: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root_path = root_path.as_ref();
+
+    if !std::fs::metadata(root_path)?.is_dir() {
+        return Err(format!("Expected a path to a directory, got: {:?}", root_path).into());
+    }
+
+    let latest_hash_file = latest_hash_file(root_path)?;
+    verify_file(latest_hash_file, matcher, verbose)
+}

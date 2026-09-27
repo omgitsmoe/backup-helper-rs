@@ -472,6 +472,124 @@ bad.txt",
     );
 }
 
+#[test]
+fn test_verify_latest_picks_newest_hash_file() {
+    let root = common::testdir();
+    common::create_ftree(&root, "good.txt");
+
+    let good_hash = "8ab6060ca8a175c695ff1e2e8a116570e37f0bb2c8f939610d9a0d96b669134c292ec1fa48b235a055dcdc4f4fe233fbecc71048d71d6dac2d27fb1a1f5f2c02";
+    let bad_hash = "b".repeat(128);
+
+    // Only the file that is newest by mtime and middle by name carries the
+    // correct hash, so the run can only succeed if the selection is driven by
+    // mtime: ordering by name in either direction would pick a.cshd or z.cshd
+    // and report a mismatch. Do not "simplify" this fixture into two files with
+    // alphabetically ordered names, that would no longer discriminate.
+    for (name, mtime, hash) in [
+        ("a.cshd", 100i64, bad_hash.as_str()),
+        ("m.cshd", 300, good_hash),
+        ("z.cshd", 200, bad_hash.as_str()),
+    ] {
+        let path = root.join(name);
+        std::fs::write(&path, format!("# version 1\n,,sha512,{hash} good.txt\n")).unwrap();
+        filetime::set_file_mtime(&path, FileTime::from_unix_time(mtime, 0)).unwrap();
+    }
+
+    let (stdout, stderr, success) = common::run_cli(&["verify", "latest", &root.to_string_lossy()]);
+    assert!(success, "verify latest failed: stderr={}", stderr);
+    assert!(
+        stdout.contains("[OK        ]"),
+        "expected OK in output: {}",
+        stdout
+    );
+    // Exactly one entry: only the newest file was read, not a merge of all three.
+    assert!(
+        stdout.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"),
+        "expected only the newest hash file to be verified: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("SUCCESSFULLY"),
+        "expected success summary: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_verify_latest_ignores_non_hash_files_and_subdirectories() {
+    let root = common::testdir();
+    common::create_ftree(&root, "good.txt");
+
+    let good_hash = "8ab6060ca8a175c695ff1e2e8a116570e37f0bb2c8f939610d9a0d96b669134c292ec1fa48b235a055dcdc4f4fe233fbecc71048d71d6dac2d27fb1a1f5f2c02";
+    let bad_hash = "b".repeat(128);
+
+    // The directory scan is flat and filtered by extension, so both decoys below
+    // are newer than the file that must be picked, yet neither is a candidate.
+    let only = root.join("only.cshd");
+    std::fs::write(
+        &only,
+        format!("# version 1\n,,sha512,{good_hash} good.txt\n"),
+    )
+    .unwrap();
+    filetime::set_file_mtime(&only, FileTime::from_unix_time(100, 0)).unwrap();
+
+    let not_a_hash_file = root.join("newest.txt");
+    std::fs::write(&not_a_hash_file, "not a checksum file").unwrap();
+    filetime::set_file_mtime(&not_a_hash_file, FileTime::from_unix_time(200, 0)).unwrap();
+
+    let nested = root.join("sub/newest.cshd");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    std::fs::write(
+        &nested,
+        format!("# version 1\n,,sha512,{bad_hash} good.txt\n"),
+    )
+    .unwrap();
+    filetime::set_file_mtime(&nested, FileTime::from_unix_time(300, 0)).unwrap();
+
+    let (stdout, stderr, success) = common::run_cli(&["verify", "latest", &root.to_string_lossy()]);
+    assert!(success, "verify latest failed: stderr={}", stderr);
+    assert!(
+        stdout.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"),
+        "expected only.cshd to be selected: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_verify_latest_without_hash_files() {
+    let root = common::testdir();
+    std::fs::write(root.join("notes.txt"), "no checksums here").unwrap();
+
+    let (stdout, stderr, success) = common::run_cli(&["verify", "latest", &root.to_string_lossy()]);
+    assert!(
+        !success,
+        "verify latest should fail when no hash file exists"
+    );
+    assert!(
+        stderr.contains("Expected at least one hash file, but found none in"),
+        "expected no-hash-file error on stderr: {}",
+        stderr
+    );
+    assert!(stdout.is_empty(), "expected nothing verified: {}", stdout);
+}
+
+#[test]
+fn test_verify_latest_rejects_file_path() {
+    let root = common::testdir();
+    let cshd_path = root.join("test.cshd");
+    std::fs::write(&cshd_path, "# version 1\n").unwrap();
+
+    let (stdout, stderr, success) =
+        common::run_cli(&["verify", "latest", &cshd_path.to_string_lossy()]);
+    assert!(!success, "verify latest should reject a file path");
+    assert!(
+        stderr.contains("Expected a path to a directory, got:"),
+        "expected not-a-directory error on stderr: {}",
+        stderr
+    );
+    assert!(stdout.is_empty(), "expected nothing verified: {}", stdout);
+}
+
 // ============================================================
 // Phase C: incremental + fill
 // ============================================================

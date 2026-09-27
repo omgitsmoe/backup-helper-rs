@@ -105,6 +105,21 @@ const HASH_FILE_EXTENSIONS: &[&str] = &[
     "blake2s",
 ];
 
+pub fn is_hash_file_by_ext(path: impl AsRef<path::Path>) -> bool {
+    match path.as_ref().extension() {
+        None => false,
+        Some(file_ext) => {
+            for ext in HASH_FILE_EXTENSIONS {
+                if *ext == file_ext {
+                    return true;
+                }
+            }
+
+            false
+        },
+    }
+}
+
 fn discover_hash_files<P>(
     root: impl AsRef<path::Path>,
     options: &ChecksumHelperOptions,
@@ -143,37 +158,25 @@ fn include_hash_file<P>(
 where
     P: FnMut(MostCurrentProgress),
 {
-    match hash_file.extension() {
-        None => false,
-        Some(file_ext) => {
-            let mut include = false;
-            for ext in HASH_FILE_EXTENSIONS {
-                if *ext == file_ext {
-                    include = true;
-                    break;
-                }
-            }
-            if !include {
-                return false;
-            }
+    if !is_hash_file_by_ext(hash_file) {
+        return false;
+    }
 
-            let relative_path = pathdiff::diff_paths(hash_file, root).expect(
-                "discover_hash_files paths must alway be \
-                    relative to the ChecksumHelper root!",
-            );
-            assert!(
-                !relative_path.starts_with(".."),
-                "discover_hash_files path must always be a sub-path of the ChecksumHelper root!"
-            );
+    let relative_path = pathdiff::diff_paths(hash_file, root).expect(
+        "discover_hash_files paths must alway be \
+            relative to the ChecksumHelper root!",
+    );
+    assert!(
+        !relative_path.starts_with(".."),
+        "discover_hash_files path must always be a sub-path of the ChecksumHelper root!"
+    );
 
-            if options.hash_files_matcher.is_match(&relative_path) {
-                progress(MostCurrentProgress::FoundFile(relative_path.to_owned()));
-                true
-            } else {
-                progress(MostCurrentProgress::IgnoredPath(relative_path.to_owned()));
-                false
-            }
-        }
+    if options.hash_files_matcher.is_match(&relative_path) {
+        progress(MostCurrentProgress::FoundFile(relative_path.to_owned()));
+        true
+    } else {
+        progress(MostCurrentProgress::IgnoredPath(relative_path.to_owned()));
+        false
     }
 }
 
