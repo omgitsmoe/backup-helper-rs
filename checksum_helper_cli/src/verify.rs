@@ -184,31 +184,27 @@ pub fn verify_file(
     matcher: VerifyMatcherArgs,
     verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let path = path.as_ref();
+    let path = std::path::absolute(path.as_ref())?;
 
-    if !std::fs::metadata(path)?.is_file() {
+    if !std::fs::metadata(&path)?.is_file() {
         return Err(format!("Expected a path to a hash file, got: {:?}", path).into());
     }
 
     // `verify latest` delegates here, so this is where the hash file it picked
     // is named, after the pick and before anything is verified.
-    println!("Verifying hash file: {:?}", std::path::absolute(path)?);
+    println!("Verifying hash file: {:?}", path);
 
-    let root = if path.is_relative() {
-        std::env::current_dir()?.join(path.parent().expect("checked above"))
-    } else {
-        path.parent().expect("checked above").to_path_buf()
-    };
+    let root = path.parent().expect("checked above");
 
     let options = ChecksumHelperOptions::default();
-    let mut ch = checksum_helper::ChecksumHelper::with_options(&root, options)?;
+    let mut ch = checksum_helper::ChecksumHelper::with_options(root, options)?;
     let matcher = matcher.to_path_matcher()?;
 
     let mut reporter = ProgressReporter::new();
     reporter.set_verbose(verbose);
     let mut summary = VerifySummary::default();
 
-    let hc = ch.read_collection(path)?;
+    let hc = ch.read_collection(&path)?;
     let verify = ch.verify(
         &hc,
         |path| matcher.is_match(path) && !matcher.is_excluded(path),

@@ -326,6 +326,38 @@ fn test_verify_file_ok() {
 }
 
 #[test]
+fn test_verify_relative_hash_file_paths() {
+    let root = common::testdir();
+    let nested = root.join("subdir");
+    for directory in [&root, &nested] {
+        common::create_ftree(directory, "hello.txt");
+        std::fs::write(
+            directory.join("test.cshd"),
+            format!(
+                "# version 1\n,,sha512,{} hello.txt\n",
+                "acec329f80cc50edbab0dfbc2283d427ac673f84e6d8b949101791867b9b7771a53d2ffb1f8386189227beed4395b9a78171a1349700e2885c70ae14358d72ff"
+            ),
+        )
+        .unwrap();
+    }
+
+    for args in [
+        ["verify", "file", "test.cshd"],
+        ["verify", "file", "./test.cshd"],
+        ["verify", "file", "subdir/test.cshd"],
+        ["verify", "latest", "."],
+        ["verify", "latest", "subdir"],
+    ] {
+        let (stdout, stderr, success) = common::run_cli_in_dir(&args, &root);
+        assert!(success, "{args:?} failed: stderr={stderr}");
+        assert!(
+            stdout.contains("Total: 1 | OK: 1 | ERR: 0 | WARN: 0"),
+            "{args:?} did not verify the file: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn test_verify_file_missing() {
     let root = common::testdir();
     let cshd = "\

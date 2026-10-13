@@ -5,6 +5,14 @@ use std::process::Command;
 /// Run the CLI binary (built by cargo for integration tests) with the given args.
 /// Returns (stdout, stderr, success).
 pub fn run_cli(args: &[&str]) -> (String, String, bool) {
+    run_cli_with_current_dir(args, None)
+}
+
+pub fn run_cli_in_dir(args: &[&str], current_dir: &Path) -> (String, String, bool) {
+    run_cli_with_current_dir(args, Some(current_dir))
+}
+
+fn run_cli_with_current_dir(args: &[&str], current_dir: Option<&Path>) -> (String, String, bool) {
     let bin = std::env::var("CARGO_BIN_EXE_CHECKSUM_HELPER_CLI").unwrap_or_else(|_| {
         // Fallback: locate the binary relative to the manifest dir
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -18,10 +26,12 @@ pub fn run_cli(args: &[&str]) -> (String, String, bool) {
             .to_string_lossy()
             .to_string()
     });
-    let output = Command::new(bin)
-        .args(args)
-        .output()
-        .expect("failed to run CLI");
+    let mut command = Command::new(bin);
+    command.args(args);
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    let output = command.output().expect("failed to run CLI");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     (stdout, stderr, output.status.success())
