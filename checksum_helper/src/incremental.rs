@@ -283,7 +283,9 @@ impl<'a> Incremental<'a> {
             return Ok(self.options.incremental_include_unchanged_files
                 // we didn't have an mtime before, include despite the match,
                 // so we have the opportunity to skip nex time
-                || (previous.mtime().is_none() && on_disk.mtime().is_some()));
+                || (previous.mtime().is_none() && on_disk.mtime().is_some())
+                // same for size
+                || (previous.size().is_none() && on_disk.size().is_some()));
         }
 
         match (previous.mtime(), on_disk.mtime()) {
@@ -1266,7 +1268,7 @@ vid.mp4
 
     #[test]
     fn checksum_files_file_match_when_no_mtime_include_always() {
-        let (test_path, path_cgi_bin, _filetime_cig_bin) = setup_ftree_minimal();
+        let (test_path, path_cgi_bin, filetime_cig_bin) = setup_ftree_minimal();
         let mut ft = FileTree::new(&test_path).unwrap();
         let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
         let mut cgi_bin = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
@@ -1285,12 +1287,8 @@ vid.mp4
             let mut callbacks = vec![];
             let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
 
-            // Hash matched but include_unchanged=false -> is excluded from result:
-            // the mtime from the on-disk file (filetime_cig_bin) should be
-            // persisted so future runs can use mtime-based skipping.
-            // Currently it is lost since the file is dropped from the result.
-            let with_mtime = new.get(&cgi_bin.0);
-            assert!(with_mtime.is_some());
+            let with_mtime = new.get(&cgi_bin.0).unwrap();
+            assert_eq!(with_mtime.mtime(), Some(filetime_cig_bin));
 
             assert_eq!(
                 callbacks,
@@ -1301,6 +1299,53 @@ vid.mp4
                     IncrementalProgress::Finished,
                 ],
             );
+        }
+    }
+
+    #[test]
+    fn checksum_files_file_match_when_no_size_include_always() {
+        let (test_path, path_cgi_bin, filetime_cig_bin) = setup_ftree_minimal();
+        let mut ft = FileTree::new(&test_path).unwrap();
+        let mut hc = HashCollection::new(None::<&&str>, None).unwrap();
+        let (handle, file) = file_from_disk(&mut ft, &path_cgi_bin, HashType::Sha512);
+        let previous = FileRaw::new(
+            handle.clone(),
+            file.mtime(),
+            None,
+            file.hash_type(),
+            file.hash_bytes().to_vec(),
+        );
+        assert_eq!(previous.size(), None);
+        hc.update(handle.clone(), previous);
+
+        for include_unchanged in [true, false] {
+            let options = ChecksumHelperOptions {
+                incremental_include_unchanged_files: include_unchanged,
+                incremental_skip_unchanged: false,
+                ..Default::default()
+            };
+            let mut inc = Incremental::new(&test_path, &mut ft, &options, hc.clone());
+
+            inc.discover_files(|_| {}).unwrap();
+            let mut callbacks = vec![];
+            let new = inc.checksum_files(|p| callbacks.push(p)).unwrap();
+
+            assert_eq!(
+                callbacks,
+                vec![
+                    IncrementalProgress::PreRead(path::PathBuf::from(&path_cgi_bin)),
+                    IncrementalProgress::Read(28, 28),
+                    IncrementalProgress::FileMatch(path::PathBuf::from(&path_cgi_bin)),
+                    IncrementalProgress::Finished,
+                ],
+            );
+
+            let with_size = new
+                .get(&handle)
+                .expect("matching entry must retain its newly learned size");
+            assert_eq!(with_size.size(), Some(28));
+            assert_eq!(with_size.mtime(), Some(filetime_cig_bin));
+            assert_eq!(with_size.hash_bytes(), file.hash_bytes());
         }
     }
 }

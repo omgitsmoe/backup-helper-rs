@@ -439,6 +439,9 @@ pub struct ChecksumHelperOptions {
 
     /// Whether to include files in the output, which did not change compared
     /// to the previous latest available hash found.
+    ///
+    /// Note that files, which get a metadata update like `mtime: None` -> `mtime: Some(_)`,
+    /// will always be included.
     pub incremental_include_unchanged_files: bool,
 
     /// Whether to skip files when computing hashes if that files has the same
