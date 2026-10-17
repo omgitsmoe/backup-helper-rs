@@ -4,5 +4,5 @@ resolver = "2"
 members = [
     "backup_helper",
     "checksum_helper",
-    "checksum_helper_cli",
+    "checksum_helper_cli", "restore_helper",
 ]

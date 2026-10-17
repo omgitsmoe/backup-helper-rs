@@ -202,11 +202,11 @@ impl<'a> FileMut<'a> {
 
 impl<'a> File<'a> {
     #[allow(dead_code)]
-    fn relative_path(&self) -> path::PathBuf {
+    pub fn relative_path(&self) -> path::PathBuf {
         self.file.relative_path(self.context)
     }
 
-    fn absolute_path(&self) -> path::PathBuf {
+    pub fn absolute_path(&self) -> path::PathBuf {
         self.file.absolute_path(self.context)
     }
 
@@ -225,6 +225,10 @@ impl<'a> File<'a> {
 
     pub fn hash_bytes(&self) -> &[u8] {
         self.file.hash_bytes()
+    }
+
+    pub fn hash_hex(&self) -> String {
+        hex::encode(self.hash_bytes())
     }
 
     fn fetch_size_and_mtime(&self) -> Result<(u64, FileTime)> {
