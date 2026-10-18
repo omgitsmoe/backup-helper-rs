@@ -22,6 +22,39 @@ pub enum ExistingFilePolicy {
     Overwrite,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    Existing,
+    SameMetadata,
+    NoSource,
+    NoMountedSource,
+}
+
+#[derive(Debug)]
+pub enum ExecuteProgress<'a> {
+    Begin {
+        files: usize,
+    },
+    CopyStarted {
+        target: &'a path::Path,
+        source: &'a path::Path,
+        source_id: &'a str,
+        total: u64,
+    },
+    CopyBytes {
+        copied: u64,
+        total: u64,
+    },
+    Copied {
+        bytes: u64,
+    },
+    Skipped {
+        target: &'a path::Path,
+        reason: SkipReason,
+        source_ids: Vec<&'a str>,
+    },
+}
+
 pub struct RestoreState {
     plan: Plan,
     // indexed by ManifestHandle, which corresponds to the index in plan.source_manifests
@@ -67,21 +100,56 @@ impl RestoreState {
         &mut self,
         existing_policy: ExistingFilePolicy,
     ) -> Result<(), RestoreHelperError> {
+        self.execute_with_progress(existing_policy, |_| Ok(()))
+    }
+
+    pub fn execute_with_progress(
+        &mut self,
+        existing_policy: ExistingFilePolicy,
+        mut progress: impl FnMut(ExecuteProgress<'_>) -> io::Result<()>,
+    ) -> Result<(), RestoreHelperError> {
+        progress(ExecuteProgress::Begin {
+            files: self.plan.files.len(),
+        })?;
         for file in &self.plan.files {
             let content = &self.plan.contents[file.content.0];
-            let source_path = self.select_source(&content.sources);
-            if source_path.is_none() {
-                // no source available given the currently mounted sources
-                continue;
-            }
-            let source_path = source_path.expect("checked above");
-
             let target_path = self.target.join(&file.relative_path);
+            let Some((source, source_path)) = self.select_source(&content.sources) else {
+                progress(ExecuteProgress::Skipped {
+                    target: &target_path,
+                    reason: if content.sources.is_empty() {
+                        SkipReason::NoSource
+                    } else {
+                        SkipReason::NoMountedSource
+                    },
+                    source_ids: content
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            self.plan.source_manifests[source.manifest_handle.0]
+                                .id
+                                .as_str()
+                        })
+                        .collect(),
+                })?;
+                continue;
+            };
+
             let write_file = self.should_write_file(&target_path, file, existing_policy)?;
             if !write_file {
+                progress(ExecuteProgress::Skipped {
+                    target: &target_path,
+                    reason: if existing_policy == ExistingFilePolicy::SkipAlways {
+                        SkipReason::Existing
+                    } else {
+                        SkipReason::SameMetadata
+                    },
+                    source_ids: Vec::new(),
+                })?;
                 continue;
             }
 
+            let source_id = &self.plan.source_manifests[source.manifest_handle.0].id;
             let source_metadata = fs::metadata(&source_path)?;
             if !source_metadata.is_file() {
                 return Err(io::Error::new(
@@ -100,35 +168,48 @@ impl RestoreState {
 
             let parent = target_path.parent().expect("restore target has a parent");
             fs::create_dir_all(parent)?;
-            copy_helper::copy_file(
+            let total = file.size.unwrap_or(source_metadata.len());
+            progress(ExecuteProgress::CopyStarted {
+                target: &target_path,
+                source: &source_path,
+                source_id,
+                total,
+            })?;
+            let bytes = copy_helper::copy_file_with_progress(
                 &source_path,
                 &target_path,
                 &metadata,
-                Some(file.size.unwrap_or(source_metadata.len())),
+                Some(total),
                 "restore file",
+                |copied| progress(ExecuteProgress::CopyBytes { copied, total }),
             )?;
             copy_helper::sync_parent_directory(parent)?;
+            progress(ExecuteProgress::Copied { bytes })?;
         }
 
         Ok(())
     }
 
     /// Selects the highest priority (first, since sources is sorted by descending
-    /// priority) mounted source returning the absolute path to the source file.
+    /// priority) mounted source and its absolute path.
     /// If no source is mounted None is returned.
-    fn select_source(&self, sources: &Vec<FileSource>) -> Option<path::PathBuf> {
+    fn select_source<'a>(
+        &self,
+        sources: &'a [FileSource],
+    ) -> Option<(&'a FileSource, path::PathBuf)> {
         for source in sources {
             let mount = &self.mounts[source.manifest_handle.0];
             if mount.is_none() {
                 continue;
             }
 
-            return Some(
+            return Some((
+                source,
                 mount
                     .as_ref()
                     .expect("checked above")
                     .join(&source.relative_path),
-            );
+            ));
         }
 
         None
@@ -249,6 +330,112 @@ mod tests {
             );
             fs::remove_file(target).unwrap();
         }
+    }
+
+    #[test]
+    fn progress_reports_selected_source_bytes_and_completion() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        let source = root.join("source/nested/file.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"data").unwrap();
+        let mut events = Vec::new();
+        state
+            .execute_with_progress(ExistingFilePolicy::Overwrite, |event| {
+                match event {
+                    ExecuteProgress::Begin { files } => assert_eq!(files, 1),
+                    ExecuteProgress::CopyStarted {
+                        target,
+                        source: selected,
+                        source_id,
+                        total,
+                    } => {
+                        assert_eq!(selected, source);
+                        assert_eq!(target, root.join("target/nested/file.txt"));
+                        assert_eq!(source_id, "source");
+                        assert_eq!(total, 4);
+                        events.push("started");
+                    }
+                    ExecuteProgress::CopyBytes { copied, total } => {
+                        assert!(copied <= total);
+                        events.push(if copied == 0 { "zero" } else { "bytes" });
+                    }
+                    ExecuteProgress::Copied { bytes } => {
+                        assert_eq!(bytes, 4);
+                        assert_eq!(fs::read(root.join("target/nested/file.txt"))?, b"data");
+                        events.push("copied");
+                    }
+                    ExecuteProgress::Skipped { .. } => panic!("unexpected skip"),
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(events, ["started", "zero", "bytes", "copied"]);
+    }
+
+    #[test]
+    fn progress_distinguishes_all_skip_reasons() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        let target = root.join("target/nested/file.txt");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"data").unwrap();
+        filetime::set_file_mtime(&target, state.plan.files[0].mtime.unwrap()).unwrap();
+        for (policy, expected) in [
+            (ExistingFilePolicy::SkipAlways, SkipReason::Existing),
+            (
+                ExistingFilePolicy::SkipSameMetadata,
+                SkipReason::SameMetadata,
+            ),
+        ] {
+            let mut reasons = Vec::new();
+            state
+                .execute_with_progress(policy, |event| {
+                    if let ExecuteProgress::Skipped { reason, .. } = event {
+                        reasons.push(reason);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(reasons, [expected]);
+        }
+        state.mounts[0] = None;
+        for expected in [SkipReason::NoMountedSource, SkipReason::NoSource] {
+            let mut reasons = Vec::new();
+            state
+                .execute_with_progress(ExistingFilePolicy::Overwrite, |event| {
+                    if let ExecuteProgress::Skipped {
+                        reason, source_ids, ..
+                    } = event
+                    {
+                        reasons.push(reason);
+                        if reason == SkipReason::NoMountedSource {
+                            assert_eq!(source_ids, ["source"]);
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(reasons, [expected]);
+            state.plan.contents[0].sources.clear();
+        }
+    }
+
+    #[test]
+    fn failed_copy_never_reports_completion() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        let source = root.join("source/nested/file.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(source, b"wrong size").unwrap();
+        let mut completed = false;
+        let result = state.execute_with_progress(ExistingFilePolicy::Overwrite, |event| {
+            completed |= matches!(event, ExecuteProgress::Copied { .. });
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!completed);
+        assert!(!root.join("target/nested/file.txt").exists());
     }
 
     #[test]

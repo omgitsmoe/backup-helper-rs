@@ -265,8 +265,70 @@ pub fn copy_file(
     expected_len: Option<u64>,
     operation: &str,
 ) -> Result<u64, CopyError> {
+    copy_file_using(
+        source,
+        destination,
+        metadata,
+        expected_len,
+        operation,
+        |temp| fs::copy(source, temp),
+    )
+}
+
+/// Uses buffered copying instead of platform copy optimizations to report bytes
+/// written. Progress restarts at zero if a retry restarts the transfer.
+pub fn copy_file_with_progress(
+    source: &Path,
+    destination: &Path,
+    metadata: &PreservedMetadata,
+    expected_len: Option<u64>,
+    operation: &str,
+    mut progress: impl FnMut(u64) -> io::Result<()>,
+) -> Result<u64, CopyError> {
+    use io::{Read, Write};
+
+    copy_file_using(
+        source,
+        destination,
+        metadata,
+        expected_len,
+        operation,
+        |temp| {
+            let mut input = fs::File::open(source)?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(temp)?;
+            let mut buffer = [0; 64 * 1024];
+            let mut copied = 0;
+            progress(copied)?;
+            loop {
+                let read = match input.read(&mut buffer) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    result => result?,
+                };
+                if read == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..read])?;
+                copied += read as u64;
+                progress(copied)?;
+            }
+            Ok(copied)
+        },
+    )
+}
+
+fn copy_file_using(
+    source: &Path,
+    destination: &Path,
+    metadata: &PreservedMetadata,
+    expected_len: Option<u64>,
+    operation: &str,
+    mut transfer: impl FnMut(&Path) -> io::Result<u64>,
+) -> Result<u64, CopyError> {
     let mut temp = TempFile::reserve(destination)?;
-    let copied = retry_io(|| fs::copy(source, temp.path()))
+    let copied = retry_io(|| transfer(temp.path()))
         .map_err(|error| copy_io_error(operation, source, error))?;
     if let Some(expected_len) = expected_len {
         ensure_complete_copy(source, copied, expected_len)?;

@@ -10,6 +10,7 @@ the checksum library it is built on, and a standalone CLI for that library.
 |---|---|---|---|
 | `backup_helper` | binary | Configuration-driven backup runner: hash, copy and verify each configured source, keeping its progress in a state file. | [backup_helper/README.md](backup_helper/README.md) |
 | `copy_helper` | library | Atomic single-file transfers, metadata preservation, retries and temp cleanup. | [copy_helper/README.md](copy_helper/README.md) |
+| `restore_helper` | binary + library | Manifest-based restore planning and execution with source selection and copy progress. | [restore_helper/README.md](restore_helper/README.md) |
 | `checksum_helper` | library | Checksum file discovery, most-current merging, incremental hashing and verification. | [checksum_helper/README.md](checksum_helper/README.md) |
 | `checksum_helper_cli` | binary | Command line front end for the library. | [checksum_helper_cli/README.md](checksum_helper_cli/README.md) |
 

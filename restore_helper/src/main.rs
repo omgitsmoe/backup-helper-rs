@@ -1,12 +1,14 @@
 use std::{
     fs::File,
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter, IsTerminal, Write},
     path,
 };
 
 use clap::{Args, Parser, Subcommand};
 
 use restore_helper::{ExistingFilePolicy, Mount, RestoreHelperError, RestoreState, Source};
+
+mod progress;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -101,7 +103,20 @@ fn main() -> std::result::Result<(), RestoreHelperError> {
 
 fn execute(args: ExecuteArgs) -> Result<(), RestoreHelperError> {
     let mut state = RestoreState::from_json(args.plan, args.sources, args.target)?;
-    state.execute(args.existing_file_policy)
+    let stdout = io::stdout();
+    let interactive = stdout.is_terminal();
+    let width = if interactive {
+        crossterm::terminal::size()?.0 as usize
+    } else {
+        0
+    };
+    let mut reporter = progress::ProgressReporter::new(stdout.lock(), interactive, width);
+    let result =
+        state.execute_with_progress(args.existing_file_policy, |event| reporter.report(event));
+    let summary = reporter.finish(result.is_err());
+    result?;
+    summary?;
+    Ok(())
 }
 
 fn plan(args: PlanArgs, verbosity: u8) -> Result<(), RestoreHelperError> {

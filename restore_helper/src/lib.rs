@@ -6,7 +6,7 @@ use checksum_helper::ChecksumHelperError;
 mod execute;
 mod plan;
 
-pub use execute::{ExistingFilePolicy, RestoreState};
+pub use execute::{ExecuteProgress, ExistingFilePolicy, RestoreState, SkipReason};
 pub use plan::Plan;
 
 #[derive(Debug)]

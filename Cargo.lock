@@ -902,11 +902,13 @@ dependencies = [
  "checksum_helper",
  "clap",
  "copy_helper",
+ "crossterm",
  "filetime",
  "serde",
  "serde_json",
  "sha2",
  "testdir",
+ "unicode-width",
 ]
 
 [[package]]
