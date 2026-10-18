@@ -66,12 +66,13 @@ impl RestoreState {
     ) -> Result<RestoreState, RestoreHelperError> {
         let mut handle_to_mount = vec![None; plan.source_manifests.len()];
         for mount in mounts {
-            let handle = plan
-                .source_manifests
-                .iter()
-                .position(|s| s.id == mount.id)
-                .ok_or(RestoreHelperError::ManifestIdDoesNotExist(mount.id))?;
+            let Some(handle) = plan.source_manifests.iter().position(|s| s.id == mount.id) else {
+                return Err(RestoreHelperError::ManifestIdDoesNotExist(mount.id));
+            };
 
+            if handle_to_mount[handle].is_some() {
+                return Err(RestoreHelperError::DuplicateMountId(mount.id));
+            }
             handle_to_mount[handle] = Some(mount.mount);
         }
 
@@ -770,20 +771,22 @@ mod tests {
     }
 
     #[test]
-    fn new_uses_last_mount_for_duplicate_ids() {
+    fn new_rejects_duplicate_mount_ids() {
         let root = testdir!();
-        let last = root.join("last");
-        let state = RestoreState::new(
-            plan_with_sources(&["source"]),
-            vec![
-                Mount::new("source", root.join("first")).unwrap(),
-                Mount::new("source", &last).unwrap(),
-            ],
-            &root,
-        )
-        .unwrap();
+        for second in [root.join("first"), root.join("last")] {
+            let result = RestoreState::new(
+                plan_with_sources(&["source"]),
+                vec![
+                    Mount::new("source", root.join("first")).unwrap(),
+                    Mount::new("source", second).unwrap(),
+                ],
+                &root,
+            );
 
-        assert_eq!(state.mounts, vec![Some(last)]);
+            assert!(
+                matches!(result, Err(RestoreHelperError::DuplicateMountId(id)) if id == "source")
+            );
+        }
     }
 
     #[test]

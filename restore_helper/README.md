@@ -2,6 +2,9 @@
 
 Build a restore plan from checksum manifests, then execute it using mounted
 sources. Source manifest IDs associate the plan's content with mount paths.
+Source IDs must be nonempty and unique within a plan. Repeating a source ID
+in `plan`, in saved JSON, or a mount ID in `execute` is an error, even when
+the repeated arguments use the same path.
 
 ```sh
 restore_helper plan target.cshd --source archive=/path/archive.cshd --output plan.json

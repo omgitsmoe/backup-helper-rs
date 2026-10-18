@@ -34,6 +34,29 @@ fn run_plan(root: &Path, target: &str, source: &str, output: Option<&str>) -> Ou
 }
 
 #[test]
+fn duplicate_source_ids_fail_without_creating_plan() {
+    let root = testdir!();
+    write_manifests(&root);
+    let output = Command::new(env!("CARGO_BIN_EXE_restore_helper"))
+        .current_dir(&root)
+        .args([
+            "plan",
+            "target.cshd",
+            "--source",
+            "archive=source.cshd",
+            "--source",
+            "archive=target.cshd",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("duplicate source manifest ID: archive")
+    );
+    assert!(!root.join("plan.json").exists());
+}
+
+#[test]
 fn plan_command_writes_json_using_relative_manifest_paths() {
     let root = testdir!();
     write_manifests(&root);

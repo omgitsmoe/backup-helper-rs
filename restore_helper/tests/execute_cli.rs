@@ -100,6 +100,33 @@ fn progress_fixture(root: &Path) {
 }
 
 #[test]
+fn duplicate_mount_ids_fail_before_execution() {
+    let root = testdir!();
+    progress_fixture(&root);
+    let output = Command::new(env!("CARGO_BIN_EXE_restore_helper"))
+        .current_dir(&root)
+        .args([
+            "execute",
+            "plan.json",
+            "--target",
+            "restored",
+            "--existing-file-policy",
+            "overwrite",
+            "--mount",
+            "archive=source",
+            "--mount",
+            "archive=source",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate mount ID: archive"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Summary"));
+    assert!(!root.join("restored/copy.txt").exists());
+    assert_eq!(fs::read(root.join("restored/skip.txt")).unwrap(), b"keep");
+}
+
+#[test]
 fn redirected_execute_reports_selected_source_all_skips_and_summary() {
     let root = testdir!();
     progress_fixture(&root);

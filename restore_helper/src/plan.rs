@@ -1,4 +1,7 @@
-use std::{collections::HashMap, fs, path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, path,
+};
 
 use checksum_helper::{ChecksumHelper, hash_type::HashType};
 use filetime::FileTime;
@@ -76,6 +79,12 @@ impl TryFrom<PlanData> for Plan {
     type Error = String;
 
     fn try_from(data: PlanData) -> Result<Self, Self::Error> {
+        validate_manifest_ids(
+            data.source_manifests
+                .iter()
+                .map(|source| source.id.as_str()),
+        )
+        .map_err(|error| error.to_string())?;
         for content in &data.contents {
             for source in &content.sources {
                 crate::paths::validate_relative_file(&source.relative_path)?;
@@ -99,6 +108,21 @@ impl TryFrom<PlanData> for Plan {
             files: data.files,
         })
     }
+}
+
+fn validate_manifest_ids<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+) -> Result<(), RestoreHelperError> {
+    let mut seen = HashSet::new();
+    for id in ids {
+        if id.is_empty() {
+            return Err(RestoreHelperError::ManifestIdEmpty);
+        }
+        if !seen.insert(id) {
+            return Err(RestoreHelperError::DuplicateManifestId(id.to_owned()));
+        }
+    }
+    Ok(())
 }
 
 mod hash_type_serde {
@@ -167,6 +191,7 @@ impl Plan {
         restore_manifest: impl AsRef<path::Path>,
         sources: Vec<Source>,
     ) -> Result<Plan, RestoreHelperError> {
+        validate_manifest_ids(sources.iter().map(|source| source.id.as_str()))?;
         let restore_manifest = restore_manifest.as_ref();
         if !fs::exists(restore_manifest).map_err(|error| {
             RestoreHelperError::path_io("access restore manifest", restore_manifest, error)
@@ -331,6 +356,46 @@ mod tests {
             .iter()
             .map(|source| source.manifest_handle.0)
             .collect()
+    }
+
+    #[test]
+    fn build_rejects_duplicate_source_ids() {
+        let root = testdir!();
+        let target = write_manifest(&root, "target.cshd", &[("a.txt", 1)]);
+        let other = write_manifest(&root, "other.cshd", &[("b.txt", 1)]);
+        for second in [&target, &other] {
+            let result = Plan::build(
+                &target,
+                vec![source("archive", &target), source("archive", second)],
+            );
+            assert!(
+                matches!(result, Err(RestoreHelperError::DuplicateManifestId(id)) if id == "archive")
+            );
+        }
+    }
+
+    #[test]
+    fn json_rejects_duplicate_and_empty_source_ids() {
+        let mut input = plan_json();
+        input["source_manifests"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "archive-a", "path": "other.cshd"}));
+        let error = serde_json::from_value::<Plan>(input).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate source manifest ID: archive-a")
+        );
+
+        let mut input = plan_json();
+        input["source_manifests"][0]["id"] = json!("");
+        assert!(
+            serde_json::from_value::<Plan>(input)
+                .unwrap_err()
+                .to_string()
+                .contains("manifest ID must not be empty")
+        );
     }
 
     #[test]

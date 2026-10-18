@@ -16,6 +16,8 @@ pub use plan::Plan;
 pub enum RestoreHelperError {
     InvalidPlan(String),
     ManifestIdEmpty,
+    DuplicateManifestId(String),
+    DuplicateMountId(String),
     ManifestDoesNotExist(path::PathBuf),
     ManifestIdDoesNotExist(String),
     TargetIsDirectory(path::PathBuf),
@@ -62,6 +64,8 @@ impl std::fmt::Display for RestoreHelperError {
         match self {
             Self::InvalidPlan(message) => write!(f, "invalid restore plan: {message}"),
             Self::ManifestIdEmpty => write!(f, "manifest ID must not be empty"),
+            Self::DuplicateManifestId(id) => write!(f, "duplicate source manifest ID: {id}"),
+            Self::DuplicateMountId(id) => write!(f, "duplicate mount ID: {id}"),
             Self::ManifestDoesNotExist(path) => {
                 write!(f, "manifest does not exist: {}", path.display())
             }
