@@ -50,7 +50,8 @@ directories during a restore; keep roots and their ancestors stable while runnin
 
 - `skip-always`: leave existing destination files alone.
 - `skip-same-metadata`: skip files with matching planned size and mtime;
-  otherwise replace them.
+  otherwise replace them. Both fields must be recorded; size must match exactly
+  and mtime allows an absolute difference of up to 1 µs, just like `check`.
 - `overwrite`: replace existing regular files.
 
 For each file, execution selects the highest-priority mounted candidate in the

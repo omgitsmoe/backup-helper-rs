@@ -1,5 +1,6 @@
 use std::{fs, io, path};
 
+use checksum_helper::hashed_file::mtimes_match;
 use filetime::FileTime;
 
 use crate::{
@@ -273,9 +274,12 @@ impl RestoreState {
         if existing_policy == ExistingFilePolicy::SkipSameMetadata
             && let (Some(size), Some(mtime)) = (file.size, file.mtime)
             && meta.len() == size
-            && FileTime::from(meta.modified().map_err(|error| {
-                RestoreHelperError::path_io("read destination timestamp", target, error)
-            })?) == mtime
+            && mtimes_match(
+                Some(FileTime::from(meta.modified().map_err(|error| {
+                    RestoreHelperError::path_io("read destination timestamp", target, error)
+                })?)),
+                Some(mtime),
+            )
         {
             return Ok(false);
         }
@@ -630,7 +634,7 @@ mod tests {
             (
                 file.size,
                 Some(FileTime::from_unix_time(1234, 500_000_001)),
-                false,
+                true,
             ),
             (None, file.mtime, false),
             (file.size, None, false),
@@ -648,6 +652,49 @@ mod tests {
                     state.should_write_file(&target, &file, policy).unwrap(),
                     expected
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn skip_same_metadata_and_check_share_inclusive_mtime_tolerance() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        let target = root.join("target/nested/file.txt");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"data").unwrap();
+        filetime::set_file_mtime(&target, FileTime::from_unix_time(100, 0)).unwrap();
+
+        for (seconds, nanos, matches) in [
+            (100, 0, true),
+            (100, 1, true),
+            (100, 999, true),
+            (100, 1000, true),
+            (100, 1001, false),
+            (99, 999_999_999, true),
+            (99, 999_999_001, true),
+            (99, 999_999_000, true),
+            (99, 999_998_999, false),
+        ] {
+            state.plan.files[0].mtime = Some(FileTime::from_unix_time(seconds, nanos));
+            let summary = state.plan.check(&state.target).unwrap();
+            assert_eq!(summary.matching == 1, matches, "{seconds}.{nanos:09}");
+            for policy in POLICIES {
+                let expected_write = match policy {
+                    ExistingFilePolicy::SkipAlways => false,
+                    ExistingFilePolicy::SkipSameMetadata => !matches,
+                    ExistingFilePolicy::Overwrite => true,
+                };
+                assert_eq!(
+                    state
+                        .should_write_file(&target, &state.plan.files[0], policy)
+                        .unwrap(),
+                    expected_write,
+                    "{policy:?}: {seconds}.{nanos:09}",
+                );
+            }
+            if matches {
+                state.execute(ExistingFilePolicy::SkipSameMetadata).unwrap();
             }
         }
     }
