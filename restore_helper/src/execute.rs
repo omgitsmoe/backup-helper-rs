@@ -58,6 +58,18 @@ impl RestoreState {
         &mut self,
         existing_policy: ExistingFilePolicy,
     ) -> Result<(), RestoreHelperError> {
+        for file in &self.plan.files {
+            let content = &self.plan.contents[file.content.0];
+            let source_path = self.select_source(&content.sources);
+            if source_path.is_none() {
+                // no source available given the currently mounted sources
+                continue
+            }
+            let source_path = source_path.expect("checked above");
+
+            let target_path = self.target.join(&file.relative_path);
+        }
+
         Ok(())
     }
 

@@ -9,11 +9,12 @@ the checksum library it is built on, and a standalone CLI for that library.
 | Crate | Kind | Purpose | README |
 |---|---|---|---|
 | `backup_helper` | binary | Configuration-driven backup runner: hash, copy and verify each configured source, keeping its progress in a state file. | [backup_helper/README.md](backup_helper/README.md) |
+| `copy_helper` | library | Atomic single-file transfers, metadata preservation, retries and temp cleanup. | [copy_helper/README.md](copy_helper/README.md) |
 | `checksum_helper` | library | Checksum file discovery, most-current merging, incremental hashing and verification. | [checksum_helper/README.md](checksum_helper/README.md) |
 | `checksum_helper_cli` | binary | Command line front end for the library. | [checksum_helper_cli/README.md](checksum_helper_cli/README.md) |
 
-`backup_helper` depends on `checksum_helper`; the CLI is an alternative front end
-for the same library.
+`backup_helper` depends on `checksum_helper` and `copy_helper`; the checksum CLI
+is an alternative front end for `checksum_helper`.
 
 ## How backup_helper works
 
@@ -137,6 +138,7 @@ byte-identical files.
 
 ```
 backup_helper/          the backup binary, with its ADRs in doc/adr
+copy_helper/            shared low-level file transfers
 checksum_helper/        the checksum library, with its ADRs in doc/adr
 checksum_helper_cli/    the CLI around the library
 ```
@@ -150,7 +152,7 @@ file or the checksum format.
 ```bash
 just test                  # the whole workspace, with output
 cargo test --workspace     # the same, without the wrapper
-cargo build                # all three crates
+cargo build                # all workspace crates
 ```
 
 Unit tests live next to the code they cover. `backup_helper/tests/cli.rs` and

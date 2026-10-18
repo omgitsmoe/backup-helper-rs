@@ -1,129 +1,19 @@
 use std::{
     collections::BTreeSet,
-    ffi::{OsStr, OsString},
     fmt, fs, io,
     path::{Path, PathBuf},
-    thread,
-    time::{Duration, SystemTime},
 };
 
+pub(crate) use copy_helper::is_retryable_io_error;
+use copy_helper::{
+    PreservedMetadata, preserved_metadata, retry_io, sweep_stale_temps, sync_parent_directory,
+};
 use filetime::FileTime;
-
-#[cfg(unix)]
-use libc::{EIO, EREMOTEIO, ESTALE};
-#[cfg(windows)]
-use windows_sys::Win32::Foundation::{
-    ERROR_BAD_NET_NAME, ERROR_BAD_NET_RESP, ERROR_BAD_NETPATH, ERROR_DEV_NOT_EXIST,
-    ERROR_IO_PENDING, ERROR_NETNAME_DELETED, ERROR_NETWORK_ACCESS_DENIED, ERROR_NETWORK_BUSY,
-    ERROR_NETWORK_UNREACHABLE, ERROR_NO_SYSTEM_RESOURCES, ERROR_OPERATION_ABORTED,
-    ERROR_SEM_TIMEOUT, ERROR_SHARING_VIOLATION,
-};
 
 use crate::BackupHelperError;
 
-const RETRY_DELAYS: [Duration; 3] = [
-    Duration::from_millis(100),
-    Duration::from_millis(200),
-    Duration::from_millis(400),
-];
-
-/// Marks a destination file that has not been published yet. The name is built as
-/// `.{name}.bh-tmp-{pid}-{attempt}` so that a leftover from a crashed run is both
-/// identifiable as ours and traceable back to its source file.
-const TEMP_MARKER: &str = ".bh-tmp-";
-
-/// Longest single path component, in bytes on Unix and in UTF-16 code units on
-/// Windows. The temp name has to fit the same limit as the final name, otherwise a
-/// long source name fails the copy with `ENAMETOOLONG`.
-const TEMP_NAME_MAX: usize = 255;
-
-/// How many names to try before giving up on reserving a temp name.
-const TEMP_RESERVE_ATTEMPTS: u32 = 8;
-
-/// Age at which a temp file is assumed to be a leftover rather than a copy that is
-/// still running. Long enough that no live copy can own one, since the sweep runs
-/// once per destination directory before that directory is written to.
-const TEMP_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
-
 pub(crate) fn is_directory(path: &Path) -> io::Result<bool> {
     Ok(retry_io(|| fs::metadata(path))?.is_dir())
-}
-
-fn retry_io<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    retry_io_with(&mut operation, &RETRY_DELAYS, &mut |delay| {
-        thread::sleep(delay)
-    })
-}
-
-fn retry_io_with<T>(
-    operation: &mut impl FnMut() -> io::Result<T>,
-    retry_delays: &[Duration],
-    sleep: &mut impl FnMut(Duration),
-) -> io::Result<T> {
-    let mut retry_index = 0;
-    loop {
-        match operation() {
-            Ok(value) => return Ok(value),
-            Err(error) if is_retryable_io_error(&error) && retry_index < retry_delays.len() => {
-                sleep(retry_delays[retry_index]);
-                retry_index += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-pub(crate) fn is_retryable_io_error(error: &io::Error) -> bool {
-    if matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock
-            | io::ErrorKind::Interrupted
-            | io::ErrorKind::TimedOut
-            | io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::NotConnected
-            | io::ErrorKind::BrokenPipe
-            | io::ErrorKind::NetworkDown
-            | io::ErrorKind::NetworkUnreachable
-            | io::ErrorKind::HostUnreachable
-            | io::ErrorKind::StaleNetworkFileHandle
-            | io::ErrorKind::ResourceBusy
-            | io::ErrorKind::WriteZero
-            | io::ErrorKind::UnexpectedEof
-    ) {
-        return true;
-    }
-
-    is_retryable_raw_os_error(error)
-}
-
-// Network filesystems can expose transient failures as uncategorized raw errors.
-#[cfg(unix)]
-fn is_retryable_raw_os_error(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(code) if code == EIO || code == EREMOTEIO || code == ESTALE)
-}
-
-#[cfg(windows)]
-fn is_retryable_raw_os_error(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(code) if code as u32 == ERROR_BAD_NET_NAME
-        || code as u32 == ERROR_BAD_NETPATH
-        || code as u32 == ERROR_BAD_NET_RESP
-        || code as u32 == ERROR_DEV_NOT_EXIST
-        || code as u32 == ERROR_IO_PENDING
-        || code as u32 == ERROR_NETNAME_DELETED
-        || code as u32 == ERROR_NETWORK_ACCESS_DENIED
-        || code as u32 == ERROR_NETWORK_BUSY
-        || code as u32 == ERROR_NETWORK_UNREACHABLE
-        || code as u32 == ERROR_NO_SYSTEM_RESOURCES
-        || code as u32 == ERROR_OPERATION_ABORTED
-        || code as u32 == ERROR_SEM_TIMEOUT
-        || code as u32 == ERROR_SHARING_VIOLATION)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn is_retryable_raw_os_error(_error: &io::Error) -> bool {
-    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,99 +189,6 @@ struct FileOutcome {
     bytes: u64,
 }
 
-#[derive(Debug, Clone)]
-struct PreservedMetadata {
-    modified: FileTime,
-    #[cfg(unix)]
-    permissions: fs::Permissions,
-}
-
-fn preserved_metadata(metadata: &fs::Metadata) -> io::Result<PreservedMetadata> {
-    let modified = metadata.modified().map(FileTime::from)?;
-
-    Ok(PreservedMetadata {
-        modified,
-        #[cfg(unix)]
-        permissions: metadata.permissions(),
-    })
-}
-
-fn restore_metadata(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
-    restore_file_times(path, metadata)?;
-
-    #[cfg(unix)]
-    fs::set_permissions(path, metadata.permissions.clone())?;
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn restore_file_times(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
-    filetime::set_file_mtime(path, metadata.modified)
-}
-
-#[cfg(windows)]
-fn restore_file_times(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_WRITE_ATTRIBUTES,
-    };
-
-    // Attribute-only access lets read-only destinations receive the source mtime.
-    let file = fs::OpenOptions::new()
-        .access_mode(FILE_WRITE_ATTRIBUTES)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
-    filetime::set_file_handle_times(&file, None, Some(metadata.modified))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn restore_file_times(path: &Path, metadata: &PreservedMetadata) -> io::Result<()> {
-    filetime::set_file_mtime(path, metadata.modified)
-}
-
-// Temporarily clear an existing read-only attribute, then restore it after the
-// operation that needed the file to be writable.
-#[cfg(windows)]
-struct ReadOnlyFile {
-    path: PathBuf,
-    permissions: fs::Permissions,
-}
-
-#[cfg(windows)]
-impl ReadOnlyFile {
-    fn restore(self) -> io::Result<()> {
-        retry_io(|| fs::set_permissions(&self.path, self.permissions.clone()))
-    }
-}
-
-#[cfg(windows)]
-fn clear_read_only_attribute(path: &Path) -> io::Result<Option<ReadOnlyFile>> {
-    let metadata = match retry_io(|| fs::symlink_metadata(path)) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !is_retryable_io_error(&error) => {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-
-    let original_permissions = metadata.permissions();
-    if !original_permissions.readonly() {
-        return Ok(None);
-    }
-
-    let mut writable_permissions = original_permissions.clone();
-    writable_permissions.set_readonly(false);
-    retry_io(|| fs::set_permissions(path, writable_permissions.clone()))?;
-
-    Ok(Some(ReadOnlyFile {
-        path: path.to_path_buf(),
-        permissions: original_permissions,
-    }))
-}
-
 /// Whether a destination file can be left alone. Size and mtime are only a
 /// sufficient test because a copy is published by renaming a complete temp file
 /// onto the final name, so a file that exists there is never a partial transfer.
@@ -448,187 +245,6 @@ fn destination_component_exists(path: &Path) -> Result<bool, BackupHelperError> 
     }
 }
 
-/// Owns a destination file that has not been published yet. The file is removed on
-/// drop unless it was renamed onto its final name, so a failed copy never leaves a
-/// plausible-looking partial file behind.
-struct TempFile {
-    path: PathBuf,
-    published: bool,
-}
-
-impl TempFile {
-    /// Reserves an unused temp name next to `destination` and creates it empty.
-    ///
-    /// The temp has to live in the destination directory: `rename` is only atomic
-    /// within a filesystem, and a staging area on another device would turn the
-    /// publish into a non-atomic second copy.
-    fn reserve(destination: &Path) -> Result<Self, BackupHelperError> {
-        let directory = destination.parent().ok_or_else(|| {
-            BackupHelperError::CopyError(format!(
-                "Destination path {:?} has no parent directory",
-                destination
-            ))
-        })?;
-        let file_name = destination.file_name().ok_or_else(|| {
-            BackupHelperError::CopyError(format!(
-                "Destination path {:?} has no file name",
-                destination
-            ))
-        })?;
-
-        for attempt in 0..TEMP_RESERVE_ATTEMPTS {
-            let path = directory.join(temp_file_name(file_name, attempt));
-            let reservation = retry_io(|| {
-                fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)
-            });
-            match reservation {
-                Ok(_) => {
-                    return Ok(Self {
-                        path,
-                        published: false,
-                    });
-                }
-                // A temp from an earlier run holds the name until the stale sweep
-                // is old enough to remove it, so move on to the next attempt.
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(copy_io_error("create destination temp file", &path, error));
-                }
-            }
-        }
-
-        Err(BackupHelperError::CopyError(format!(
-            "Failed to create a destination temp file for {:?}: all {TEMP_RESERVE_ATTEMPTS} names are taken",
-            destination
-        )))
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Keeps the file, because it now lives under its final name.
-    fn publish(&mut self) {
-        self.published = true;
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        if !self.published {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-/// Whether `name` is exactly the shape [`temp_file_name`] produces. The destination
-/// is a share that is browsed by hand, so a file that merely looks similar belongs
-/// to the user and must never be swept.
-fn is_temp_file_name(name: &OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    let Some(rest) = name.strip_prefix('.') else {
-        return false;
-    };
-    let Some((source_name, ids)) = rest.rsplit_once(TEMP_MARKER) else {
-        return false;
-    };
-
-    !source_name.is_empty()
-        && ids.split_once('-').is_some_and(|(pid, attempt)| {
-            !pid.is_empty()
-                && !attempt.is_empty()
-                && pid
-                    .bytes()
-                    .chain(attempt.bytes())
-                    .all(|b| b.is_ascii_digit())
-        })
-}
-
-/// Removes temp files left behind by a run that died mid-copy.
-///
-/// Best-effort by design: a temp file we are not allowed to delete must not abort
-/// a backup of the whole tree. Silent for the same reason — `CopyProgress` is
-/// per-file and the status line has a fixed width budget.
-fn sweep_stale_temps(directory: &Path) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        if !is_temp_file_name(&entry.file_name()) {
-            continue;
-        }
-        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
-            continue;
-        };
-        // `duration_since` fails for a timestamp in the future, which leaves files
-        // with clock skew alone.
-        if SystemTime::now()
-            .duration_since(modified)
-            .is_ok_and(|age| age >= TEMP_STALE_AFTER)
-        {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
-fn temp_file_name(file_name: &OsStr, attempt: u32) -> OsString {
-    let suffix = format!("{TEMP_MARKER}{}-{attempt}", std::process::id());
-    // The marker and the pid are ASCII, so their length is the same in bytes and
-    // in UTF-16 code units. One byte is spent on the leading dot.
-    let budget = TEMP_NAME_MAX.saturating_sub(1).saturating_sub(suffix.len());
-
-    let mut name = OsString::from(".");
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-
-        // Cutting on a byte boundary can split a UTF-8 sequence. The result is
-        // still a valid filename, it only renders oddly, and this name only exists
-        // for the duration of a single copy.
-        let bytes = file_name.as_bytes();
-        name.push(OsStr::from_bytes(&bytes[..bytes.len().min(budget)]));
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-
-        // Cutting on a char boundary can still leave a lone high surrogate, which
-        // is not a valid Windows name.
-        let mut units: Vec<u16> = file_name.encode_wide().take(budget).collect();
-        if let Some(&unit) = units.last()
-            && (0xD800..=0xDBFF).contains(&unit)
-        {
-            units.pop();
-        }
-        name.push(OsString::from_wide(&units));
-    }
-    name.push(suffix);
-    name
-}
-
-/// Rejects a copy that wrote fewer bytes than the source holds. `fs::copy`
-/// returns the number of bytes written, which used to be discarded, so a short
-/// copy was indistinguishable from a complete one.
-fn ensure_complete_copy(
-    source: &Path,
-    copied: u64,
-    expected_len: u64,
-) -> Result<(), BackupHelperError> {
-    if copied == expected_len {
-        return Ok(());
-    }
-
-    Err(BackupHelperError::CopyError(format!(
-        "Failed to copy {source:?}: copied {copied} of {expected_len} bytes"
-    )))
-}
-
 fn copy_file(
     source: &Path,
     destination: &Path,
@@ -665,58 +281,14 @@ fn copy_file(
         }
     }
 
-    let mut temp = TempFile::reserve(destination)?;
-
-    let copied = retry_io(|| fs::copy(source, temp.path()))
-        .map_err(|error| copy_io_error(operation, source, error))?;
-    // Meaningless for sources that are not regular files, and a symlink to a file
-    // reports the length of its target, which is what `fs::copy` writes.
-    if source_is_file {
-        ensure_complete_copy(source, copied, source_len)?;
-    }
-
-    // Flushed before the stamp, never after: a flush over CIFS re-opens the file
-    // for writing and the server bumps LastWrite when that handle closes, which
-    // discards the stamp without failing. The client keeps reporting the value we
-    // set until `actimeo` expires, so the loss only surfaces in a later run.
-    retry_io(|| sync_file(temp.path()))
-        .map_err(|error| copy_io_error("flush destination file", temp.path(), error))?;
-    // Applied before the rename so that the file is published complete: `rename`
-    // does not touch the mtime of the inode it moves. Nothing that opens the file
-    // for writing may follow this, or the stamp is what gets lost.
-    retry_io(|| restore_metadata(temp.path(), source_metadata))
-        .map_err(|error| copy_io_error("restore destination metadata", temp.path(), error))?;
-
-    // `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` replaces the destination but
-    // refuses to do so while the destination is read-only.
-    #[cfg(windows)]
-    let read_only_destination = if source_is_file {
-        clear_read_only_attribute(destination)
-            .map_err(|error| copy_io_error("make destination writable", destination, error))?
-    } else {
-        None
-    };
-
-    let publish_result = retry_io(|| fs::rename(temp.path(), destination));
-    // Restored even when the rename failed, otherwise the destination would stay
-    // writable.
-    #[cfg(windows)]
-    let restore_read_only_result = match read_only_destination {
-        Some(destination) => destination.restore(),
-        None => Ok(()),
-    };
-
-    if let Err(error) = publish_result {
-        return Err(copy_io_error(
-            "publish destination file",
-            destination,
-            error,
-        ));
-    }
-    temp.publish();
-    #[cfg(windows)]
-    restore_read_only_result
-        .map_err(|error| copy_io_error("restore destination permissions", destination, error))?;
+    let copied = copy_helper::copy_file(
+        source,
+        destination,
+        source_metadata,
+        source_is_file.then_some(source_len),
+        operation,
+    )
+    .map_err(|error| BackupHelperError::CopyError(error.to_string()))?;
 
     Ok(FileOutcome {
         action: CopyAction::Copied,
@@ -813,57 +385,6 @@ fn copy_tree_entries(
         )));
     }
 
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_file(path: &Path) -> io::Result<()> {
-    // Read-only, because the source's own mode is already applied and a write-only
-    // or execute-only source has no readable handle to flush.
-    fs::File::open(path)?.sync_all()
-}
-
-// `FlushFileBuffers` requires the handle to hold `GENERIC_WRITE`, so the
-// read-only open that is enough for `fsync` is rejected with
-// `ERROR_ACCESS_DENIED` here. `fs::copy` propagates the read-only attribute from
-// the source, so a read-only source has to have it cleared for the flush.
-#[cfg(windows)]
-fn sync_file(path: &Path) -> io::Result<()> {
-    let read_only = clear_read_only_attribute(path)?;
-    let flush_result = fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .and_then(|file| file.sync_all());
-    let restore_result = match read_only {
-        Some(read_only) => read_only.restore(),
-        None => Ok(()),
-    };
-
-    flush_result.and(restore_result)
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(directory: &Path) -> io::Result<()> {
-    match fs::File::open(directory).and_then(|handle| handle.sync_all()) {
-        // The rename is still atomic on a filesystem that cannot flush a directory
-        // handle; only its durability is weaker.
-        Err(error) if is_unsupported_directory_sync(&error) => Ok(()),
-        result => result,
-    }
-}
-
-// ENOTSUP is EOPNOTSUPP on Linux and macOS, so it is listed once.
-#[cfg(unix)]
-fn is_unsupported_directory_sync(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(code) if code == libc::ENOTSUP
-        || code == libc::EINVAL
-        || code == libc::EBADF
-        || code == libc::EISDIR)
-        || error.kind() == io::ErrorKind::Unsupported
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -1013,6 +534,7 @@ impl WalkTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
     use testdir::testdir;
 
@@ -1072,138 +594,6 @@ mod tests {
         let result = WalkTree::new(root);
 
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::NotFound));
-    }
-
-    #[test]
-    fn retry_io_retries_transient_errors_until_success() {
-        let retry_delays = [Duration::from_millis(0), Duration::from_millis(0)];
-        let mut attempts = 0;
-        let mut sleeps = Vec::new();
-        let mut operation = || -> io::Result<&'static str> {
-            attempts += 1;
-            if attempts < 3 {
-                Err(io::Error::from(io::ErrorKind::WouldBlock))
-            } else {
-                Ok("copied")
-            }
-        };
-
-        let result = retry_io_with(&mut operation, &retry_delays, &mut |delay| {
-            sleeps.push(delay);
-        });
-
-        assert_eq!(result.unwrap(), "copied");
-        assert_eq!(attempts, 3);
-        assert_eq!(sleeps, retry_delays);
-    }
-
-    #[test]
-    fn retry_io_stops_after_retry_budget() {
-        let retry_delays = [Duration::from_millis(0), Duration::from_millis(0)];
-        let mut attempts = 0;
-        let mut sleeps = Vec::new();
-        let mut operation = || -> io::Result<()> {
-            attempts += 1;
-            Err(io::Error::from(io::ErrorKind::ConnectionReset))
-        };
-
-        let result = retry_io_with(&mut operation, &retry_delays, &mut |delay| {
-            sleeps.push(delay);
-        });
-
-        assert!(matches!(
-            result,
-            Err(error) if error.kind() == io::ErrorKind::ConnectionReset
-        ));
-        assert_eq!(attempts, retry_delays.len() + 1);
-        assert_eq!(sleeps, retry_delays);
-    }
-
-    #[test]
-    fn retry_io_does_not_retry_permanent_errors() {
-        let retry_delays = [Duration::from_millis(0)];
-        let mut attempts = 0;
-        let mut sleeps = Vec::new();
-        let mut operation = || -> io::Result<()> {
-            attempts += 1;
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        };
-
-        let result = retry_io_with(&mut operation, &retry_delays, &mut |delay| {
-            sleeps.push(delay);
-        });
-
-        assert!(matches!(
-            result,
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied
-        ));
-        assert_eq!(attempts, 1);
-        assert!(sleeps.is_empty());
-    }
-
-    #[test]
-    fn common_transient_error_kinds_are_retryable() {
-        for kind in [
-            io::ErrorKind::WouldBlock,
-            io::ErrorKind::Interrupted,
-            io::ErrorKind::TimedOut,
-            io::ErrorKind::ConnectionRefused,
-            io::ErrorKind::ConnectionReset,
-            io::ErrorKind::ConnectionAborted,
-            io::ErrorKind::NotConnected,
-            io::ErrorKind::BrokenPipe,
-            io::ErrorKind::NetworkDown,
-            io::ErrorKind::NetworkUnreachable,
-            io::ErrorKind::HostUnreachable,
-            io::ErrorKind::StaleNetworkFileHandle,
-            io::ErrorKind::ResourceBusy,
-            io::ErrorKind::WriteZero,
-            io::ErrorKind::UnexpectedEof,
-        ] {
-            assert!(
-                is_retryable_io_error(&io::Error::from(kind)),
-                "expected {kind:?} to be retryable"
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn eagain_is_retryable() {
-        let error = io::Error::from_raw_os_error(11);
-
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        assert!(is_retryable_io_error(&error));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn uncategorized_unix_io_errors_are_retryable() {
-        for code in [libc::EIO, libc::EREMOTEIO, libc::ESTALE] {
-            let error = io::Error::from_raw_os_error(code);
-
-            assert!(
-                is_retryable_io_error(&error),
-                "expected raw Unix error {code} to be retryable"
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn uncategorized_windows_io_errors_are_retryable() {
-        for code in [
-            windows_sys::Win32::Foundation::ERROR_BAD_NETPATH,
-            windows_sys::Win32::Foundation::ERROR_BAD_NET_NAME,
-            windows_sys::Win32::Foundation::ERROR_NETWORK_BUSY,
-        ] {
-            let error = io::Error::from_raw_os_error(code as i32);
-
-            assert!(
-                is_retryable_io_error(&error),
-                "expected raw Windows error {code} to be retryable"
-            );
-        }
     }
 
     #[test]
@@ -1594,36 +984,6 @@ mod tests {
     }
 
     #[test]
-    fn unpublished_temp_file_is_removed() {
-        let root = testdir!();
-        let destination = root.join("file.txt");
-        fs::write(&destination, "existing").unwrap();
-
-        let temp = TempFile::reserve(&destination).unwrap();
-        let temp_path = temp.path().to_path_buf();
-        assert!(temp_path.exists());
-        assert!(is_temp_file_name(temp_path.file_name().unwrap()));
-
-        drop(temp);
-
-        assert!(!temp_path.exists());
-        assert_eq!(fs::read_to_string(&destination).unwrap(), "existing");
-    }
-
-    #[test]
-    fn published_temp_file_is_kept() {
-        let root = testdir!();
-        let destination = root.join("file.txt");
-
-        let mut temp = TempFile::reserve(&destination).unwrap();
-        let temp_path = temp.path().to_path_buf();
-        temp.publish();
-        drop(temp);
-
-        assert!(temp_path.exists());
-    }
-
-    #[test]
     fn copy_file_removes_the_temp_file_when_the_copy_fails() {
         let root = testdir!();
         // A directory as the copy source fails once the temp file exists, which
@@ -1648,108 +1008,6 @@ mod tests {
         assert!(result.is_err());
         assert!(entry_names(&destination).is_empty());
         assert!(!destination_file.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn temp_file_name_fits_a_long_source_name() {
-        let root = testdir!();
-        let source = root.join("source");
-        let destination = root.join("destination");
-        fs::create_dir(&source).unwrap();
-        // Longer than a temp name derived from it would be allowed to be.
-        let long_name = "n".repeat(TEMP_NAME_MAX - 5);
-        fs::write(source.join(&long_name), "content").unwrap();
-
-        copy_tree(&source, &destination, CopyPolicy::SkipUnchanged, |_| {}).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(destination.join(&long_name)).unwrap(),
-            "content"
-        );
-        assert_eq!(entry_names(&destination), [OsString::from(long_name)]);
-    }
-
-    #[test]
-    fn temp_file_names_are_matched_exactly() {
-        let temp_name = temp_file_name(OsStr::new("file.txt"), 0);
-        assert!(is_temp_file_name(&temp_name));
-        assert!(temp_name.as_encoded_bytes().len() <= TEMP_NAME_MAX);
-
-        for name in [
-            "file.txt.bh-tmp-4242-0",      // not hidden
-            ".file.txt.bh-tmp-abc",        // ids are not numeric
-            ".file.txt.bh-tmp-4242",       // no attempt
-            ".file.txt.bh-tmp-4242-0.txt", // trailing suffix
-            ".mine.bh-tmp-abc.txt",        // a user file that mentions the marker
-            ".bh-tmp-4242-0",              // no source name
-        ] {
-            assert!(
-                !is_temp_file_name(OsStr::new(name)),
-                "expected {name:?} not to be treated as a temp file"
-            );
-        }
-    }
-
-    #[test]
-    fn sweep_removes_only_stale_temp_files() {
-        let root = testdir!();
-        let stale = root.join(format!(".old.txt{TEMP_MARKER}4242-0"));
-        let fresh = root.join(format!(".new.txt{TEMP_MARKER}4242-0"));
-        let lookalike = root.join(format!(".mine{TEMP_MARKER}abc.txt"));
-        let real = root.join("real.txt");
-        for path in [&stale, &fresh, &lookalike, &real] {
-            fs::write(path, "content").unwrap();
-        }
-        filetime::set_file_mtime(&stale, FileTime::from_unix_time(1_000_000, 0)).unwrap();
-
-        sweep_stale_temps(&root);
-
-        assert!(!stale.exists());
-        assert!(fresh.exists());
-        assert!(lookalike.exists());
-        assert!(real.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sync_parent_directory_works_on_a_local_filesystem() {
-        let root = testdir!();
-
-        assert!(sync_parent_directory(&root).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_unsupported_directory_sync_errors_are_tolerated() {
-        for code in [libc::ENOTSUP, libc::EINVAL, libc::EBADF, libc::EISDIR] {
-            assert!(
-                is_unsupported_directory_sync(&io::Error::from_raw_os_error(code)),
-                "expected raw Unix error {code} to be tolerated"
-            );
-        }
-        assert!(is_unsupported_directory_sync(&io::Error::from(
-            io::ErrorKind::Unsupported
-        )));
-
-        assert!(!is_unsupported_directory_sync(
-            &io::Error::from_raw_os_error(libc::EIO)
-        ));
-        assert!(!is_unsupported_directory_sync(&io::Error::from(
-            io::ErrorKind::PermissionDenied
-        )));
-    }
-
-    #[test]
-    fn short_copy_is_rejected() {
-        let source = Path::new("/source/file.txt");
-
-        assert!(ensure_complete_copy(source, 12, 12).is_ok());
-        assert!(matches!(
-            ensure_complete_copy(source, 10, 12),
-            Err(BackupHelperError::CopyError(message))
-                if message.contains("copied 10 of 12 bytes")
-        ));
     }
 
     #[test]

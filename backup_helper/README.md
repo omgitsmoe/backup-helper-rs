@@ -368,6 +368,10 @@ verification on its own, since those are scheduled from the state file.
 `copy_tree` walks the source and mirrors it into the target. It never deletes
 anything: a file that exists at the target but not at the source stays.
 
+Single-file transfers, metadata restoration, retries and temp cleanup use
+[`copy_helper`](../copy_helper/README.md). Tree traversal, skip decisions and
+progress reporting remain in `backup_helper`.
+
 - **Directories** are created with `create_dir_all`; existing ones are kept.
   Directory mtimes are not restored.
 - **Symlinks** are never followed. A symlink to a file is copied as a regular

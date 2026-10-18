@@ -3,6 +3,7 @@ resolver = "2"
 
 members = [
     "backup_helper",
+    "copy_helper",
     "checksum_helper",
     "checksum_helper_cli", "restore_helper",
 ]
