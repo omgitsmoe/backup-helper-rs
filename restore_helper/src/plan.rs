@@ -267,6 +267,18 @@ impl Plan {
             });
         }
     }
+
+    pub fn content_without_source(&self) -> Vec<path::PathBuf> {
+        let mut result = vec![];
+        for file in &self.files {
+            let content = &self.contents[file.content.0];
+            if content.sources.is_empty() {
+                result.push(file.relative_path.clone());
+            }
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]

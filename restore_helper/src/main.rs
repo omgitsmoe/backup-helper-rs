@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{self, BufWriter, Write},
     path,
 };
 
@@ -45,7 +45,7 @@ struct PlanArgs {
     sources: Vec<Source>,
 
     // Path to the output file, which contains the restore plan.
-    #[arg(default_value = "plan.json")]
+    #[arg(long = "output", default_value = "plan.json")]
     output: path::PathBuf,
 }
 
@@ -87,16 +87,32 @@ fn main() -> std::result::Result<(), RestoreHelperError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Plan(plan_args) => plan(plan_args),
+        Commands::Plan(plan_args) => plan(plan_args, cli.verbose),
         Commands::Execute(execute_args) => Ok(()),
     }
 }
 
-fn plan(args: PlanArgs) -> Result<(), RestoreHelperError> {
+fn plan(args: PlanArgs, verbosity: u8) -> Result<(), RestoreHelperError> {
     let plan = restore_helper::Plan::build(path::absolute(args.restore_manifest)?, args.sources)?;
     let mut writer = BufWriter::new(File::create_new(args.output)?);
     serde_json::to_writer_pretty(&mut writer, &plan)?;
     writeln!(writer)?;
     writer.flush()?;
+
+    let no_source = plan.content_without_source();
+    eprintln!(
+        "WARN: Files without matching content source: {}",
+        no_source.len()
+    );
+
+    if verbosity > 0 && !no_source.is_empty() {
+        let stderr = io::stderr();
+        let mut out = io::BufWriter::new(stderr.lock());
+
+        for path in &no_source {
+            writeln!(out, "  {}", path.display()).unwrap();
+        }
+    }
+
     Ok(())
 }

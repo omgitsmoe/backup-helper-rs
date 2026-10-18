@@ -28,7 +28,7 @@ fn run_plan(root: &Path, target: &str, source: &str, output: Option<&str>) -> Ou
         .current_dir(root)
         .args(["plan", target, "--source", source]);
     if let Some(output) = output {
-        command.arg(output);
+        command.args(["--output", output]);
     }
     command.output().unwrap()
 }
