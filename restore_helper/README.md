@@ -60,7 +60,14 @@ It does not reopen source manifests. Missing or unreadable files on a selected
 mount remain errors and stop execution.
 
 On a terminal, a temporary section shows the destination, selected source ID
-and source path, and bytes copied with a percentage. Redraws are throttled to
+and source path, and bytes copied with a percentage. Whole-run status shows
+processed files (copied plus skipped) out of the planned count, elapsed time,
+average throughput in MiB/s, and an approximate ETA. ETA uses the average time
+per processed file, including skips, so uneven file sizes or many skips can make
+it inaccurate; it is unavailable until a file is processed. Throughput counts
+completed bytes plus the current copy attempt, divided by elapsed execution
+time; retry resets replace the active byte count rather than accumulating it.
+Redraws are throttled to
 100 ms, and long paths are shortened to fit. Successful copies leave no
 permanent per-file lines. Skips always leave a permanent line with their reason.
 
@@ -68,7 +75,9 @@ Redirected output has no terminal controls or per-chunk updates. It prints one
 source-selection line per copy attempt, skip lines, and the final summary.
 
 The summary includes copied files and bytes, skips by reason, failed files,
-and files not processed. Execution errors produce an incomplete summary before
+and files not processed, followed by elapsed time and average throughput.
+On failure, throughput includes bytes from the current attempt, while the copied
+byte total includes only completed files. Execution errors produce an incomplete summary before
 the error is returned. Plan-loading or CLI argument errors happen before
 execution and do not produce execution totals.
 
