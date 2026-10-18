@@ -7,39 +7,40 @@ use serde::{Deserialize, Serialize};
 use crate::{RestoreHelperError, Source};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ManifestHandle(usize);
+pub(crate) struct ManifestHandle(pub(crate) usize);
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct FileSource {
+pub(crate) struct FileSource {
     // Source manifest the file belongs to.
-    manifest_handle: ManifestHandle,
+    pub(crate) manifest_handle: ManifestHandle,
     // Relative path to the file.
-    relative_path: path::PathBuf,
+    pub(crate) relative_path: path::PathBuf,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ContentHandle(usize);
+pub(crate) struct ContentHandle(pub(crate) usize);
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct RestoreFile {
+pub(crate) struct RestoreFile {
     #[serde(with = "hash_type_serde")]
-    hash_type: HashType,
+    pub(crate) hash_type: HashType,
     // hex-encoded hash
-    hash: String,
-    size: Option<u64>,
+    pub(crate) hash: String,
+    pub(crate) size: Option<u64>,
     #[serde(with = "optional_filetime_serde")]
-    mtime: Option<FileTime>,
+    pub(crate) mtime: Option<FileTime>,
 
-    content: ContentHandle,
+    pub(crate) content: ContentHandle,
 
     // Original path in the manifest to restore.
-    relative_path: path::PathBuf,
+    pub(crate) relative_path: path::PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct SourceManifest {
-    id: String,
-    path: path::PathBuf,
+pub (crate) struct SourceManifest {
+    pub(crate) id: String,
+    // path to the manifest file (later only used as provenance)
+    pub(crate) path: path::PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
@@ -50,18 +51,18 @@ struct ContentKey {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct ContentRecord {
+pub(crate) struct ContentRecord {
     key: ContentKey,
     // ordered by number of files the originating source manifest can provide
-    sources: Vec<FileSource>,
+    pub(crate) sources: Vec<FileSource>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "PlanData")]
 pub struct Plan {
-    source_manifests: Vec<SourceManifest>,
-    contents: Vec<ContentRecord>,
-    files: Vec<RestoreFile>,
+    pub(crate) source_manifests: Vec<SourceManifest>,
+    pub(crate) contents: Vec<ContentRecord>,
+    pub(crate) files: Vec<RestoreFile>,
 }
 
 #[derive(Deserialize)]

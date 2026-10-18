@@ -6,7 +6,7 @@ use std::{
 
 use clap::{Args, Parser, Subcommand};
 
-use restore_helper::{Mount, RestoreHelperError, Source};
+use restore_helper::{ExistingFilePolicy, Mount, RestoreHelperError, RestoreState, Source};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -63,6 +63,13 @@ fn parse_mount(value: &str) -> Result<Mount, String> {
 struct ExecuteArgs {
     plan: path::PathBuf,
 
+    #[arg(
+        long,
+        value_enum,
+        help = "How to handle files that already exist at the target"
+    )]
+    existing_file_policy: ExistingFilePolicy,
+
     #[arg(required = true, long = "target")]
     target: path::PathBuf,
 
@@ -88,8 +95,13 @@ fn main() -> std::result::Result<(), RestoreHelperError> {
 
     match cli.command {
         Commands::Plan(plan_args) => plan(plan_args, cli.verbose),
-        Commands::Execute(execute_args) => Ok(()),
+        Commands::Execute(execute_args) => execute(execute_args),
     }
+}
+
+fn execute(args: ExecuteArgs) -> Result<(), RestoreHelperError> {
+    let mut state = RestoreState::from_json(args.plan, args.sources, args.target)?;
+    state.execute(args.existing_file_policy)
 }
 
 fn plan(args: PlanArgs, verbosity: u8) -> Result<(), RestoreHelperError> {
@@ -115,4 +127,75 @@ fn plan(args: PlanArgs, verbosity: u8) -> Result<(), RestoreHelperError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execute_parses_existing_file_policies() {
+        for (value, expected) in [
+            ("skip-always", ExistingFilePolicy::SkipAlways),
+            ("skip-same-metadata", ExistingFilePolicy::SkipSameMetadata),
+            ("overwrite", ExistingFilePolicy::Overwrite),
+        ] {
+            let cli = Cli::try_parse_from([
+                "restore_helper",
+                "execute",
+                "plan.json",
+                "--target",
+                "restored",
+                "--mount",
+                "archive=/mnt/archive",
+                "--existing-file-policy",
+                value,
+            ])
+            .unwrap();
+            let Commands::Execute(args) = cli.command else {
+                panic!("expected execute command");
+            };
+            assert_eq!(args.existing_file_policy, expected);
+        }
+    }
+
+    #[test]
+    fn execute_requires_existing_file_policy() {
+        let error = Cli::try_parse_from([
+            "restore_helper",
+            "execute",
+            "plan.json",
+            "--target",
+            "restored",
+            "--mount",
+            "archive=/mnt/archive",
+        ])
+        .err()
+        .unwrap();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(error.to_string().contains("--existing-file-policy"));
+    }
+
+    #[test]
+    fn execute_rejects_invalid_existing_file_policy() {
+        let error = Cli::try_parse_from([
+            "restore_helper",
+            "execute",
+            "plan.json",
+            "--target",
+            "restored",
+            "--mount",
+            "archive=/mnt/archive",
+            "--existing-file-policy",
+            "invalid",
+        ])
+        .err()
+        .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
 }

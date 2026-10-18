@@ -3,14 +3,17 @@ use std::path;
 
 use checksum_helper::ChecksumHelperError;
 
+mod execute;
 mod plan;
 
+pub use execute::{ExistingFilePolicy, RestoreState};
 pub use plan::Plan;
 
 #[derive(Debug)]
 pub enum RestoreHelperError {
     ManifestIdEmpty,
     ManifestDoesNotExist(path::PathBuf),
+    ManifestIdDoesNotExist(String),
     ChecksumHelperError(ChecksumHelperError),
     IoError(std::io::ErrorKind),
     JsonError(serde_json::Error),
@@ -24,6 +27,9 @@ impl std::fmt::Display for RestoreHelperError {
             Self::ManifestIdEmpty => write!(f, "manifest ID must not be empty"),
             Self::ManifestDoesNotExist(path) => {
                 write!(f, "manifest does not exist: {}", path.display())
+            }
+            Self::ManifestIdDoesNotExist(id) => {
+                write!(f, "manifest with ID '{}' does not exist", id)
             }
             Self::ChecksumHelperError(error) => write!(f, "{error}"),
             Self::IoError(kind) => write!(f, "I/O error: {kind}"),
