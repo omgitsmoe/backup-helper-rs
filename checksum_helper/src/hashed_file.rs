@@ -362,7 +362,8 @@ pub enum VerifyResult {
     MismatchOutdatedHash,
 }
 
-pub(crate) fn mtimes_match(a: Option<FileTime>, b: Option<FileTime>) -> bool {
+/// Allows 1 µs of rounding error from fractional-second manifest timestamps.
+pub fn mtimes_match(a: Option<FileTime>, b: Option<FileTime>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(a), Some(b)) => {

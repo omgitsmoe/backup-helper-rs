@@ -1,8 +1,4 @@
-use std::{
-    fs::{self, File},
-    io::{self, BufReader},
-    path,
-};
+use std::{fs, io, path};
 
 use filetime::FileTime;
 
@@ -91,8 +87,7 @@ impl RestoreState {
         mounts: Vec<Mount>,
         target: impl AsRef<path::Path>,
     ) -> Result<RestoreState, RestoreHelperError> {
-        let reader = BufReader::new(File::open(plan)?);
-        let plan: Plan = serde_json::from_reader(reader)?;
+        let plan = Plan::from_json(plan)?;
         Self::new(plan, mounts, target)
     }
 
@@ -258,7 +253,10 @@ impl RestoreState {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::ErrorKind};
+    use std::{
+        fs::{self, File},
+        io::ErrorKind,
+    };
 
     use testdir::testdir;
 

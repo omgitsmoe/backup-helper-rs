@@ -152,6 +152,11 @@ mod optional_filetime_serde {
 }
 
 impl Plan {
+    pub fn from_json(plan: impl AsRef<path::Path>) -> Result<Self, RestoreHelperError> {
+        let reader = std::io::BufReader::new(fs::File::open(plan)?);
+        Ok(serde_json::from_reader(reader)?)
+    }
+
     pub fn build(
         restore_manifest: impl AsRef<path::Path>,
         sources: Vec<Source>,

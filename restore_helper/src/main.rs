@@ -90,6 +90,15 @@ struct ExecuteArgs {
 enum Commands {
     Plan(PlanArgs),
     Execute(ExecuteArgs),
+    /// Check destination file existence and available planned metadata (not checksums).
+    Check(CheckArgs),
+}
+
+#[derive(Args)]
+struct CheckArgs {
+    plan: path::PathBuf,
+    #[arg(long)]
+    target: path::PathBuf,
 }
 
 fn main() -> std::result::Result<(), RestoreHelperError> {
@@ -98,7 +107,55 @@ fn main() -> std::result::Result<(), RestoreHelperError> {
     match cli.command {
         Commands::Plan(plan_args) => plan(plan_args, cli.verbose),
         Commands::Execute(execute_args) => execute(execute_args),
+        Commands::Check(args) => check(args),
     }
+}
+
+fn check(args: CheckArgs) -> Result<(), RestoreHelperError> {
+    use restore_helper::CheckOutcome;
+
+    let plan = restore_helper::Plan::from_json(args.plan)?;
+    let mut out = BufWriter::new(io::stdout().lock());
+    let summary = plan.check_with_progress(args.target, |event| {
+        match event.outcome {
+            CheckOutcome::Matching => {}
+            CheckOutcome::Missing => writeln!(out, "MISSING {}", event.target.display())?,
+            CheckOutcome::NotRegularFile => {
+                writeln!(out, "NOT A REGULAR FILE {}", event.target.display())?
+            }
+            CheckOutcome::IoError(error) => {
+                writeln!(out, "ERROR {}: {error}", event.target.display())?
+            }
+            CheckOutcome::MetadataMismatch { size, mtime } => {
+                write!(out, "MISMATCH {}", event.target.display())?;
+                if let Some((expected, actual)) = size {
+                    write!(out, " size: expected {expected}, actual {actual}")?;
+                }
+                if let Some((expected, actual)) = mtime {
+                    write!(
+                        out,
+                        " mtime: expected {}.{:09}, actual {}.{:09}",
+                        expected.unix_seconds(),
+                        expected.nanoseconds(),
+                        actual.unix_seconds(),
+                        actual.nanoseconds()
+                    )?;
+                }
+                writeln!(out)?;
+            }
+        }
+        Ok(())
+    })?;
+    writeln!(
+        out,
+        "Matching: {}, missing: {}, mismatched: {}, not regular: {}, errors: {}",
+        summary.matching, summary.missing, summary.mismatched, summary.not_regular, summary.errors
+    )?;
+    out.flush()?;
+    if summary.has_problems() {
+        return Err(RestoreHelperError::CheckFailed);
+    }
+    Ok(())
 }
 
 fn execute(args: ExecuteArgs) -> Result<(), RestoreHelperError> {

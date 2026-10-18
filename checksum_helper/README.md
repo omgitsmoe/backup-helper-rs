@@ -67,6 +67,9 @@ separators normalised to `/`:
 | `hash` | Hex digest. |
 | `path` | Path relative to the directory holding the collection file. |
 
+`hashed_file::mtimes_match` exposes the same inclusive 1 µs comparison for
+other workspace tools. Two absent timestamps match; only one absent does not.
+
 Lines are written in the order described in [Entry order](#entry-order), so two
 runs over an unchanged tree produce byte-identical files and can be compared
 with `cmp`.

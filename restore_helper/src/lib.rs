@@ -3,9 +3,11 @@ use std::path;
 
 use checksum_helper::ChecksumHelperError;
 
+mod check;
 mod execute;
 mod plan;
 
+pub use check::{CheckOutcome, CheckProgress, CheckSummary};
 pub use execute::{ExecuteProgress, ExistingFilePolicy, RestoreState, SkipReason};
 pub use plan::Plan;
 
@@ -19,6 +21,7 @@ pub enum RestoreHelperError {
     CopyError(copy_helper::CopyError),
     IoError(std::io::ErrorKind),
     JsonError(serde_json::Error),
+    CheckFailed,
 }
 
 impl Error for RestoreHelperError {}
@@ -40,6 +43,7 @@ impl std::fmt::Display for RestoreHelperError {
             Self::CopyError(error) => write!(f, "{error}"),
             Self::IoError(kind) => write!(f, "I/O error: {kind}"),
             Self::JsonError(error) => write!(f, "plan JSON error: {error}"),
+            Self::CheckFailed => write!(f, "destination check found problems"),
         }
     }
 }

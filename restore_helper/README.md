@@ -6,7 +6,32 @@ sources. Source manifest IDs associate the plan's content with mount paths.
 ```sh
 restore_helper plan target.cshd --source archive=/path/archive.cshd --output plan.json
 restore_helper execute plan.json --target restored --mount archive=/mnt/archive --existing-file-policy skip-same-metadata
+restore_helper check plan.json --target restored
 ```
+
+## Checking destinations
+
+`check` loads the saved plan and checks every planned destination, including
+files without a usable restore source. It needs no mounts or source manifests
+and does not write files or hash their contents. Unrelated destination files
+are ignored.
+
+Each destination must be a regular file (symlinks are reported as problems).
+Size and mtime are compared independently when recorded in the plan. Size must
+match exactly; mtime allows an absolute difference of up to 1 µs, using the
+same comparison as `checksum_helper`. If neither is recorded, only existence
+and file type are checked.
+
+Missing files, metadata mismatches (expected and actual values), wrong file
+types, and metadata access errors are printed as permanent lines. Checking
+continues after per-file problems and ends with totals. A problem produces a
+nonzero exit status; matching files produce no per-file output.
+
+The library exposes `Plan::from_json`, `Plan::check`, and
+`Plan::check_with_progress`. The latter emits a `CheckProgress` result for each
+destination. Both checking methods return a `CheckSummary`; findings are not
+library errors, so callers should inspect `CheckSummary::has_problems()`.
+Callback errors stop the check and are returned to the caller.
 
 ## Execution
 
