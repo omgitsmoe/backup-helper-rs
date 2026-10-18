@@ -37,7 +37,7 @@ pub(crate) struct RestoreFile {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub (crate) struct SourceManifest {
+pub(crate) struct SourceManifest {
     pub(crate) id: String,
     // path to the manifest file (later only used as provenance)
     pub(crate) path: path::PathBuf,
@@ -78,6 +78,7 @@ impl TryFrom<PlanData> for Plan {
     fn try_from(data: PlanData) -> Result<Self, Self::Error> {
         for content in &data.contents {
             for source in &content.sources {
+                crate::paths::validate_relative_file(&source.relative_path)?;
                 if source.manifest_handle.0 >= data.source_manifests.len() {
                     return Err(format!(
                         "invalid manifest handle: {}",
@@ -87,6 +88,7 @@ impl TryFrom<PlanData> for Plan {
             }
         }
         for file in &data.files {
+            crate::paths::validate_relative_file(&file.relative_path)?;
             if file.content.0 >= data.contents.len() {
                 return Err(format!("invalid content handle: {}", file.content.0));
             }
@@ -183,6 +185,8 @@ impl Plan {
 
         for (_, file) in ch.iter_collection(&restore_collection)? {
             let relative_path = file.relative_path();
+            crate::paths::validate_relative_file(&relative_path)
+                .map_err(RestoreHelperError::InvalidPlan)?;
             let key = ContentKey {
                 hash_type: file.hash_type(),
                 hash: file.hash_hex(),
@@ -229,6 +233,8 @@ impl Plan {
 
             for (_, file) in ch.iter_collection(&source_collection)? {
                 let relative_path = file.relative_path();
+                crate::paths::validate_relative_file(&relative_path)
+                    .map_err(RestoreHelperError::InvalidPlan)?;
                 let key = ContentKey {
                     hash_type: file.hash_type(),
                     hash: file.hash_hex(),
@@ -724,6 +730,43 @@ mod tests {
         };
         let encoded = serde_json::to_string(&plan).unwrap();
         assert_eq!(serde_json::from_str::<Plan>(&encoded).unwrap(), plan);
+    }
+
+    #[test]
+    fn json_rejects_unsafe_file_and_source_paths() {
+        for path in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "nested/../../outside",
+            "/outside",
+        ] {
+            for source in [false, true] {
+                let mut input = plan_json();
+                if source {
+                    input["contents"][0]["sources"][0]["relative_path"] = json!(path);
+                } else {
+                    input["files"][0]["relative_path"] = json!(path);
+                }
+                assert!(serde_json::from_value::<Plan>(input).is_err(), "{path:?}");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn json_rejects_windows_rooted_and_prefixed_paths() {
+        for path in [
+            r"C:\outside",
+            r"C:outside",
+            r"\outside",
+            r"\\server\share\outside",
+        ] {
+            let mut input = plan_json();
+            input["files"][0]["relative_path"] = json!(path);
+            assert!(serde_json::from_value::<Plan>(input).is_err());
+        }
     }
 
     #[test]

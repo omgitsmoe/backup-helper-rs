@@ -35,6 +35,14 @@ Callback errors stop the check and are returned to the caller.
 
 ## Execution
 
+Plan paths must be nonempty relative file paths without parent traversal
+or absolute prefixes, and cannot name `.`. Loading a saved plan validates destination and source
+paths. Execution and checking reject symlinked parent directories below the
+configured target; execution also rejects symlinks below source mounts,
+including source files. The explicitly configured roots are trusted.
+These checks do not protect against another process concurrently replacing
+directories during a restore; keep roots and their ancestors stable while running.
+
 `--existing-file-policy` is required:
 
 - `skip-always`: leave existing destination files alone.

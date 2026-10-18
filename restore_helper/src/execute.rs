@@ -109,6 +109,7 @@ impl RestoreState {
         for file in &self.plan.files {
             let content = &self.plan.contents[file.content.0];
             let target_path = self.target.join(&file.relative_path);
+            crate::paths::reject_symlinks(&self.target, &file.relative_path, false)?;
             let Some((source, source_path)) = self.select_source(&content.sources) else {
                 progress(ExecuteProgress::Skipped {
                     target: &target_path,
@@ -145,6 +146,10 @@ impl RestoreState {
             }
 
             let source_id = &self.plan.source_manifests[source.manifest_handle.0].id;
+            let mount = self.mounts[source.manifest_handle.0]
+                .as_ref()
+                .expect("selected source is mounted");
+            crate::paths::reject_symlinks(mount, &source.relative_path, true)?;
             let source_metadata = fs::metadata(&source_path)?;
             if !source_metadata.is_file() {
                 return Err(io::Error::new(
@@ -306,6 +311,40 @@ mod tests {
             root.join("target"),
         )
         .unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn execute_rejects_parent_and_source_symlinks() {
+        use std::os::unix::fs::symlink;
+        for source_link in [false, true] {
+            let root = testdir!().join(if source_link { "source" } else { "target" });
+            fs::create_dir_all(&root).unwrap();
+            let mut state = state_with_file(&root);
+            let outside = root.join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("file.txt"), b"keep").unwrap();
+            fs::create_dir_all(root.join("source/nested")).unwrap();
+            fs::write(root.join("source/nested/file.txt"), b"data").unwrap();
+            fs::create_dir_all(root.join("target")).unwrap();
+            if source_link {
+                fs::remove_file(root.join("source/nested/file.txt")).unwrap();
+                symlink(
+                    outside.join("file.txt"),
+                    root.join("source/nested/file.txt"),
+                )
+                .unwrap();
+            } else {
+                symlink(&outside, root.join("target/nested")).unwrap();
+            }
+            for policy in POLICIES {
+                assert!(state.execute(policy).is_err());
+                assert_eq!(fs::read(outside.join("file.txt")).unwrap(), b"keep");
+            }
+            if source_link {
+                assert!(!root.join("target/nested/file.txt").exists());
+            }
+        }
     }
 
     #[test]

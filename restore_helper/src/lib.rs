@@ -5,6 +5,7 @@ use checksum_helper::ChecksumHelperError;
 
 mod check;
 mod execute;
+mod paths;
 mod plan;
 
 pub use check::{CheckOutcome, CheckProgress, CheckSummary};
@@ -13,6 +14,7 @@ pub use plan::Plan;
 
 #[derive(Debug)]
 pub enum RestoreHelperError {
+    InvalidPlan(String),
     ManifestIdEmpty,
     ManifestDoesNotExist(path::PathBuf),
     ManifestIdDoesNotExist(String),
@@ -29,6 +31,7 @@ impl Error for RestoreHelperError {}
 impl std::fmt::Display for RestoreHelperError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidPlan(message) => write!(f, "invalid restore plan: {message}"),
             Self::ManifestIdEmpty => write!(f, "manifest ID must not be empty"),
             Self::ManifestDoesNotExist(path) => {
                 write!(f, "manifest does not exist: {}", path.display())

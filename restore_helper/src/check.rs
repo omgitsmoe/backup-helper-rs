@@ -49,9 +49,12 @@ impl Plan {
         mut progress: impl FnMut(CheckProgress<'_>) -> io::Result<()>,
     ) -> Result<CheckSummary, RestoreHelperError> {
         let mut summary = CheckSummary::default();
+        let root = target.as_ref();
         for file in &self.files {
-            let target = target.as_ref().join(&file.relative_path);
-            let outcome = match check_file(&target, file) {
+            let target = root.join(&file.relative_path);
+            let outcome = match crate::paths::reject_symlinks(root, &file.relative_path, false)
+                .and_then(|()| check_file(&target, file))
+            {
                 Ok(outcome) => outcome,
                 Err(error) => CheckOutcome::IoError(error),
             };
@@ -229,6 +232,23 @@ mod tests {
             error,
             RestoreHelperError::IoError(io::ErrorKind::BrokenPipe)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_rejects_parent_symlinks() {
+        let root = testdir!();
+        let outside = root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("file"), b"abc").unwrap();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(outside, target.join("nested")).unwrap();
+        let summary = plan(vec![file("nested/file", Some(3), None)])
+            .check(target)
+            .unwrap();
+        assert_eq!(summary.errors, 1);
+        assert_eq!(summary.matching, 0);
     }
 
     #[cfg(unix)]
