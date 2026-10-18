@@ -200,17 +200,19 @@ fn plan(args: PlanArgs, verbosity: u8) -> Result<(), RestoreHelperError> {
     writer.flush()?;
 
     let no_source = plan.content_without_source();
-    eprintln!(
-        "WARN: Files without matching content source: {}",
-        no_source.len()
-    );
+    if !no_source.is_empty() {
+        eprintln!(
+            "WARN: Files without matching content source: {}",
+            no_source.len()
+        );
 
-    if verbosity > 0 && !no_source.is_empty() {
-        let stderr = io::stderr();
-        let mut out = io::BufWriter::new(stderr.lock());
+        if verbosity > 0 {
+            let stderr = io::stderr();
+            let mut out = io::BufWriter::new(stderr.lock());
 
-        for path in &no_source {
-            writeln!(out, "  {}", path.display()).unwrap();
+            for path in &no_source {
+                writeln!(out, "  {}", path.display()).unwrap();
+            }
         }
     }
 
