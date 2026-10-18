@@ -26,7 +26,7 @@ jobs:
             apt-get install --yes --no-install-recommends build-essential ca-certificates curl pkg-config
             curl --proto https --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal
             source "$HOME/.cargo/env"
-            cargo build --locked --release -p backup_helper -p checksum_helper_cli
+            cargo build --locked --release -p backup_helper -p checksum_helper_cli -p restore_helper
           '
 
       - name: Upload Linux executables
@@ -36,6 +36,7 @@ jobs:
           path: |
             target/release/backup_helper
             target/release/checksum_helper_cli
+            target/release/restore_helper
 
   windows:
     name: Build on Windows
@@ -49,7 +50,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Build release executables
-        run: cargo build --locked --release -p backup_helper -p checksum_helper_cli
+        run: cargo build --locked --release -p backup_helper -p checksum_helper_cli -p restore_helper
 
       - name: Upload Windows executables
         uses: actions/upload-artifact@v5
@@ -58,3 +59,4 @@ jobs:
           path: |
             target/release/backup_helper.exe
             target/release/checksum_helper_cli.exe
+            target/release/restore_helper.exe
