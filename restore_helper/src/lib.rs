@@ -14,7 +14,9 @@ pub enum RestoreHelperError {
     ManifestIdEmpty,
     ManifestDoesNotExist(path::PathBuf),
     ManifestIdDoesNotExist(String),
+    TargetIsDirectory(path::PathBuf),
     ChecksumHelperError(ChecksumHelperError),
+    CopyError(copy_helper::CopyError),
     IoError(std::io::ErrorKind),
     JsonError(serde_json::Error),
 }
@@ -31,7 +33,11 @@ impl std::fmt::Display for RestoreHelperError {
             Self::ManifestIdDoesNotExist(id) => {
                 write!(f, "manifest with ID '{}' does not exist", id)
             }
+            Self::TargetIsDirectory(path) => {
+                write!(f, "restore target is a directory: {}", path.display())
+            }
             Self::ChecksumHelperError(error) => write!(f, "{error}"),
+            Self::CopyError(error) => write!(f, "{error}"),
             Self::IoError(kind) => write!(f, "I/O error: {kind}"),
             Self::JsonError(error) => write!(f, "plan JSON error: {error}"),
         }
@@ -41,6 +47,12 @@ impl std::fmt::Display for RestoreHelperError {
 impl From<std::io::Error> for RestoreHelperError {
     fn from(value: std::io::Error) -> Self {
         RestoreHelperError::IoError(value.kind())
+    }
+}
+
+impl From<copy_helper::CopyError> for RestoreHelperError {
+    fn from(value: copy_helper::CopyError) -> Self {
+        Self::CopyError(value)
     }
 }
 

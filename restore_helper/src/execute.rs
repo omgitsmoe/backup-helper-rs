@@ -1,8 +1,17 @@
-use std::{fs::File, io::BufReader, path};
+use std::{
+    fs::{self, File},
+    io::{self, BufReader},
+    path,
+};
 
-use crate::{Mount, Plan, RestoreHelperError, plan::FileSource};
+use filetime::FileTime;
 
-#[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
+use crate::{
+    Mount, Plan, RestoreHelperError,
+    plan::{FileSource, RestoreFile},
+};
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum ExistingFilePolicy {
     /// Skip if a file that already exists.
     SkipAlways,
@@ -63,11 +72,42 @@ impl RestoreState {
             let source_path = self.select_source(&content.sources);
             if source_path.is_none() {
                 // no source available given the currently mounted sources
-                continue
+                continue;
             }
             let source_path = source_path.expect("checked above");
 
             let target_path = self.target.join(&file.relative_path);
+            let write_file = self.should_write_file(&target_path, file, existing_policy)?;
+            if !write_file {
+                continue;
+            }
+
+            let source_metadata = fs::metadata(&source_path)?;
+            if !source_metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "restore source is not a regular file: {}",
+                        source_path.display()
+                    ),
+                )
+                .into());
+            }
+            let mut metadata = copy_helper::preserved_metadata(&source_metadata)?;
+            if let Some(mtime) = file.mtime {
+                metadata.modified = mtime;
+            }
+
+            let parent = target_path.parent().expect("restore target has a parent");
+            fs::create_dir_all(parent)?;
+            copy_helper::copy_file(
+                &source_path,
+                &target_path,
+                &metadata,
+                Some(file.size.unwrap_or(source_metadata.len())),
+                "restore file",
+            )?;
+            copy_helper::sync_parent_directory(parent)?;
         }
 
         Ok(())
@@ -93,6 +133,46 @@ impl RestoreState {
 
         None
     }
+
+    fn should_write_file(
+        &self,
+        target: impl AsRef<path::Path>,
+        file: &RestoreFile,
+        existing_policy: ExistingFilePolicy,
+    ) -> Result<bool, RestoreHelperError> {
+        let target = target.as_ref();
+        let meta = match fs::symlink_metadata(target) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error.into()),
+        };
+
+        if meta.is_dir() {
+            return Err(RestoreHelperError::TargetIsDirectory(target.to_path_buf()));
+        }
+
+        if existing_policy == ExistingFilePolicy::SkipAlways {
+            return Ok(false);
+        }
+
+        if !meta.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("restore target is not a regular file: {}", target.display()),
+            )
+            .into());
+        }
+
+        if existing_policy == ExistingFilePolicy::SkipSameMetadata
+            && let (Some(size), Some(mtime)) = (file.size, file.mtime)
+            && meta.len() == size
+            && FileTime::from(meta.modified()?) == mtime
+        {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +194,265 @@ mod tests {
             "files": [],
         }))
         .unwrap()
+    }
+
+    const POLICIES: [ExistingFilePolicy; 3] = [
+        ExistingFilePolicy::SkipAlways,
+        ExistingFilePolicy::SkipSameMetadata,
+        ExistingFilePolicy::Overwrite,
+    ];
+
+    fn restore_file() -> RestoreFile {
+        RestoreFile {
+            hash_type: checksum_helper::hash_type::HashType::Sha256,
+            hash: String::new(),
+            size: Some(4),
+            mtime: Some(FileTime::from_unix_time(1234, 500_000_000)),
+            content: crate::plan::ContentHandle(0),
+            relative_path: "file.txt".into(),
+        }
+    }
+
+    fn state_with_file(root: &path::Path) -> RestoreState {
+        let manifest = root.join("target.cshd");
+        fs::write(&manifest, "# version 1\n1234.5,4,sha256,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef nested/file.txt\n").unwrap();
+        let plan = Plan::build(
+            &manifest,
+            vec![crate::Source::new("source", &manifest).unwrap()],
+        )
+        .unwrap();
+        RestoreState::new(
+            plan,
+            vec![Mount::new("source", root.join("source")).unwrap()],
+            root.join("target"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn execute_copies_nested_files_and_preserves_planned_mtime() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        let source = root.join("source/nested/file.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"data").unwrap();
+        let source_mtime = FileTime::from_unix_time(5678, 0);
+        filetime::set_file_mtime(&source, source_mtime).unwrap();
+        assert_ne!(Some(source_mtime), state.plan.files[0].mtime);
+        for policy in POLICIES {
+            state.execute(policy).unwrap();
+            let target = root.join("target/nested/file.txt");
+            assert_eq!(fs::read(&target).unwrap(), b"data");
+            assert_eq!(
+                FileTime::from_last_modification_time(&fs::metadata(&target).unwrap()),
+                state.plan.files[0].mtime.unwrap(),
+            );
+            fs::remove_file(target).unwrap();
+        }
+    }
+
+    #[test]
+    fn execute_preserves_source_mtime_when_manifest_has_none() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        state.plan.files[0].mtime = None;
+        let source = root.join("source/nested/file.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"data").unwrap();
+        let source_mtime = FileTime::from_unix_time(5678, 0);
+        filetime::set_file_mtime(&source, source_mtime).unwrap();
+
+        for policy in POLICIES {
+            state.execute(policy).unwrap();
+            let target = root.join("target/nested/file.txt");
+            assert_eq!(fs::read(&target).unwrap(), b"data");
+            assert_eq!(
+                FileTime::from_last_modification_time(&fs::metadata(&target).unwrap()),
+                source_mtime,
+            );
+            fs::remove_file(target).unwrap();
+        }
+    }
+
+    #[test]
+    fn execute_propagates_missing_source_error() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        fs::create_dir_all(root.join("source/nested")).unwrap();
+        for policy in POLICIES {
+            assert!(matches!(
+                state.execute(policy),
+                Err(RestoreHelperError::IoError(ErrorKind::NotFound))
+            ));
+            assert!(!root.join("target").exists());
+        }
+    }
+
+    #[test]
+    fn execute_rejects_directory_source() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        fs::create_dir_all(root.join("source/nested/file.txt")).unwrap();
+        for policy in POLICIES {
+            assert!(matches!(
+                state.execute(policy),
+                Err(RestoreHelperError::IoError(ErrorKind::InvalidInput))
+            ));
+            assert!(!root.join("target").exists());
+        }
+    }
+
+    #[test]
+    fn execute_obeys_existing_file_policy() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        let source = root.join("source/nested/file.txt");
+        let target = root.join("target/nested/file.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(source, b"data").unwrap();
+        for policy in POLICIES {
+            for same_metadata in [true, false] {
+                fs::write(&target, b"keep").unwrap();
+                let mtime = if same_metadata {
+                    state.plan.files[0].mtime.unwrap()
+                } else {
+                    FileTime::from_unix_time(1, 0)
+                };
+                filetime::set_file_mtime(&target, mtime).unwrap();
+                state.execute(policy).unwrap();
+                let skipped = policy == ExistingFilePolicy::SkipAlways
+                    || (policy == ExistingFilePolicy::SkipSameMetadata && same_metadata);
+                assert_eq!(
+                    fs::read(&target).unwrap(),
+                    if skipped { b"keep" } else { b"data" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn execute_propagates_copy_failure_without_replacing_existing_file() {
+        let root = testdir!();
+        let mut state = state_with_file(&root);
+        let source = root.join("source/nested/file.txt");
+        let target = root.join("target/nested/file.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(source, b"wrong size").unwrap();
+        fs::write(&target, b"keep").unwrap();
+        assert!(matches!(
+            state.execute(ExistingFilePolicy::Overwrite),
+            Err(RestoreHelperError::CopyError(_))
+        ));
+        assert_eq!(fs::read(target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn missing_targets_are_writable_under_every_policy() {
+        let root = testdir!();
+        let state = RestoreState::new(plan_with_sources(&[]), vec![], &root).unwrap();
+        for target in [root.join("missing"), root.join("missing-parent/file")] {
+            for policy in POLICIES {
+                assert!(
+                    state
+                        .should_write_file(&target, &restore_file(), policy)
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn existing_regular_file_obeys_policy_and_requires_complete_matching_metadata() {
+        let root = testdir!();
+        let target = root.join("file.txt");
+        fs::write(&target, b"data").unwrap();
+        let state = RestoreState::new(plan_with_sources(&[]), vec![], &root).unwrap();
+        let mut file = restore_file();
+        filetime::set_file_mtime(&target, file.mtime.unwrap()).unwrap();
+
+        for (size, mtime, matches) in [
+            (file.size, file.mtime, true),
+            (Some(5), file.mtime, false),
+            (
+                file.size,
+                Some(FileTime::from_unix_time(1234, 500_000_001)),
+                false,
+            ),
+            (None, file.mtime, false),
+            (file.size, None, false),
+            (None, None, false),
+        ] {
+            file.size = size;
+            file.mtime = mtime;
+            for policy in POLICIES {
+                let expected = match policy {
+                    ExistingFilePolicy::SkipAlways => false,
+                    ExistingFilePolicy::SkipSameMetadata => !matches,
+                    ExistingFilePolicy::Overwrite => true,
+                };
+                assert_eq!(
+                    state.should_write_file(&target, &file, policy).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn directory_is_rejected_under_every_policy() {
+        let root = testdir!();
+        let state = RestoreState::new(plan_with_sources(&[]), vec![], &root).unwrap();
+        for policy in POLICIES {
+            let result = state.should_write_file(&root, &restore_file(), policy);
+            assert!(matches!(
+                result,
+                Err(RestoreHelperError::TargetIsDirectory(path)) if path == root
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_skipped_or_rejected_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let root = testdir!();
+        let state = RestoreState::new(plan_with_sources(&[]), vec![], &root).unwrap();
+        let regular = root.join("regular");
+        fs::write(&regular, b"data").unwrap();
+        let link = root.join("link");
+        for destination in [&regular, &root, &root.join("missing"), &link] {
+            symlink(destination, &link).unwrap();
+            for policy in POLICIES {
+                let result = state.should_write_file(&link, &restore_file(), policy);
+                if policy == ExistingFilePolicy::SkipAlways {
+                    assert!(!result.unwrap());
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(RestoreHelperError::IoError(ErrorKind::InvalidInput))
+                    ));
+                }
+            }
+            fs::remove_file(&link).unwrap();
+        }
+        assert_eq!(fs::read(&regular).unwrap(), b"data");
+    }
+
+    #[test]
+    fn metadata_errors_are_propagated_under_every_policy() {
+        let root = testdir!();
+        let target = root.join("file.txt");
+        fs::write(&target, b"data").unwrap();
+        let state = RestoreState::new(plan_with_sources(&[]), vec![], &root).unwrap();
+        for policy in POLICIES {
+            assert!(matches!(
+                state.should_write_file(target.join("child"), &restore_file(), policy),
+                Err(RestoreHelperError::IoError(ErrorKind::NotADirectory))
+            ));
+        }
     }
 
     #[test]
