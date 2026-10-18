@@ -109,7 +109,15 @@ impl RestoreState {
         for file in &self.plan.files {
             let content = &self.plan.contents[file.content.0];
             let target_path = self.target.join(&file.relative_path);
-            crate::paths::reject_symlinks(&self.target, &file.relative_path, false)?;
+            crate::paths::reject_symlinks(&self.target, &file.relative_path, false).map_err(
+                |error| {
+                    RestoreHelperError::path_io(
+                        "validate destination parents for",
+                        &target_path,
+                        error,
+                    )
+                },
+            )?;
             let Some((source, source_path)) = self.select_source(&content.sources) else {
                 progress(ExecuteProgress::Skipped {
                     target: &target_path,
@@ -149,8 +157,12 @@ impl RestoreState {
             let mount = self.mounts[source.manifest_handle.0]
                 .as_ref()
                 .expect("selected source is mounted");
-            crate::paths::reject_symlinks(mount, &source.relative_path, true)?;
-            let source_metadata = fs::metadata(&source_path)?;
+            crate::paths::reject_symlinks(mount, &source.relative_path, true).map_err(|error| {
+                RestoreHelperError::path_io("validate source", &source_path, error)
+            })?;
+            let source_metadata = fs::metadata(&source_path).map_err(|error| {
+                RestoreHelperError::path_io("read source metadata", &source_path, error)
+            })?;
             if !source_metadata.is_file() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -161,13 +173,18 @@ impl RestoreState {
                 )
                 .into());
             }
-            let mut metadata = copy_helper::preserved_metadata(&source_metadata)?;
+            let mut metadata =
+                copy_helper::preserved_metadata(&source_metadata).map_err(|error| {
+                    RestoreHelperError::path_io("read source timestamps", &source_path, error)
+                })?;
             if let Some(mtime) = file.mtime {
                 metadata.modified = mtime;
             }
 
             let parent = target_path.parent().expect("restore target has a parent");
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|error| {
+                RestoreHelperError::path_io("create destination directory", parent, error)
+            })?;
             let total = file.size.unwrap_or(source_metadata.len());
             progress(ExecuteProgress::CopyStarted {
                 target: &target_path,
@@ -183,7 +200,9 @@ impl RestoreState {
                 "restore file",
                 |copied| progress(ExecuteProgress::CopyBytes { copied, total }),
             )?;
-            copy_helper::sync_parent_directory(parent)?;
+            copy_helper::sync_parent_directory(parent).map_err(|error| {
+                RestoreHelperError::path_io("synchronize destination directory", parent, error)
+            })?;
             progress(ExecuteProgress::Copied { bytes })?;
         }
 
@@ -225,7 +244,13 @@ impl RestoreState {
         let meta = match fs::symlink_metadata(target) {
             Ok(meta) => meta,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(RestoreHelperError::path_io(
+                    "read destination metadata",
+                    target,
+                    error,
+                ));
+            }
         };
 
         if meta.is_dir() {
@@ -247,7 +272,9 @@ impl RestoreState {
         if existing_policy == ExistingFilePolicy::SkipSameMetadata
             && let (Some(size), Some(mtime)) = (file.size, file.mtime)
             && meta.len() == size
-            && FileTime::from(meta.modified()?) == mtime
+            && FileTime::from(meta.modified().map_err(|error| {
+                RestoreHelperError::path_io("read destination timestamp", target, error)
+            })?) == mtime
         {
             return Ok(false);
         }
@@ -506,7 +533,7 @@ mod tests {
         for policy in POLICIES {
             assert!(matches!(
                 state.execute(policy),
-                Err(RestoreHelperError::IoError(ErrorKind::NotFound))
+                Err(RestoreHelperError::PathIoError { source, .. }) if source.kind() == ErrorKind::NotFound
             ));
             assert!(!root.join("target").exists());
         }
@@ -520,7 +547,7 @@ mod tests {
         for policy in POLICIES {
             assert!(matches!(
                 state.execute(policy),
-                Err(RestoreHelperError::IoError(ErrorKind::InvalidInput))
+                Err(RestoreHelperError::IoError(error)) if error.kind() == ErrorKind::InvalidInput
             ));
             assert!(!root.join("target").exists());
         }
@@ -656,7 +683,7 @@ mod tests {
                 } else {
                     assert!(matches!(
                         result,
-                        Err(RestoreHelperError::IoError(ErrorKind::InvalidInput))
+                        Err(RestoreHelperError::IoError(error)) if error.kind() == ErrorKind::InvalidInput
                     ));
                 }
             }
@@ -673,7 +700,7 @@ mod tests {
         for policy in POLICIES {
             assert!(matches!(
                 state.should_write_file(&target, &restore_file(), policy),
-                Err(RestoreHelperError::IoError(ErrorKind::InvalidInput))
+                Err(RestoreHelperError::PathIoError { source, .. }) if source.kind() == ErrorKind::InvalidInput
             ));
         }
     }
@@ -802,7 +829,7 @@ mod tests {
 
         assert!(matches!(
             RestoreState::from_json(root.join("missing.json"), vec![], &root),
-            Err(RestoreHelperError::IoError(ErrorKind::NotFound))
+            Err(RestoreHelperError::PathIoError { source, .. }) if source.kind() == ErrorKind::NotFound
         ));
     }
 

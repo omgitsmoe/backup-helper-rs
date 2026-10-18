@@ -331,9 +331,9 @@ fn unavailable_content_is_reported_by_plan_and_skipped_by_execute() {
 #[test]
 fn source_failures_propagate_and_preserve_existing_destination() {
     for (case, diagnostic) in [
-        ("missing", "NotFound"),
-        ("directory", "InvalidInput"),
-        ("size", "CopyError"),
+        ("missing", "read source metadata"),
+        ("directory", "restore source is not a regular file"),
+        ("size", "Failed to copy"),
     ] {
         let root = testdir!().join(case);
         fs::create_dir_all(&root).unwrap();
@@ -375,7 +375,10 @@ fn directory_target_errors_under_every_policy() {
         let target = root.join("restored/docs/deep/same.txt");
         fs::create_dir_all(&target).unwrap();
         write_file(&target.join("keep.txt"), b"keep", 888);
-        failure(execute(&root, policy, &["a=a", "b=b"]), "TargetIsDirectory");
+        failure(
+            execute(&root, policy, &["a=a", "b=b"]),
+            "restore target is a directory",
+        );
         assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
     }
 }
@@ -397,7 +400,7 @@ fn symlink_target_is_skipped_or_rejected_without_touching_referent() {
         if policy == "skip-always" {
             success(output);
         } else {
-            failure(output, "InvalidInput");
+            failure(output, "restore target is not a regular file");
         }
         assert_eq!(fs::read_link(target).unwrap(), referent);
         assert_eq!(fs::read(referent).unwrap(), b"keep");

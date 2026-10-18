@@ -31,7 +31,9 @@ fn execute_reports_missing_plan() {
     let output = run_execute(&root, "archive=source");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("IoError"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("open restore plan"));
+    assert!(stderr.contains("plan.json"));
 }
 
 #[test]
@@ -41,7 +43,7 @@ fn execute_reports_invalid_plan_json() {
     let output = run_execute(&root, "archive=source");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("JsonError"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("plan JSON error"));
 }
 
 #[test]
@@ -56,7 +58,7 @@ fn execute_reports_unknown_mount_id() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("ManifestIdDoesNotExist"));
+    assert!(stderr.contains("does not exist"));
     assert!(stderr.contains("unknown"));
 }
 
@@ -131,6 +133,25 @@ fn redirected_execute_reports_selected_source_all_skips_and_summary() {
 }
 
 #[test]
+fn missing_source_diagnostic_identifies_operation_and_path() {
+    let root = testdir!();
+    progress_fixture(&root);
+    fs::remove_file(root.join("source/copy.txt")).unwrap();
+    let output = run_execute(&root, "archive=source");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to read source metadata"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&Path::new("source").join("copy.txt").display().to_string()),
+        "{stderr}"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Summary (incomplete)"));
+}
+
+#[test]
 fn failed_execute_reports_partial_summary_and_stops() {
     let root = testdir!();
     progress_fixture(&root);
@@ -140,6 +161,6 @@ fn failed_execute_reports_partial_summary_and_stops() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Summary (incomplete): 0 copied (0 bytes)"));
     assert!(stdout.contains("1 failed"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("CopyError"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Failed to copy"));
     assert!(!root.join("restored/copy.txt").exists());
 }

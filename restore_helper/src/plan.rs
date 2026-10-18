@@ -155,7 +155,11 @@ mod optional_filetime_serde {
 
 impl Plan {
     pub fn from_json(plan: impl AsRef<path::Path>) -> Result<Self, RestoreHelperError> {
-        let reader = std::io::BufReader::new(fs::File::open(plan)?);
+        let plan = plan.as_ref();
+        let reader = std::io::BufReader::new(
+            fs::File::open(plan)
+                .map_err(|error| RestoreHelperError::path_io("open restore plan", plan, error))?,
+        );
         Ok(serde_json::from_reader(reader)?)
     }
 
@@ -164,7 +168,9 @@ impl Plan {
         sources: Vec<Source>,
     ) -> Result<Plan, RestoreHelperError> {
         let restore_manifest = restore_manifest.as_ref();
-        if !fs::exists(restore_manifest)? {
+        if !fs::exists(restore_manifest).map_err(|error| {
+            RestoreHelperError::path_io("access restore manifest", restore_manifest, error)
+        })? {
             return Err(RestoreHelperError::ManifestDoesNotExist(
                 restore_manifest.to_path_buf(),
             ));
@@ -216,7 +222,9 @@ impl Plan {
         }
 
         for source in sources {
-            if !fs::exists(&source.manifest)? {
+            if !fs::exists(&source.manifest).map_err(|error| {
+                RestoreHelperError::path_io("access source manifest", &source.manifest, error)
+            })? {
                 return Err(RestoreHelperError::ManifestDoesNotExist(source.manifest));
             }
             let source_handle = ManifestHandle(plan.source_manifests.len());
@@ -569,7 +577,7 @@ mod tests {
             Plan::build(&valid, vec![source("loop", &looping)]),
         ] {
             assert!(
-                matches!(result, Err(RestoreHelperError::IoError(kind)) if kind == expected_kind)
+                matches!(result, Err(RestoreHelperError::PathIoError { source, .. }) if source.kind() == expected_kind)
             );
         }
     }

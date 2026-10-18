@@ -230,7 +230,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            RestoreHelperError::IoError(io::ErrorKind::BrokenPipe)
+            RestoreHelperError::IoError(error) if error.kind() == io::ErrorKind::BrokenPipe
         ));
     }
 

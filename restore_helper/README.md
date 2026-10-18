@@ -68,6 +68,10 @@ and files not processed. Execution errors produce an incomplete summary before
 the error is returned. Plan-loading or CLI argument errors happen before
 execution and do not produce execution totals.
 
+File I/O diagnostics include the operation, affected path, and original OS error.
+The library retains the underlying `std::io::Error` in `IoError` or `PathIoError`
+and exposes it through `std::error::Error::source`.
+
 ## Library progress
 
 `RestoreState::execute_with_progress(policy, callback)` emits `ExecuteProgress`

@@ -101,7 +101,17 @@ struct CheckArgs {
     target: path::PathBuf,
 }
 
-fn main() -> std::result::Result<(), RestoreHelperError> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> std::result::Result<(), RestoreHelperError> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -178,7 +188,13 @@ fn execute(args: ExecuteArgs) -> Result<(), RestoreHelperError> {
 
 fn plan(args: PlanArgs, verbosity: u8) -> Result<(), RestoreHelperError> {
     let plan = restore_helper::Plan::build(path::absolute(args.restore_manifest)?, args.sources)?;
-    let mut writer = BufWriter::new(File::create_new(args.output)?);
+    let mut writer = BufWriter::new(File::create_new(&args.output).map_err(|source| {
+        RestoreHelperError::PathIoError {
+            operation: "create restore plan",
+            path: args.output.clone(),
+            source,
+        }
+    })?);
     serde_json::to_writer_pretty(&mut writer, &plan)?;
     writeln!(writer)?;
     writer.flush()?;
