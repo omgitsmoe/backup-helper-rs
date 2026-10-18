@@ -444,13 +444,12 @@ mod tests {
     #[test]
     fn metadata_errors_are_propagated_under_every_policy() {
         let root = testdir!();
-        let target = root.join("file.txt");
-        fs::write(&target, b"data").unwrap();
+        let target = root.join("invalid\0path");
         let state = RestoreState::new(plan_with_sources(&[]), vec![], &root).unwrap();
         for policy in POLICIES {
             assert!(matches!(
-                state.should_write_file(target.join("child"), &restore_file(), policy),
-                Err(RestoreHelperError::IoError(ErrorKind::NotADirectory))
+                state.should_write_file(&target, &restore_file(), policy),
+                Err(RestoreHelperError::IoError(ErrorKind::InvalidInput))
             ));
         }
     }
